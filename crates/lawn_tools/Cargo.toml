@@ -1,0 +1,15 @@
+[package]
+name = "lawn_tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+lawn_core = { path = "../lawn_core" }
+serde_json.workspace = true
+
+[lints]
+workspace = true
+

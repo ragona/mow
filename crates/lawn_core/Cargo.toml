@@ -1,0 +1,22 @@
+[package]
+name = "lawn_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+rapier3d.workspace = true
+ron.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

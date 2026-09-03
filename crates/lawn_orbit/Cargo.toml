@@ -1,0 +1,28 @@
+[package]
+name = "lawn_orbit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+directories.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+gilrs.workspace = true
+glam.workspace = true
+kira.workspace = true
+lawn_core = { path = "../lawn_core" }
+lawn_render = { path = "../lawn_render" }
+pollster.workspace = true
+ron.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+web-time.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true

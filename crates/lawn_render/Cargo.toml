@@ -1,0 +1,22 @@
+[package]
+name = "lawn_render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+lawn_core = { path = "../lawn_core" }
+tracing.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+naga = { version = "29.0.0", features = ["wgsl-in"] }
+
+[lints]
+workspace = true
