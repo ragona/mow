@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use lawn_core::{
     cube_map::{CubeFace, direction_to_cell, face_uv_to_direction},
     planet::{Planet, SurfaceMaterial},
@@ -141,54 +141,297 @@ pub fn build_vehicle(
     mower_enabled: bool,
     elapsed_seconds: f32,
 ) -> (Vec<MeshVertex>, Vec<u32>) {
-    let mut vertices = Vec::with_capacity(80);
-    let mut indices = Vec::with_capacity(120);
-    add_box(
+    const HOVER_PADS: [(f32, f32); 4] = [
+        (-0.76, -0.76),
+        (0.76, -0.76),
+        (-0.76, 0.76),
+        (0.76, 0.76),
+    ];
+
+    let mut vertices = Vec::with_capacity(720);
+    let mut indices = Vec::with_capacity(1_800);
+
+    // A dark lower skirt makes the orange shell read as a separate, floating
+    // chassis instead of one monolithic cube.
+    add_chamfered_frustum(
         &mut vertices,
         &mut indices,
         transform,
-        Vec3::new(0.0, 0.05, 0.0),
-        Vec3::new(1.05, 0.36, 1.05),
+        Vec3::new(0.0, -0.08, 0.0),
+        Vec2::splat(0.82),
+        Vec2::splat(0.74),
+        0.2,
+        0.2,
+        4,
+    );
+    add_chamfered_frustum(
+        &mut vertices,
+        &mut indices,
+        transform,
+        Vec3::new(0.0, 0.18, 0.0),
+        Vec2::splat(0.79),
+        Vec2::splat(0.65),
+        0.27,
+        0.19,
         2,
     );
-    add_box(
+    add_chamfered_frustum(
         &mut vertices,
         &mut indices,
         transform,
-        Vec3::new(0.0, 0.42, 0.0),
-        Vec3::new(0.68, 0.27, 0.68),
+        Vec3::new(0.0, 0.5, 0.0),
+        Vec2::splat(0.57),
+        Vec2::splat(0.42),
+        0.16,
+        0.14,
         3,
     );
+    add_cylinder(
+        &mut vertices,
+        &mut indices,
+        transform,
+        Vec3::new(0.0, 0.685, 0.0),
+        0.29,
+        0.035,
+        12,
+        2,
+    );
+
     // The omnidirectional mower deck sits directly beneath the chassis.
-    add_box(
+    add_cylinder(
         &mut vertices,
         &mut indices,
         transform,
         Vec3::new(
             0.0,
-            -0.3 + if mower_enabled {
+            -0.315
+                + if mower_enabled {
                 (elapsed_seconds * 57.0).sin() * 0.018
             } else {
                 0.0
             },
             0.0,
         ),
-        Vec3::new(1.1, 0.08, 1.1),
+        1.04,
+        0.055,
+        14,
         if mower_enabled { 7 } else { 4 },
     );
-    for side in [-0.72_f32, 0.72] {
-        for longitudinal in [-0.68_f32, 0.68] {
-            add_box(
-                &mut vertices,
-                &mut indices,
-                transform,
-                Vec3::new(side, -0.31, longitudinal),
-                Vec3::new(0.22, 0.06, 0.24),
-                5,
-            );
-        }
+
+    for (index, (side, longitudinal)) in HOVER_PADS.into_iter().enumerate() {
+        // Short outriggers visually connect each independently readable pad to
+        // the central chassis without privileging a front direction.
+        add_box(
+            &mut vertices,
+            &mut indices,
+            transform,
+            Vec3::new(side * 0.73, -0.13, longitudinal),
+            Vec3::new(0.24, 0.065, 0.09),
+            4,
+        );
+        add_cylinder(
+            &mut vertices,
+            &mut indices,
+            transform,
+            Vec3::new(side, -0.22, longitudinal),
+            0.31,
+            0.115,
+            10,
+            4,
+        );
+        let pulse = 1.0 + (elapsed_seconds * 5.0 + index as f32 * 1.7).sin() * 0.025;
+        add_cylinder(
+            &mut vertices,
+            &mut indices,
+            transform,
+            Vec3::new(side, -0.355, longitudinal),
+            0.25 * pulse,
+            0.055,
+            10,
+            5,
+        );
     }
     (vertices, indices)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_chamfered_frustum(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    transform: VehicleTransform,
+    center: Vec3,
+    bottom_half: Vec2,
+    top_half: Vec2,
+    half_height: f32,
+    chamfer: f32,
+    material: u32,
+) {
+    let bottom = chamfered_ring(bottom_half, chamfer);
+    let top = chamfered_ring(top_half, chamfer.min(top_half.min_element() * 0.8));
+    for index in 0..8 {
+        let next = (index + 1) % 8;
+        let bottom_left = center + Vec3::new(bottom[index].x, -half_height, bottom[index].y);
+        let bottom_right = center + Vec3::new(bottom[next].x, -half_height, bottom[next].y);
+        let top_left = center + Vec3::new(top[index].x, half_height, top[index].y);
+        let top_right = center + Vec3::new(top[next].x, half_height, top[next].y);
+        let normal = (top_left - bottom_left)
+            .cross(bottom_right - bottom_left)
+            .normalize();
+        let start = vertices.len() as u32;
+        for local in [bottom_left, bottom_right, top_left, top_right] {
+            push_model_vertex(vertices, transform, local, normal, material);
+        }
+        indices.extend_from_slice(&[
+            start,
+            start + 1,
+            start + 2,
+            start + 1,
+            start + 3,
+            start + 2,
+        ]);
+    }
+    add_ring_cap(
+        vertices,
+        indices,
+        transform,
+        center + Vec3::Y * half_height,
+        &top,
+        Vec3::Y,
+        material,
+    );
+    add_ring_cap(
+        vertices,
+        indices,
+        transform,
+        center - Vec3::Y * half_height,
+        &bottom,
+        Vec3::NEG_Y,
+        material,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_cylinder(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    transform: VehicleTransform,
+    center: Vec3,
+    radius: f32,
+    half_height: f32,
+    segments: usize,
+    material: u32,
+) {
+    debug_assert!(segments >= 3);
+    let side_start = vertices.len() as u32;
+    let mut ring = Vec::with_capacity(segments);
+    for index in 0..segments {
+        let angle = index as f32 * std::f32::consts::TAU / segments as f32;
+        let radial = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let offset = radial * radius;
+        ring.push(Vec2::new(offset.x, offset.z));
+        push_model_vertex(
+            vertices,
+            transform,
+            center + offset - Vec3::Y * half_height,
+            radial,
+            material,
+        );
+        push_model_vertex(
+            vertices,
+            transform,
+            center + offset + Vec3::Y * half_height,
+            radial,
+            material,
+        );
+    }
+    for index in 0..segments {
+        let next = (index + 1) % segments;
+        let bottom = side_start + (index * 2) as u32;
+        let top = bottom + 1;
+        let next_bottom = side_start + (next * 2) as u32;
+        let next_top = next_bottom + 1;
+        indices.extend_from_slice(&[bottom, next_bottom, top, next_bottom, next_top, top]);
+    }
+    add_ring_cap(
+        vertices,
+        indices,
+        transform,
+        center + Vec3::Y * half_height,
+        &ring,
+        Vec3::Y,
+        material,
+    );
+    add_ring_cap(
+        vertices,
+        indices,
+        transform,
+        center - Vec3::Y * half_height,
+        &ring,
+        Vec3::NEG_Y,
+        material,
+    );
+}
+
+fn chamfered_ring(half: Vec2, chamfer: f32) -> [Vec2; 8] {
+    let chamfer = chamfer.clamp(0.0, half.min_element());
+    [
+        Vec2::new(-half.x + chamfer, -half.y),
+        Vec2::new(half.x - chamfer, -half.y),
+        Vec2::new(half.x, -half.y + chamfer),
+        Vec2::new(half.x, half.y - chamfer),
+        Vec2::new(half.x - chamfer, half.y),
+        Vec2::new(-half.x + chamfer, half.y),
+        Vec2::new(-half.x, half.y - chamfer),
+        Vec2::new(-half.x, -half.y + chamfer),
+    ]
+}
+
+fn add_ring_cap(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    transform: VehicleTransform,
+    center: Vec3,
+    ring: &[Vec2],
+    normal: Vec3,
+    material: u32,
+) {
+    let start = vertices.len() as u32;
+    push_model_vertex(vertices, transform, center, normal, material);
+    for point in ring {
+        push_model_vertex(
+            vertices,
+            transform,
+            center + Vec3::new(point.x, 0.0, point.y),
+            normal,
+            material,
+        );
+    }
+    for index in 0..ring.len() {
+        let current = start + 1 + index as u32;
+        let next = start + 1 + ((index + 1) % ring.len()) as u32;
+        if normal.y > 0.0 {
+            indices.extend_from_slice(&[start, current, next]);
+        } else {
+            indices.extend_from_slice(&[start, next, current]);
+        }
+    }
+}
+
+fn push_model_vertex(
+    vertices: &mut Vec<MeshVertex>,
+    transform: VehicleTransform,
+    local: Vec3,
+    normal: Vec3,
+    material: u32,
+) {
+    let world = transform.position + transform.rotation.mul_vec3(local);
+    let world_normal = transform.rotation.mul_vec3(normal).normalize();
+    vertices.push(MeshVertex {
+        position: world.to_array(),
+        normal: world_normal.to_array(),
+        material,
+        variation: 0.5,
+    });
 }
 
 fn add_box(
