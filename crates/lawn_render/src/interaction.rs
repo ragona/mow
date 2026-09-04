@@ -5,6 +5,11 @@ use wgpu::util::DeviceExt;
 
 pub const INTERACTION_RESOLUTION: u32 = 128;
 const MAX_FORCE_SOURCES: usize = 16;
+const INTERACTION_STIFFNESS: f32 = 16.0;
+const INTERACTION_DAMPING: f32 = 8.0;
+// Below a slow walking pace, travel bias fades into an outward stationary wash.
+// Normalizing residual hover velocity gives numerical jitter a full-strength wake.
+const WASH_DIRECTION_SPEED: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 #[repr(C)]
@@ -47,7 +52,13 @@ impl GrassInteraction {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents: bytemuck::cast_slice(&zeroes),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | if cfg!(test) {
+                        wgpu::BufferUsages::COPY_SRC
+                    } else {
+                        wgpu::BufferUsages::empty()
+                    },
             })
         };
         let displacement = [
@@ -161,10 +172,10 @@ impl GrassInteraction {
             time: elapsed_seconds,
             source_count: sources.len() as u32,
             resolution: INTERACTION_RESOLUTION,
-            // Deliberately broad, forceful wash: nearby tall grass should
-            // visibly flatten and rebound instead of merely trembling.
-            stiffness: 18.0,
-            damping: 5.5,
+            // Critical damping lets the rotor pressure roll through the grass
+            // and settle without springing backwards as the mower stops.
+            stiffness: INTERACTION_STIFFNESS,
+            damping: INTERACTION_DAMPING,
             planet_radius: self.planet_radius,
             maximum_displacement: 1.45,
         };
@@ -244,7 +255,8 @@ fn force_sources(planet: &Planet, vehicle: &VehicleState, mower_width: f32) -> [
     let right = transform.forward.cross(transform.up).normalize();
     let tangent_velocity =
         vehicle.linear_velocity - transform.up * vehicle.linear_velocity.dot(transform.up);
-    let velocity_direction = tangent_velocity.try_normalize().unwrap_or(Vec3::ZERO);
+    let speed = tangent_velocity.length();
+    let travel_bias = tangent_velocity / speed.max(WASH_DIRECTION_SPEED);
     let mut result = [ForceSourceGpu::zeroed(); 7];
     let mut wheel_index = 0;
     for forward_offset in [-0.72_f32, 0.72] {
@@ -252,25 +264,20 @@ fn force_sources(planet: &Planet, vehicle: &VehicleState, mower_width: f32) -> [
             let position =
                 transform.position + transform.forward * forward_offset + right * side_offset
                     - transform.up * 0.45;
-            result[wheel_index] = source(position, 2.4, -velocity_direction * 0.45, 12.0);
+            result[wheel_index] = source(position, 2.8, -travel_bias * 0.35, 12.0);
             wheel_index += 1;
         }
     }
     result[4] = source(
         transform.position - transform.up * 0.35,
-        4.0,
-        -velocity_direction * 1.4,
-        14.0 + tangent_velocity.length() * 0.45,
+        4.8,
+        -travel_bias * 1.15,
+        14.0 + speed * 0.45,
     );
     let deck = transform.position - transform.up * 0.58;
-    result[5] = source(deck, mower_width * 1.25, -velocity_direction * 0.6, 20.0);
-    let wake_position = transform.position - velocity_direction * 2.2;
-    result[6] = source(
-        wake_position,
-        5.5,
-        -velocity_direction * 2.4,
-        tangent_velocity.length() * 0.65,
-    );
+    result[5] = source(deck, mower_width * 1.25, -travel_bias * 0.45, 20.0);
+    let wake_position = transform.position - travel_bias * 2.2;
+    result[6] = source(wake_position, 6.0, -travel_bias * 2.0, speed * 0.65);
     for source in &mut result {
         let direction =
             Vec3::from_array(source.position_radius[..3].try_into().unwrap()).normalize();
@@ -311,7 +318,7 @@ mod tests {
         assert_eq!(sources.len(), 7);
         assert!(sources[..4].iter().all(|source| {
             (source.direction_strength[3] - 12.0).abs() < f32::EPSILON
-                && (source.position_radius[3] - 2.4).abs() < f32::EPSILON
+                && (source.position_radius[3] - 2.8).abs() < f32::EPSILON
         }));
         let central = sources[4];
         let mower = sources[5];
@@ -339,4 +346,58 @@ mod tests {
             assert!((point.length() - planet.config.base_radius).abs() < 1.0e-4);
         }
     }
+
+    #[test]
+    fn stopping_wash_fades_continuously_through_velocity_reversals() {
+        let planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(WorldSeed(21), false)
+                .unwrap();
+        let mut vehicle = VehicleState::at_spawn(planet.spawn, &VehicleTuning::default());
+        let stationary = force_sources(&planet, &vehicle, 2.2);
+        for speed in [-0.5_f32, -0.05, -1.0e-6, 0.0, 1.0e-6, 0.05, 0.5, 2.0, 12.0] {
+            vehicle.linear_velocity = vehicle.transform.forward * speed;
+            let moving = force_sources(&planet, &vehicle, 2.2);
+            let bias = Vec3::from_slice(&moving[4].direction_strength[..3]);
+            // The body wash must become negligible near zero, not jump to a
+            // full unit vector when the hover suspension changes velocity sign.
+            assert!(
+                bias.length() <= (speed.abs() / WASH_DIRECTION_SPEED).min(1.0) * 1.151 + 1.0e-6
+            );
+            assert!(bias.dot(vehicle.linear_velocity) <= 1.0e-6);
+            if speed.abs() < 1.0e-5 {
+                let wake = Vec3::from_slice(&moving[6].position_radius[..3]);
+                let resting_wake = Vec3::from_slice(&stationary[6].position_radius[..3]);
+                assert!(wake.distance(resting_wake) < 1.0e-4);
+                assert!(moving[6].direction_strength[3] < 1.0e-5);
+            }
+            if speed.abs() >= WASH_DIRECTION_SPEED {
+                assert!(bias.length() > 1.1, "cruising must retain a strong wake");
+            }
+        }
+    }
+
+    #[test]
+    fn radial_hover_motion_does_not_redirect_the_wash() {
+        let planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(WorldSeed(21), false)
+                .unwrap();
+        let mut vehicle = VehicleState::at_spawn(planet.spawn, &VehicleTuning::default());
+        for speed in [0.0, 3.0] {
+            vehicle.linear_velocity = vehicle.transform.forward * speed;
+            let level = force_sources(&planet, &vehicle, 2.2);
+            vehicle.linear_velocity += vehicle.transform.up * 4.0;
+            let bouncing = force_sources(&planet, &vehicle, 2.2);
+            for (a, b) in level.iter().zip(bouncing.iter()) {
+                for (a, b) in a.direction_strength.iter().zip(b.direction_strength.iter()) {
+                    assert!((a - b).abs() < 1.0e-5);
+                }
+            }
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "interaction_gpu_tests.rs"]
+mod gpu_tests;

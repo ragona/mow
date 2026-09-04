@@ -56,22 +56,40 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Almost every cell is outside the small source disks. Avoid square
         // roots, normalization, and spring forcing for those sources.
         if (distance_squared >= radius * radius) { continue; }
-        let falloff = 1.0 - smoothstep(0.0, radius, sqrt(distance_squared));
-        let radial = normalize(delta - normal * dot(delta, normal) + vec3<f32>(0.00001));
+        let distance = sqrt(distance_squared);
+        let falloff = 1.0 - smoothstep(0.0, radius, distance);
+        let tangent_delta = delta - normal * dot(delta, normal);
+        // A broad soft core has no preferred direction at the center. The old
+        // normalization turned tiny center crossings into a full-force flip.
+        let core = radius * 0.20;
+        let radial = tangent_delta * inverseSqrt(dot(tangent_delta, tangent_delta) + core * core);
         let directed = source.direction_strength.xyz - normal * dot(source.direction_strength.xyz, normal);
-        applied += (radial + directed) * source.direction_strength.w * falloff;
+        // Coherent pressure rings travel outward, always pushing outward. A
+        // small swirl gives a stationary hover life without per-blade noise.
+        let pressure = 0.90 + 0.10 * sin(distance * 2.2 - params.time * 4.0);
+        let swirl = cross(normal, radial) * 0.09;
+        applied += (radial + swirl + directed) * source.direction_strength.w * falloff * pressure;
     }
     var displacement = displacement_in[index].xyz;
     var velocity = velocity_in[index].xyz;
-    let acceleration = applied - params.stiffness * displacement - params.damping * velocity;
-    velocity += acceleration * params.dt;
-    displacement += velocity * params.dt;
+    // Exact critically damped spring step for this frame's pressure. Unlike
+    // Euler integration it keeps the same soft response at 30, 60 and 120 Hz.
+    let equilibrium = applied / params.stiffness;
+    let omega = params.damping * 0.5;
+    let offset = displacement - equilibrium;
+    let spring_velocity = velocity + offset * omega;
+    let decay = exp(-omega * params.dt);
+    displacement = equilibrium + (offset + spring_velocity * params.dt) * decay;
+    velocity = (velocity - spring_velocity * (omega * params.dt)) * decay;
     velocity -= normal * dot(velocity, normal);
     displacement -= normal * dot(displacement, normal);
     let length_squared = dot(displacement, displacement);
     if (length_squared > params.maximum_displacement * params.maximum_displacement) {
-        displacement = normalize(displacement) * params.maximum_displacement;
-        velocity *= 0.5;
+        let limit_direction = normalize(displacement);
+        displacement = limit_direction * params.maximum_displacement;
+        // Preserve tangential movement around the limit, removing only the
+        // outward velocity that would repeatedly push through it.
+        velocity -= limit_direction * max(dot(velocity, limit_direction), 0.0);
     }
     displacement_out[index] = vec4<f32>(displacement, 0.0);
     velocity_out[index] = vec4<f32>(velocity, 0.0);

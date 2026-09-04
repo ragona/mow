@@ -88,6 +88,8 @@ cargo run --release -p lawn_tools -- validate 1000
 cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
 # Verifies bloom thresholding, blur, HDR color, and resize behavior by readback.
 cargo test -p lawn_render gpu_bloom -- --ignored --nocapture
+# Includes hover-wash stability and interpolation across every cube edge/corner.
+cargo test -p lawn_render gpu_ -- --ignored --nocapture
 ```
 
 The test suite exercises deterministic generation (including compact grass-root

@@ -70,13 +70,73 @@ fn sample_mowing(address: FaceUv) -> vec4<u32> {
     return textureLoad(mowing, pixel, i32(address.face), 0);
 }
 
-fn interaction_index(address: FaceUv) -> u32 {
-    let resolution = u32(frame.options.y);
-    let pixel = vec2<u32>(clamp(
-        floor((address.uv * 0.5 + vec2<f32>(0.5)) * f32(resolution)),
+fn interaction_face_direction(face: u32, uv: vec2<f32>) -> vec3<f32> {
+    switch face {
+        case 0u: { return vec3<f32>(1.0, uv.y, -uv.x); }
+        case 1u: { return vec3<f32>(-1.0, uv.y, uv.x); }
+        case 2u: { return vec3<f32>(uv.x, 1.0, -uv.y); }
+        case 3u: { return vec3<f32>(uv.x, -1.0, uv.y); }
+        case 4u: { return vec3<f32>(uv.x, uv.y, 1.0); }
+        default: { return vec3<f32>(-uv.x, uv.y, -1.0); }
+    }
+}
+
+fn interaction_cell(face: u32, pixel: vec2<i32>, resolution: u32) -> vec3<f32> {
+    let index = face * resolution * resolution + u32(pixel.y) * resolution + u32(pixel.x);
+    return interaction[index].xyz;
+}
+
+fn interaction_edge_cell(face: u32, pixel: vec2<i32>, resolution: u32) -> vec3<f32> {
+    // Extend the tap through the cube face, then find its neighboring cell.
+    // Displacements are world-space vectors, so their components need no rotation.
+    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * (2.0 / f32(resolution)) - vec2<f32>(1.0);
+    let direction = interaction_face_direction(face, uv);
+    let neighbor = direction_to_face_uv(direction);
+    // Unfold the edge instead of shrinking its along-edge coordinate with
+    // perspective division. Both incident faces then share identical taps.
+    let edge_scale = max(abs(direction.x), max(abs(direction.y), abs(direction.z)));
+    let mapped = vec2<i32>(clamp(
+        floor((neighbor.uv * edge_scale * 0.5 + vec2<f32>(0.5)) * f32(resolution)),
         vec2<f32>(0.0), vec2<f32>(f32(resolution - 1u))
     ));
-    return address.face * resolution * resolution + pixel.y * resolution + pixel.x;
+    return interaction_cell(neighbor.face, mapped, resolution);
+}
+
+fn interaction_tap(face: u32, pixel: vec2<i32>, resolution: u32) -> vec3<f32> {
+    let last = i32(resolution) - 1;
+    let outside = (pixel < vec2<i32>(0)) | (pixel > vec2<i32>(last));
+    if (!any(outside)) { return interaction_cell(face, pixel, resolution); }
+    if (all(outside)) {
+        // At a cube corner, three faces meet. Average their corner cells for
+        // the missing fourth tap; choosing a single face here produces a seam.
+        let corner = clamp(pixel, vec2<i32>(0), vec2<i32>(last));
+        return (interaction_cell(face, corner, resolution)
+            + interaction_edge_cell(face, vec2<i32>(pixel.x, corner.y), resolution)
+            + interaction_edge_cell(face, vec2<i32>(corner.x, pixel.y), resolution)) / 3.0;
+    }
+    return interaction_edge_cell(face, pixel, resolution);
+}
+
+fn sample_interaction(address: FaceUv) -> vec3<f32> {
+    let resolution = u32(frame.options.y);
+    // Interpolate around cell centers instead of jumping at cell boundaries.
+    let coordinate = (address.uv * 0.5 + vec2<f32>(0.5)) * f32(resolution) - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(coordinate));
+    let weight = fract(coordinate);
+    if (all(base >= vec2<i32>(0)) && all(base < vec2<i32>(i32(resolution) - 1))) {
+        // Almost every root uses four adjacent reads without face remapping.
+        let index = address.face * resolution * resolution + u32(base.y) * resolution + u32(base.x);
+        return mix(
+            mix(interaction[index].xyz, interaction[index + 1u].xyz, weight.x),
+            mix(interaction[index + resolution].xyz, interaction[index + resolution + 1u].xyz, weight.x),
+            weight.y
+        );
+    }
+    return mix(
+        mix(interaction_tap(address.face, base, resolution), interaction_tap(address.face, base + vec2<i32>(1, 0), resolution), weight.x),
+        mix(interaction_tap(address.face, base + vec2<i32>(0, 1), resolution), interaction_tap(address.face, base + vec2<i32>(1, 1), resolution), weight.x),
+        weight.y
+    );
 }
 
 fn hash01(value: u32) -> f32 {
@@ -131,7 +191,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let projected_comb = comb - surface_normal * dot(comb, surface_normal);
     let comb_length_sq = dot(projected_comb, projected_comb);
     let comb_tangent = select(tangent, projected_comb * inverseSqrt(max(comb_length_sq, 0.000001)), comb_length_sq > 0.000001);
-    let interaction_offset = interaction[interaction_index(address)].xyz;
+    var interaction_offset = vec3<f32>(0.0);
+    if (tip > 0.0) { interaction_offset = sample_interaction(address); }
     let interaction_scale = mix(1.0, height_scale, 0.35);
     // Interaction is stored as a world-space offset, so attenuate it by the
     // remaining flexible blade length. Squaring the ratio keeps the broad wash
@@ -143,8 +204,10 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let tangent_bend = requested_bend - surface_normal * dot(requested_bend, surface_normal);
     // Rotor wash bends a blade within its own length, even when interaction
     // forces accumulate. Lower the tip as it leans instead of stretching it.
-    let bend_limit = blade_height * 0.8;
-    let bounded_bend = tangent_bend * min(1.0, bend_limit * inverseSqrt(max(dot(tangent_bend, tangent_bend), 0.000001)));
+    let bend_limit = blade_height * 0.94;
+    // Smoothly approach the blade's maximum lean; a hard clamp flattened the
+    // inner wash into a rigid disc and hid changes in rotor pressure.
+    let bounded_bend = tangent_bend * bend_limit * inverseSqrt(bend_limit * bend_limit + dot(tangent_bend, tangent_bend));
     let bend = bounded_bend * tip * tip;
     let upright_height = tip * blade_height;
     let bent_height = sqrt(max(upright_height * upright_height - dot(bend, bend), 0.0));
@@ -196,7 +259,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let transmission = backlit * backlit * 0.38;
     let tip_light = smoothstep(0.12, 1.0, input.normalized_height);
     let shadow = shadow_factor(input.shadow_position);
-    let ambient = vec3<f32>(0.27, 0.35, 0.47);
+    // Match the terrain's soft fill: readable night-side grass, with the
+    // original root shading and sunny highlights keeping the lawn dimensional.
+    let unlit = 1.0 - diffuse * shadow;
+    let ambient = vec3<f32>(0.27, 0.35, 0.47) * (1.0 + 0.85 * unlit * unlit);
     let sunshine = vec3<f32>(1.18, 1.06, 0.73);
     let root_darkening = mix(0.53, 1.0, smoothstep(0.0, 0.68, input.normalized_height));
     var color = input.color * (ambient + sunshine * diffuse * shadow) * root_darkening;

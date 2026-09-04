@@ -125,7 +125,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let half_vector = normalize(light + view + n * 0.0001);
         highlight = pow(max(dot(n, half_vector), 0.0), gloss_power) * gloss * shadow * diffuse;
     }
-    let ambient = vec3<f32>(0.29, 0.34, 0.48);
+    // Cool fill lifts the night side and cast shadows while tapering away
+    // quadratically on sunlit faces, preserving the warm direct-light contrast.
+    let unlit = 1.0 - diffuse * shadow;
+    let ambient = vec3<f32>(0.29, 0.34, 0.48) * (1.0 + 0.85 * unlit * unlit);
     let sunshine = vec3<f32>(1.22, 1.04, 0.76);
     var color = base * (ambient + sunshine * diffuse * shadow);
     color += sunshine * highlight;

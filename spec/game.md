@@ -460,6 +460,8 @@ Use a stylized, storybook miniature aesthetic with simplified forms, soft lighti
 
 The shipping presentation is a golden-hour toy garden. Warm directional sunlight meets cool ambient shadows; rock is chalky, mower bodywork is coral enamel and cream, and hover pads have concentrated cyan emission. A dusty blue-to-peach sky, small round companion moon, and a soft camera-correct atmospheric rim frame the globe. Menus and the compact HUD use cream cards, pine text, sage controls, and coral primary actions.
 
+Ambient fill increases smoothly in shade, reaching 1.85 times the base ambient on the fully unlit side. Full sunlight retains its original contrast and warm highlights, while grass and rock remain readable around the whole globe.
+
 Key visual cues:
 
 - exaggerated horizon curvature;
@@ -759,18 +761,21 @@ Each rendered frame uploads a small force-source buffer containing:
 - an elongated wake aligned opposite tangent velocity; and
 - a bounded ring of recent trail capsules when required for longer recovery motion.
 
-A compute pass integrates a damped spring independently at every field sample:
+A compute pass integrates a critically damped spring independently at every field sample. The implementation evaluates its exact constant-force step each frame:
 
 ```text
-acceleration = applied_force
-             - stiffness * displacement
-             - damping * velocity
-
-velocity     += acceleration * dt
-displacement += velocity * dt
+target       = applied_force / stiffness
+omega        = damping / 2          # damping² = 4 * stiffness
+offset       = displacement - target
+spring_speed = velocity + omega * offset
+decay        = exp(-omega * dt)
+displacement = target + (offset + spring_speed * dt) * decay
+velocity     = (velocity - omega * spring_speed * dt) * decay
 ```
 
 Project both vectors onto the sample's local tangent plane after integration. Force falloff should be smooth and evaluated from three-dimensional planet-centered positions so interaction remains continuous across cube-face boundaries.
+
+The rotor wash has a soft central core, broad outward pressure, gentle outward-moving pressure ripples, and a small swirl. Its travel bias fades continuously below 2 m/s instead of normalizing tiny residual velocities; stopping leaves a steady outward hover wash. The field settles without reversing through upright. Grass samples displacement bilinearly across cube faces, then approaches its maximum lean smoothly and lowers its tip as it bends, avoiding both cell-sized steps and a rigid flattened disc.
 
 The grass vertex shader samples the resulting displacement and applies it increasingly toward the blade tip:
 
@@ -778,7 +783,7 @@ The grass vertex shader samples the resulting displacement and applies it increa
 blade_offset = displacement * normalized_blade_height^2
 ```
 
-The intended response is that hover pads flatten grass outward, the moving body streams it backward, mower suction pulls it inward and down immediately before cutting, and recently disturbed grass oscillates briefly before settling. These effects are entirely visual and must not modify authoritative cut state or scoring.
+The intended response is that hover pads flatten grass outward, the moving body streams it backward, and coherent pressure ripples travel through tall grass before it smoothly settles. These effects are entirely visual and must not modify authoritative cut state or scoring.
 
 If the baseline adapter cannot use the preferred storage texture format, provide a storage-buffer implementation of the same logical field. Direct analytical evaluation of a reduced force-source list in the vertex shader is an acceptable final fallback.
 

@@ -131,3 +131,30 @@ clippings. The live High-quality title scene with 4× MSAA showed approximately
 performance guarantee. The mower remains within the existing GPU buffers at
 858 vertices and 2,544 indices, and the visual changes do not alter generation,
 physics, mowing coverage, or saved-world semantics.
+
+## Rotor wash and shaded-side readability follow-up
+
+- Fixed a stop-time direction flip: normalizing tiny residual tangent velocities
+  gave suspension jitter a full-strength directional wake. Travel bias and wake
+  offset now fade continuously below 2 m/s, leaving broad outward downwash.
+- Softened each source's central core, removing the arbitrary full-strength kick
+  when its center crosses a field sample. Coherent outward pressure ripples and
+  a small swirl keep stationary hovering lively.
+- Replaced the underdamped Euler spring with an exact critically damped step,
+  avoiding backward rebound and keeping release consistent across frame rates.
+- Interpolated the displacement field around texel centers, including unfolded
+  cube edges and three-face corners. Root vertices skip those extra reads.
+- Replaced the blade's hard lean clamp with a smooth limit, preserving length
+  while allowing stronger downwash without a rigid flat inner disc.
+- Raised ambient fill by up to 85% on unlit terrain and grass, tapering away in
+  direct sunlight to retain the golden-hour contrast.
+
+Validation: 131 ordinary tests passed, strict workspace clippy and formatting
+passed, and all four explicit GPU checks passed on Apple M2. New readbacks cover
+near-center force continuity, finite tangent displacement, bounded strong
+impulses, monotone release and matching trajectories at 30/60/120 Hz, and 4,200
+interpolation probes across interiors, every cube edge, and all eight corners.
+The complete render smoke test still passes at 1×/2×/4× MSAA.
+The release build passed. A final native visual check was unavailable because
+the Mac was locked; the numerical interaction and shader checks above completed
+without a window server.
