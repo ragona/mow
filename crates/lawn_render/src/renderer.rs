@@ -281,13 +281,13 @@ impl Renderer {
         );
         let vehicle_vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dynamic vehicle vertices"),
-            size: 32 * 1024,
+            size: mesh::VEHICLE_VERTEX_BUFFER_SIZE,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let vehicle_indices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dynamic vehicle indices"),
-            size: 16 * 1024,
+            size: mesh::VEHICLE_INDEX_BUFFER_SIZE,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

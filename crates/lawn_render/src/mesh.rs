@@ -56,6 +56,8 @@ pub const ROOT_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array!
     1 => Float32x3,
     2 => Uint32
 ];
+pub const VEHICLE_VERTEX_BUFFER_SIZE: u64 = 32 * 1024;
+pub const VEHICLE_INDEX_BUFFER_SIZE: u64 = 16 * 1024;
 
 #[must_use]
 pub const fn root_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -141,12 +143,8 @@ pub fn build_vehicle(
     mower_enabled: bool,
     elapsed_seconds: f32,
 ) -> (Vec<MeshVertex>, Vec<u32>) {
-    const HOVER_PADS: [(f32, f32); 4] = [
-        (-0.76, -0.76),
-        (0.76, -0.76),
-        (-0.76, 0.76),
-        (0.76, 0.76),
-    ];
+    const HOVER_PADS: [(f32, f32); 4] =
+        [(-0.72, -0.72), (0.72, -0.72), (-0.72, 0.72), (0.72, 0.72)];
 
     let mut vertices = Vec::with_capacity(720);
     let mut indices = Vec::with_capacity(1_800);
@@ -206,10 +204,10 @@ pub fn build_vehicle(
             0.0,
             -0.315
                 + if mower_enabled {
-                (elapsed_seconds * 57.0).sin() * 0.018
-            } else {
-                0.0
-            },
+                    (elapsed_seconds * 57.0).sin() * 0.018
+                } else {
+                    0.0
+                },
             0.0,
         ),
         1.04,
@@ -281,14 +279,7 @@ fn add_chamfered_frustum(
         for local in [bottom_left, bottom_right, top_left, top_right] {
             push_model_vertex(vertices, transform, local, normal, material);
         }
-        indices.extend_from_slice(&[
-            start,
-            start + 1,
-            start + 2,
-            start + 1,
-            start + 3,
-            start + 2,
-        ]);
+        indices.extend_from_slice(&[start, start + 1, start + 2, start + 1, start + 3, start + 2]);
     }
     add_ring_cap(
         vertices,
@@ -522,4 +513,46 @@ fn hash01(mut value: u32) -> f32 {
     value = value.wrapping_mul(0x846c_a68b);
     value ^= value >> 16;
     value as f32 / u32::MAX as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Quat;
+
+    fn identity_transform() -> VehicleTransform {
+        VehicleTransform {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            forward: Vec3::NEG_Z,
+            up: Vec3::Y,
+        }
+    }
+
+    #[test]
+    fn vehicle_mesh_exposes_four_glowing_pads_within_gpu_budget() {
+        let (vertices, indices) = build_vehicle(identity_transform(), true, 0.0);
+        assert!(vertices.len() > 600, "vehicle mesh is unexpectedly simple");
+        assert!(
+            vertices.len() * std::mem::size_of::<MeshVertex>()
+                <= VEHICLE_VERTEX_BUFFER_SIZE as usize
+        );
+        assert!(indices.len() * std::mem::size_of::<u32>() <= VEHICLE_INDEX_BUFFER_SIZE as usize);
+        assert!(vertices.iter().all(|vertex| {
+            let normal = Vec3::from_array(vertex.normal);
+            normal.is_finite() && (normal.length() - 1.0).abs() < 1.0e-4
+        }));
+
+        let glowing_pad_quadrants =
+            vertices
+                .iter()
+                .filter(|vertex| vertex.material == 5)
+                .fold(0_u8, |mask, vertex| {
+                    let x = usize::from(vertex.position[0] >= 0.0);
+                    let z = usize::from(vertex.position[2] >= 0.0);
+                    mask | (1 << (x * 2 + z))
+                });
+        assert_eq!(glowing_pad_quadrants, 0b1111);
+        assert!(vertices.iter().any(|vertex| vertex.material == 7));
+    }
 }

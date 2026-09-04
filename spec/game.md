@@ -209,6 +209,8 @@ The minimum shippable version includes:
 
 The vehicle is a small, rounded-square hover mower with a belly-mounted deck directly beneath its chassis. It should read as a charming utility machine rather than a weaponized racing vehicle. Its largely symmetric silhouette intentionally avoids implying that one travel direction is privileged.
 
+The shippable baseline model uses a compact, layered, chamfered shell with a centered canopy and four exposed corner hover pods connected by short dark outriggers. Each pod has a sturdy upper housing and a bright cyan lower emitter. The emitters may pulse subtly, but all four pads must remain individually legible from the standard camera. A recessed circular deck beneath the body communicates the centered cutting footprint without competing with the hover-pad silhouette.
+
 ### 7.2 Movement model
 
 The vehicle maintains a fixed hover distance above the local terrain and aligns its up vector toward the surface normal. Movement is omnidirectional, camera-relative, and constrained to the tangent plane at its current position. The chassis maintains its screen-forward heading instead of rotating to face its velocity.
