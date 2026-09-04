@@ -158,6 +158,7 @@ pub struct Renderer {
     quality: QualityPreset,
     high_contrast: bool,
     reduced_particles: bool,
+    grass_height_multiplier: f32,
     render_scale: f32,
     last_visual_frame: Instant,
     gpu_profiler: Option<GpuProfiler>,
@@ -179,6 +180,7 @@ impl Renderer {
         render_scale: f32,
         high_contrast: bool,
         reduced_particles: bool,
+        grass_height_multiplier: f32,
     ) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -353,6 +355,7 @@ impl Renderer {
             quality,
             high_contrast,
             reduced_particles,
+            grass_height_multiplier: grass_height_multiplier.clamp(0.4, 1.6),
             render_scale,
             last_visual_frame: Instant::now(),
             gpu_profiler,
@@ -411,10 +414,12 @@ impl Renderer {
         quality: QualityPreset,
         high_contrast: bool,
         reduced_particles: bool,
+        grass_height_multiplier: f32,
     ) {
         self.quality = quality;
         self.high_contrast = high_contrast;
         self.reduced_particles = reduced_particles;
+        self.grass_height_multiplier = grass_height_multiplier.clamp(0.4, 1.6);
     }
 
     pub fn upload_planet(&mut self, run: &RunState) {
@@ -817,7 +822,7 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
             quality_density(renderer.quality),
             INTERACTION_RESOLUTION as f32,
             if renderer.high_contrast { 1.0 } else { 0.0 },
-            run.planet.config.grass_height_scale,
+            run.planet.config.grass_height_scale * renderer.grass_height_multiplier,
         ],
         locator: [
             locator.x,

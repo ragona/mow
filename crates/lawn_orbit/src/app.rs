@@ -158,6 +158,7 @@ impl LawnOrbitApp {
             self.profile.settings.render_scale,
             self.profile.settings.accessibility.high_contrast_grass,
             self.profile.settings.accessibility.reduced_particles,
+            self.profile.settings.grass_height_multiplier,
         ))?;
         tracing::info!(
             adapter = %renderer.capabilities().adapter_name,
@@ -740,6 +741,14 @@ impl LawnOrbitApp {
                     ui.checkbox(&mut a.high_contrast_grass, "High-contrast cut grass");
                     ui.checkbox(&mut a.reduced_particles, "Reduced particles");
                     ui.checkbox(&mut a.enlarged_locator, "Enlarged uncut-grass locator");
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.profile.settings.grass_height_multiplier,
+                            0.4..=1.6,
+                        )
+                        .text("Grass height")
+                        .suffix("×"),
+                    );
                     ui.horizontal(|ui| {
                         ui.label("Quality");
                         egui::ComboBox::from_id_salt("quality").selected_text(format!("{:?}", self.profile.settings.quality)).show_ui(ui, |ui| {
@@ -971,6 +980,7 @@ impl LawnOrbitApp {
                 self.profile.settings.quality,
                 self.profile.settings.accessibility.high_contrast_grass,
                 self.profile.settings.accessibility.reduced_particles,
+                self.profile.settings.grass_height_multiplier,
             );
         }
     }

@@ -10,7 +10,7 @@ use crate::{
     score::Results,
 };
 
-pub const PROFILE_VERSION: u32 = 4;
+pub const PROFILE_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QualityPreset {
@@ -61,6 +61,7 @@ pub struct Settings {
     pub accessibility: AccessibilitySettings,
     pub controls: ControlMap,
     pub quality: QualityPreset,
+    pub grass_height_multiplier: f32,
     pub render_scale: f32,
     pub msaa_samples: u32,
     pub fullscreen: bool,
@@ -72,6 +73,7 @@ impl Default for Settings {
             accessibility: AccessibilitySettings::default(),
             controls: ControlMap::default(),
             quality: QualityPreset::Standard,
+            grass_height_multiplier: 1.0,
             render_scale: 1.0,
             msaa_samples: 4,
             fullscreen: false,
@@ -184,6 +186,8 @@ impl Profile {
         a.field_of_view_degrees = a.field_of_view_degrees.clamp(60.0, 120.0);
         a.camera_follow_stiffness = a.camera_follow_stiffness.clamp(1.0, 20.0);
         a.steering_sensitivity = a.steering_sensitivity.clamp(0.25, 2.0);
+        self.settings.grass_height_multiplier =
+            self.settings.grass_height_multiplier.clamp(0.4, 1.6);
         self.settings.render_scale = self.settings.render_scale.clamp(0.5, 1.0);
         self.settings.msaa_samples = match self.settings.msaa_samples {
             1 | 2 | 4 => self.settings.msaa_samples,
@@ -248,7 +252,21 @@ mod tests {
         migrated.sanitize();
         assert_eq!(migrated.version, PROFILE_VERSION);
         assert_eq!(migrated.settings.msaa_samples, 4);
+        assert_eq!(migrated.settings.grass_height_multiplier, 1.0);
         assert_eq!(migrated.settings.accessibility.field_of_view_degrees, 90.0);
+    }
+
+    #[test]
+    fn grass_height_setting_is_clamped_to_the_supported_visual_range() {
+        let mut too_short = Profile::default();
+        too_short.settings.grass_height_multiplier = 0.1;
+        too_short.sanitize();
+        assert_eq!(too_short.settings.grass_height_multiplier, 0.4);
+
+        let mut too_tall = Profile::default();
+        too_tall.settings.grass_height_multiplier = 8.0;
+        too_tall.sanitize();
+        assert_eq!(too_tall.settings.grass_height_multiplier, 1.6);
     }
 
     #[test]

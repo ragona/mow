@@ -567,6 +567,7 @@ Required options:
 - full input remapping;
 - camera shake slider;
 - field-of-view adjustment;
+- a live grass-height slider that changes blade geometry without affecting mowing or world generation;
 - horizontal movement sensitivity and inversion;
 - hold/toggle options where applicable;
 - high-contrast cut-grass mode;
