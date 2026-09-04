@@ -1,5 +1,6 @@
 //! `wgpu` renderer for Lawn Orbit.
 
+mod bloom;
 mod gpu_profiler;
 mod interaction;
 mod mesh;
@@ -22,6 +23,7 @@ mod tests {
             ("interaction", include_str!("shaders/interaction.wgsl")),
             ("particles", include_str!("shaders/particles.wgsl")),
             ("composite", include_str!("shaders/composite.wgsl")),
+            ("bloom", include_str!("shaders/bloom.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}.wgsl did not parse: {error}"));

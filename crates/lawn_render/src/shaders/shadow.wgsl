@@ -5,6 +5,8 @@ struct FrameUniform {
     light_epoch: vec4<f32>,
     options: vec4<f32>,
     locator: vec4<f32>,
+    mower_position: vec4<f32>,
+    mower_forward: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 
@@ -19,4 +21,3 @@ struct VertexInput {
 fn vs_main(input: VertexInput) -> @builtin(position) vec4<f32> {
     return frame.light_view_proj * vec4<f32>(input.position, 1.0);
 }
-

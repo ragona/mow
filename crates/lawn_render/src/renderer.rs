@@ -10,6 +10,7 @@ use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{
+    bloom::Bloom,
     gpu_profiler::GpuProfiler,
     interaction::{GrassInteraction, INTERACTION_RESOLUTION},
     mesh::{self, MeshVertex, TuftVertex},
@@ -18,7 +19,7 @@ use crate::{
 };
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const WORLD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub(crate) const WORLD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SHADOW_SIZE: u32 = 2048;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +92,17 @@ struct FrameUniformGpu {
     light_epoch: [f32; 4],
     options: [f32; 4],
     locator: [f32; 4],
+    mower_position: [f32; 4],
+    mower_forward: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+struct CompositeUniformGpu {
+    inverse_view_proj: [[f32; 4]; 4],
+    camera_radius: [f32; 4],
+    sun_time: [f32; 4],
+    display: [f32; 4],
 }
 
 #[derive(Debug)]
@@ -107,7 +119,7 @@ struct PlanetResources {
 
 #[derive(Debug)]
 struct RenderTargets {
-    _world_texture: wgpu::Texture,
+    world_texture: wgpu::Texture,
     world_view: wgpu::TextureView,
     _multisample_texture: Option<wgpu::Texture>,
     multisample_view: Option<wgpu::TextureView>,
@@ -145,6 +157,8 @@ pub struct Renderer {
     composite_layout: wgpu::BindGroupLayout,
     composite_sampler: wgpu::Sampler,
     composite_bind_group: wgpu::BindGroup,
+    composite_uniform: wgpu::Buffer,
+    bloom: Bloom,
     targets: RenderTargets,
     shadow: ShadowTarget,
     planet: PlanetResources,
@@ -286,8 +300,26 @@ impl Renderer {
                 &grass_layout,
                 &shadow_layout,
             );
+        let bloom = Bloom::new(
+            &device,
+            &targets.world_view,
+            targets.world_texture.width(),
+            targets.world_texture.height(),
+        );
+        let composite_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("garden atmosphere and display uniform"),
+            size: std::mem::size_of::<CompositeUniformGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let (composite_pipeline, composite_layout, composite_sampler, composite_bind_group) =
-            create_composite_resources(&device, format, &targets.world_view);
+            create_composite_resources(
+                &device,
+                format,
+                &targets.world_view,
+                bloom.view(),
+                &composite_uniform,
+            );
         let (tuft_vertices_data, tuft_indices_data) = mesh::build_tuft();
         let tuft_vertices = create_init_buffer(
             &device,
@@ -353,6 +385,8 @@ impl Renderer {
             composite_layout,
             composite_sampler,
             composite_bind_group,
+            composite_uniform,
+            bloom,
             targets,
             shadow,
             planet,
@@ -420,11 +454,19 @@ impl Renderer {
             self.msaa_samples,
             self.render_scale,
         );
+        self.bloom.resize(
+            &self.device,
+            &self.targets.world_view,
+            self.targets.world_texture.width(),
+            self.targets.world_texture.height(),
+        );
         self.composite_bind_group = create_composite_bind_group(
             &self.device,
             &self.composite_layout,
             &self.composite_sampler,
             &self.targets.world_view,
+            self.bloom.view(),
+            &self.composite_uniform,
         );
     }
 
@@ -508,7 +550,11 @@ impl Renderer {
             deck_transform,
             run.vehicle.interpolated_velocity(interpolation_alpha),
             visual_seconds,
-            visual_dt,
+            if run.paused || !run.active {
+                0.0
+            } else {
+                visual_dt
+            },
         );
         mesh::build_vehicle(
             &mut self.vehicle_mesh_vertices,
@@ -569,9 +615,46 @@ impl Renderer {
             );
         }
         let camera = run.camera.interpolated_state(interpolation_alpha);
-        let frame_uniform = make_frame_uniform(self, run, camera);
+        let mut frame_uniform = make_frame_uniform(self, run, camera);
+        frame_uniform.mower_position = deck_transform
+            .position
+            .extend(if run.vehicle.state.grounded { 1.0 } else { 0.0 })
+            .to_array();
+        frame_uniform.mower_forward = deck_transform
+            .forward
+            .extend(if run.vehicle.state.boost_active {
+                1.0
+            } else {
+                0.0
+            })
+            .to_array();
         self.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&frame_uniform));
+        let composite_uniform = CompositeUniformGpu {
+            inverse_view_proj: Mat4::from_cols_array_2d(&frame_uniform.view_proj)
+                .inverse()
+                .to_cols_array_2d(),
+            camera_radius: camera
+                .position
+                .extend(run.planet.config.base_radius + frame_uniform.options[3] * 0.60)
+                .to_array(),
+            sun_time: [0.42, 0.81, 0.38, frame_uniform.camera_time[3]],
+            display: [
+                self.surface_config.width as f32 / self.surface_config.height as f32,
+                self.scene_left_inset,
+                0.65,
+                if self.quality == QualityPreset::Low {
+                    0.0
+                } else {
+                    0.20
+                },
+            ],
+        };
+        self.queue.write_buffer(
+            &self.composite_uniform,
+            0,
+            bytemuck::bytes_of(&composite_uniform),
+        );
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -805,6 +888,10 @@ impl Renderer {
         surface_view: &wgpu::TextureView,
         query_set: Option<&wgpu::QuerySet>,
     ) {
+        let bloom_enabled = self.quality != QualityPreset::Low;
+        if bloom_enabled {
+            self.bloom.encode(encoder, query_set);
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("tone mapping and world upscale"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -819,7 +906,7 @@ impl Renderer {
             depth_stencil_attachment: None,
             timestamp_writes: query_set.map(|query_set| wgpu::RenderPassTimestampWrites {
                 query_set,
-                beginning_of_pass_write_index: Some(6),
+                beginning_of_pass_write_index: (!bloom_enabled).then_some(6),
                 end_of_pass_write_index: Some(7),
             }),
             occlusion_query_set: None,
@@ -871,6 +958,8 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
             locator.z,
             if locator == Vec3::ZERO { 0.0 } else { 1.0 },
         ],
+        mower_position: [0.0; 4],
+        mower_forward: [0.0; 4],
     }
 }
 
@@ -1396,7 +1485,7 @@ fn create_targets(
     });
     let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
     RenderTargets {
-        _world_texture: world_texture,
+        world_texture,
         world_view,
         _multisample_texture: multisample_texture,
         multisample_view,
@@ -1409,6 +1498,8 @@ fn create_composite_resources(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     world_view: &wgpu::TextureView,
+    bloom_view: &wgpu::TextureView,
+    uniform: &wgpu::Buffer,
 ) -> (
     wgpu::RenderPipeline,
     wgpu::BindGroupLayout,
@@ -1434,6 +1525,26 @@ fn create_composite_resources(
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1444,7 +1555,8 @@ fn create_composite_resources(
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         ..wgpu::SamplerDescriptor::default()
     });
-    let bind_group = create_composite_bind_group(device, &layout, &sampler, world_view);
+    let bind_group =
+        create_composite_bind_group(device, &layout, &sampler, world_view, bloom_view, uniform);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("tone mapping and upscale shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
@@ -1491,6 +1603,8 @@ fn create_composite_bind_group(
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     world_view: &wgpu::TextureView,
+    bloom_view: &wgpu::TextureView,
+    uniform: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("world composite bind group"),
@@ -1503,6 +1617,14 @@ fn create_composite_bind_group(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(bloom_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: uniform.as_entire_binding(),
             },
         ],
     })

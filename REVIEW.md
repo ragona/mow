@@ -100,3 +100,34 @@ gamepad hardware were not exercised here; controller behavior is covered by
 synthetic input tests. Passing these checks does not establish flawless operation
 on every machine or for every future change. The GPU smoke and repeatable CPU
 example are included for continued verification.
+
+## Golden-hour garden presentation follow-up
+
+The visual pass adds warm directional lighting, cool ambient shadows, distinct
+enamel/rock/rubber materials, a rounded mower and antenna, leafy grass and brushed
+stubble, bounded clipping fans, a pastel sky and atmospheric rim, and matching
+cream/coral menus. Bloom uses persistent quarter-resolution targets, retains
+pipelines during resize, and skips both its passes and composite sample on Low.
+
+Review and live inspection also resolved these presentation issues:
+
+- Unbounded hover displacement stretched blades into radial spokes. Bending now
+  stays within each blade's length and lowers its tip.
+- Cutting extremely short custom grass could increase its height. Stubble and
+  comb bend scale down together.
+- Clipping density depended on display rate; emission now follows simulation
+  time with bounded work after a long frame.
+- Paused particle tumble and chassis springs continued moving. Both now freeze.
+- Per-blade noise and pale highlights obscured form; coherent green patches and
+  darker roots improve material depth and cut-path contrast.
+
+Validation: 129 ordinary workspace tests passed; the real GPU smoke test passed
+at 1×/2×/4× MSAA on Apple M2; and the new bloom readback test passed for threshold,
+HDR preservation, two-axis spread, hue, stale-frame clearing, and tiny/odd resizes.
+Formatting, strict workspace clippy, and release builds passed. Native inspection
+covered the title composition and active mowing with visible cut paths and
+clippings. The live High-quality title scene with 4× MSAA showed approximately
+16.7 ms median frame time on this M2; this is an observation, not a cross-device
+performance guarantee. The mower remains within the existing GPU buffers at
+858 vertices and 2,544 indices, and the visual changes do not alter generation,
+physics, mowing coverage, or saved-world semantics.

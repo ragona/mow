@@ -61,6 +61,36 @@ struct Particle {
     lifetime: f32,
 }
 
+#[derive(Debug, Default)]
+struct ClippingEmission {
+    last_seconds: Option<f32>,
+    fractional_count: f32,
+}
+
+impl ClippingEmission {
+    fn count(&mut self, seconds: f32, emitting: bool, reduced: bool, boost: bool) -> usize {
+        let previous = self.last_seconds.replace(seconds);
+        if !emitting {
+            self.fractional_count = 0.0;
+            return 0;
+        }
+        // Limit spawn work after a long frame and tie emission to simulation
+        // time, so a fast display does not produce a much denser spray.
+        let dt = previous.map_or(1.0 / 60.0, |last| (seconds - last).clamp(0.0, 0.05));
+        let rate = if reduced {
+            75.0
+        } else if boost {
+            375.0
+        } else {
+            300.0
+        };
+        let requested = self.fractional_count + dt * rate;
+        let count = requested as usize;
+        self.fractional_count = requested - count as f32;
+        count
+    }
+}
+
 #[derive(Debug)]
 pub struct ClippingParticles {
     particles: Vec<Particle>,
@@ -69,7 +99,7 @@ pub struct ClippingParticles {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     spawn_counter: u32,
-    last_spawn_epoch: u32,
+    emission: ClippingEmission,
     last_update: Instant,
 }
 
@@ -107,7 +137,7 @@ impl ClippingParticles {
             vertex_buffer,
             index_buffer,
             spawn_counter: 0,
-            last_spawn_epoch: u32::MAX,
+            emission: ClippingEmission::default(),
             last_update: Instant::now(),
         }
     }
@@ -115,6 +145,20 @@ impl ClippingParticles {
     pub fn update(&mut self, queue: &wgpu::Queue, run: &RunState, reduced: bool) {
         let dt = self.last_update.elapsed().as_secs_f32().min(1.0 / 20.0);
         self.last_update = Instant::now();
+        let active = run.active && !run.paused;
+        let newly_cut = run
+            .events()
+            .iter()
+            .any(|event| matches!(event, RunEvent::GrassCut { .. }));
+        let count = self.emission.count(
+            run.simulation_seconds,
+            newly_cut && active,
+            reduced,
+            run.vehicle.state.boost_active,
+        );
+        if !active {
+            return;
+        }
         for particle in &mut self.particles {
             particle.age += dt;
             let radial = particle.position.normalize_or(Vec3::Y);
@@ -125,15 +169,8 @@ impl ClippingParticles {
         self.particles
             .retain(|particle| particle.age < particle.lifetime);
 
-        let newly_cut = run
-            .events()
-            .iter()
-            .any(|event| matches!(event, RunEvent::GrassCut { .. }));
-        let spawn_epoch = run.simulation_seconds.to_bits();
-        if newly_cut && spawn_epoch != self.last_spawn_epoch {
-            let count = if reduced { 3 } else { 11 };
+        if count > 0 {
             self.spawn(&run.vehicle.state, count);
-            self.last_spawn_epoch = spawn_epoch;
         }
 
         if self.particles.is_empty() {
@@ -164,7 +201,7 @@ impl ClippingParticles {
 
     pub fn clear(&mut self) {
         self.particles.clear();
-        self.last_spawn_epoch = u32::MAX;
+        self.emission = ClippingEmission::default();
         self.last_update = Instant::now();
     }
 
@@ -189,12 +226,12 @@ impl ClippingParticles {
 
     fn spawn(&mut self, vehicle: &VehicleState, count: usize) {
         let transform = vehicle.transform;
-        let right = transform.forward.cross(transform.up).normalize();
         let deck = transform.position - transform.up * 0.48;
-        let velocity_direction = (vehicle.linear_velocity
+        let travel = (vehicle.linear_velocity
             - transform.up * vehicle.linear_velocity.dot(transform.up))
-        .try_normalize()
-        .unwrap_or(Vec3::ZERO);
+        .normalize_or(transform.forward);
+        let right = travel.cross(transform.up).normalize();
+        let boost_lift = if vehicle.boost_active { 0.4 } else { 0.0 };
         let count = count.min(MAX_PARTICLES);
         let overflow = (self.particles.len() + count).saturating_sub(MAX_PARTICLES);
         self.particles.drain(..overflow);
@@ -203,19 +240,19 @@ impl ClippingParticles {
             let a = hash01(self.spawn_counter.wrapping_mul(0x9E37_79B9));
             let b = hash01(self.spawn_counter.wrapping_mul(0x85EB_CA6B));
             let c = hash01(self.spawn_counter.wrapping_mul(0xC2B2_AE35));
-            let angle = a * std::f32::consts::TAU;
-            let outward = right * angle.cos() + transform.forward * angle.sin();
-            let position = deck + outward * b.sqrt();
-            let velocity = vehicle.linear_velocity * 0.22
-                + transform.up * (1.2 + c * 2.0)
-                + outward * (1.8 + c * 2.0)
-                - velocity_direction * 0.8;
+            let side = if a < 0.5 { -1.0 } else { 1.0 };
+            let outward = (right * side - travel * (0.25 + a * 0.65)).normalize();
+            let position = deck + outward * (0.72 + b * 0.27);
+            let velocity = vehicle.linear_velocity * 0.30
+                + transform.up * (1.7 + c * 1.6 + boost_lift)
+                + outward * (1.8 + b * 1.2)
+                - travel * 0.6;
             self.particles.push(Particle {
                 position,
                 velocity,
-                size: 0.045 + b * 0.075,
+                size: 0.075 + b * 0.075,
                 age: 0.0,
-                lifetime: 0.38 + c * 0.52,
+                lifetime: 0.4 + c * 0.35,
             });
         }
     }
@@ -228,4 +265,38 @@ fn hash01(mut value: u32) -> f32 {
     value = value.wrapping_mul(0x846C_A68B);
     value ^= value >> 16;
     value as f32 / u32::MAX as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipping_emission_is_bounded_and_independent_of_display_rate() {
+        let sample = |frames: u32, reduced: bool| {
+            let mut emission = ClippingEmission::default();
+            emission.count(0.0, false, reduced, false);
+            (1..=frames)
+                .map(|frame| emission.count(frame as f32 / frames as f32, true, reduced, false))
+                .sum::<usize>()
+        };
+        assert!(sample(60, false).abs_diff(sample(240, false)) <= 1);
+        assert!((299..=300).contains(&sample(120, false)));
+        assert!((74..=75).contains(&sample(120, true)));
+
+        let mut emission = ClippingEmission::default();
+        emission.count(0.0, false, false, false);
+        assert!(emission.count(10.0, true, false, true) <= 19);
+    }
+
+    #[test]
+    fn clipping_emission_requires_fresh_cutting_and_stays_paused() {
+        let mut emission = ClippingEmission::default();
+        assert!(emission.count(1.0, true, false, false) > 0);
+        assert_eq!(emission.count(1.0, true, false, false), 0);
+        assert_eq!(emission.count(1.01, false, false, false), 0);
+        assert_eq!(emission.count(1.01, true, false, false), 0);
+        assert_eq!(emission.count(1.02, false, false, false), 0);
+        assert!(emission.count(1.03, true, false, false) > 0);
+    }
 }

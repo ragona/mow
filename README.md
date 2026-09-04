@@ -8,6 +8,12 @@ unscored mowing sandbox, a first-play tutorial, accessibility settings, and
 keyboard/gamepad input. Planets can range from compact meadows to larger rocky
 worlds and are viewed from an undistorted, mostly top-down chase camera.
 
+The visual style is a golden-hour toy garden: leafy grass, warm sunlight and cool
+shadows, chalky rocks, a rounded coral-and-cream mower, and a painted dusk sky.
+Mowing leaves short brushed stubble and a small fan of tumbling clippings. Soft
+HDR bloom highlights the hover engines on Standard and High quality; Low skips
+the bloom passes. The cream-and-sage interface keeps the planet in view.
+
 No reusable game engine is used. Gameplay simulation is headless and independent
 of the renderer, which keeps world generation, mowing, scoring, and vehicle rules
 deterministic and directly testable.
@@ -80,6 +86,8 @@ cargo build --release --workspace
 cargo run --release -p lawn_tools -- validate 1000
 # Requires an available GPU; executes every rendering pass and reads pixels back.
 cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
+# Verifies bloom thresholding, blur, HDR color, and resize behavior by readback.
+cargo test -p lawn_render gpu_bloom -- --ignored --nocapture
 ```
 
 The test suite exercises deterministic generation (including compact grass-root

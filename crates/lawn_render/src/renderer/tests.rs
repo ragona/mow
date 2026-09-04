@@ -178,7 +178,24 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             light_epoch: [-0.42, -0.81, -0.38, 0.0],
             options: [1.0, INTERACTION_RESOLUTION as f32, 0.0, 1.0],
             locator: [0.0; 4],
+            mower_position: run.vehicle.state.transform.position.extend(1.0).to_array(),
+            mower_forward: run.vehicle.state.transform.forward.extend(0.0).to_array(),
         };
+        let composite_uniform = create_init_buffer(
+            &device,
+            "smoke composite uniform",
+            bytemuck::bytes_of(&CompositeUniformGpu {
+                inverse_view_proj: Mat4::from_cols_array_2d(&uniform.view_proj)
+                    .inverse()
+                    .to_cols_array_2d(),
+                camera_radius: camera
+                    .extend(run.planet.config.base_radius + 0.6)
+                    .to_array(),
+                sun_time: [0.42, 0.81, 0.38, 1.0],
+                display: [1.0, 0.0, 0.65, 0.20],
+            }),
+            wgpu::BufferUsages::UNIFORM,
+        );
         let uniform = create_init_buffer(
             &device,
             "smoke frame uniform",
@@ -219,8 +236,14 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                     &grass_layout,
                     &shadow_layout,
                 );
-            let (composite, _, _, composite_group) =
-                create_composite_resources(&device, config.format, &targets.world_view);
+            let bloom = Bloom::new(&device, &targets.world_view, config.width, config.height);
+            let (composite, _, _, composite_group) = create_composite_resources(
+                &device,
+                config.format,
+                &targets.world_view,
+                bloom.view(),
+                &composite_uniform,
+            );
             let output = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("smoke output"),
                 size: wgpu::Extent3d {
@@ -351,11 +374,12 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                 pass.set_pipeline(&particle_pipeline);
                 particles.draw(&mut pass);
             }
+            bloom.encode(&mut encoder, query_set);
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     timestamp_writes: query_set.map(|query_set| wgpu::RenderPassTimestampWrites {
                         query_set,
-                        beginning_of_pass_write_index: Some(6),
+                        beginning_of_pass_write_index: None,
                         end_of_pass_write_index: Some(7),
                     }),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {

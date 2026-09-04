@@ -56,6 +56,13 @@ enum UiCommand {
 
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
 const EDITOR_SCENE_INSET: f32 = 356.0;
+const TITLE_SCENE_INSET: f32 = 400.0;
+const GARDEN_CREAM: Color32 = Color32::from_rgb(255, 249, 231);
+const GARDEN_PINE: Color32 = Color32::from_rgb(34, 66, 57);
+const GARDEN_MUTED: Color32 = Color32::from_rgb(93, 108, 91);
+const GARDEN_SAGE: Color32 = Color32::from_rgb(206, 222, 182);
+const GARDEN_CORAL: Color32 = Color32::from_rgb(248, 147, 111);
+const GARDEN_ERROR: Color32 = Color32::from_rgb(161, 57, 42);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GenerationPurpose {
@@ -624,8 +631,8 @@ impl LawnOrbitApp {
             egui::Area::new("status".into())
                 .anchor(Align2::LEFT_BOTTOM, [16.0, -16.0])
                 .show(context, |ui| {
-                    egui::Frame::window(&context.style_of(egui::Theme::Dark)).show(ui, |ui| {
-                        ui.colored_label(Color32::LIGHT_RED, message);
+                    garden_card().show(ui, |ui| {
+                        ui.colored_label(GARDEN_ERROR, message);
                     });
                 });
         }
@@ -635,30 +642,36 @@ impl LawnOrbitApp {
 
     fn draw_title(context: &egui::Context, commands: &mut Vec<UiCommand>) {
         egui::Window::new("Lawn Orbit")
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .anchor(Align2::LEFT_CENTER, [32.0, 0.0])
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
-            .frame(
-                egui::Frame::window(&context.style_of(egui::Theme::Dark))
-                    .fill(Color32::from_black_alpha(205)),
-            )
+            .frame(garden_card().inner_margin(24))
             .show(context, |ui| {
-                ui.set_min_width(390.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(12.0);
+                ui.set_width(292.0);
+                ui.vertical(|ui| {
                     ui.label(
-                        RichText::new("LAWN ORBIT")
-                            .size(42.0)
-                            .strong()
-                            .color(Color32::from_rgb(188, 239, 125)),
+                        RichText::new("YOUR LITTLE CORNER OF THE COSMOS")
+                            .size(11.0)
+                            .color(GARDEN_MUTED),
                     );
-                    ui.label("A fuzzy whole world under your wheels");
-                    ui.add_space(24.0);
-                    if ui
-                        .add_sized([250.0, 42.0], egui::Button::new("Create a Planet"))
-                        .clicked()
-                    {
+                    ui.add_space(14.0);
+                    ui.label(
+                        RichText::new("Lawn Orbit")
+                            .size(48.0)
+                            .strong()
+                            .color(GARDEN_PINE),
+                    );
+                    ui.label(RichText::new("A little world. A lovely lawn.").size(18.0));
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Grow a tiny planet, hop on your mower,\nand make yourself a little patch of happy.",
+                        )
+                        .color(GARDEN_MUTED),
+                    );
+                    ui.add_space(22.0);
+                    if garden_button(ui, "Create a Planet", [292.0, 46.0], true).clicked() {
                         commands.push(UiCommand::OpenEditor);
                     }
                     if ui.button("Settings & Accessibility").clicked() {
@@ -667,6 +680,7 @@ impl LawnOrbitApp {
                     if ui.button("Quit").clicked() {
                         commands.push(UiCommand::Quit);
                     }
+                    ui.add_space(4.0);
                 });
             });
     }
@@ -679,11 +693,18 @@ impl LawnOrbitApp {
             .fixed_size([324.0, context.content_rect().height() - 32.0])
             .collapsible(false)
             .resizable(false)
+            .title_bar(false)
+            .frame(garden_card().inner_margin(10))
             .show(context, |ui| {
-                ui.set_width(310.0);
+                ui.set_width(302.0);
                 ui.spacing_mut().item_spacing.y = 5.0;
+                ui.label(
+                    RichText::new("THE PLANET PATCH")
+                        .size(11.0)
+                        .color(GARDEN_MUTED),
+                );
                 ui.heading("Shape a tiny planet");
-                ui.label("Watch your world change as you adjust it.");
+                ui.label("A little more meadow? A few more peaks?");
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .max_height((context.content_rect().height() - 270.0).max(160.0))
@@ -789,12 +810,9 @@ impl LawnOrbitApp {
                     && self.pending_generation.is_none();
                 ui.horizontal(|ui| {
                     if ready {
-                        ui.colored_label(Color32::from_rgb(188, 239, 125), "● Live preview");
+                        ui.colored_label(GARDEN_PINE, "● Live preview");
                     } else if recipe.is_none() {
-                        ui.colored_label(
-                            Color32::LIGHT_RED,
-                            "Enter a seed to preview your planet.",
-                        );
+                        ui.colored_label(GARDEN_ERROR, "Enter a seed to preview your planet.");
                     } else if self.pending_generation.is_none() && self.preview_attempt == recipe {
                         if ui.button("Retry preview").clicked() {
                             self.preview_attempt = None;
@@ -810,14 +828,7 @@ impl LawnOrbitApp {
                 ));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            ready,
-                            egui::Button::new(RichText::new("Start Mowing").strong())
-                                .min_size(egui::vec2(200.0, 34.0)),
-                        )
-                        .clicked()
-                    {
+                    if garden_button(ui, "Start Mowing", [200.0, 34.0], ready).clicked() {
                         commands.push(UiCommand::Start(recipe.unwrap().seed));
                     }
                     if ui.button("Back").clicked() {
@@ -831,15 +842,13 @@ impl LawnOrbitApp {
         egui::Area::new("loading".into())
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(context, |ui| {
-                egui::Frame::window(&context.style_of(egui::Theme::Dark))
-                    .fill(Color32::from_black_alpha(210))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.heading("Growing a tiny planet…");
-                        });
-                        ui.label("Building terrain, routes, grass roots, and collision metadata");
+                garden_card().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.heading("Growing a tiny planet…");
                     });
+                    ui.label("A little sunshine. A lot of grass. Almost ready.");
+                });
             });
     }
 
@@ -847,45 +856,64 @@ impl LawnOrbitApp {
         egui::Area::new("hud".into())
             .fixed_pos([18.0, 18.0])
             .show(context, |ui| {
-                egui::Frame::window(&context.style_of(egui::Theme::Dark))
-                    .fill(Color32::from_black_alpha(145))
-                    .show(ui, |ui| {
+                garden_card().show(ui, |ui| {
+                    ui.label(
+                        RichText::new("A LITTLE TIDIER")
+                            .size(11.0)
+                            .color(GARDEN_MUTED),
+                    );
+                    ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!(
                                 "{:.1}%",
                                 self.run.mowing.display_coverage_percent()
                             ))
-                            .size(29.0)
+                            .size(34.0)
                             .strong(),
                         );
-                        ui.label("PLANET SANDBOX");
-                        ui.horizontal(|ui| {
-                            ui.label("◉ ALWAYS MOWING");
-                            ui.label(format!(
-                                "Impacts {}",
-                                self.run.metrics.substantial_collision_count()
-                            ));
-                        });
-                        let boost = self.run.vehicle.state.boost_charge
-                            / self.run.vehicle_tuning.boost_capacity_seconds;
-                        ui.add(
-                            egui::ProgressBar::new(boost)
-                                .desired_width(180.0)
-                                .text("Boost"),
+                        ui.label(
+                            RichText::new("of your planet\nfreshly mown")
+                                .size(12.0)
+                                .color(GARDEN_MUTED),
                         );
                     });
+                    ui.add(
+                        egui::ProgressBar::new(
+                            (self.run.mowing.display_coverage_percent() / 100.0) as f32,
+                        )
+                        .desired_width(196.0)
+                        .desired_height(5.0)
+                        .fill(GARDEN_PINE),
+                    );
+                    ui.add_space(2.0);
+                    let boost = self.run.vehicle.state.boost_charge
+                        / self.run.vehicle_tuning.boost_capacity_seconds;
+                    ui.add(
+                        egui::ProgressBar::new(boost)
+                            .desired_width(196.0)
+                            .desired_height(16.0)
+                            .fill(GARDEN_CORAL)
+                            .text("Boost"),
+                    );
+                    ui.small(format!(
+                        "Always mowing · {} impacts",
+                        self.run.metrics.substantial_collision_count()
+                    ));
+                });
             });
         egui::Area::new("telemetry".into())
             .anchor(Align2::RIGHT_TOP, [-18.0, 18.0])
             .show(context, |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{} · {:.0} km/h",
-                        self.input.last_device_label,
-                        self.run.vehicle.state.speed() * 3.6
-                    ))
-                    .color(Color32::WHITE),
-                );
+                garden_card().inner_margin(10).show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {:.0} km/h",
+                            self.input.last_device_label,
+                            self.run.vehicle.state.speed() * 3.6
+                        ))
+                        .color(GARDEN_PINE),
+                    );
+                });
             });
         if let Some(direction) = self.run.locator_direction() {
             let transform = self.run.vehicle.state.transform;
@@ -906,12 +934,14 @@ impl LawnOrbitApp {
                     } else {
                         17.0
                     };
-                    ui.label(
-                        RichText::new(format!("{arrow} UNCUT GRASS"))
-                            .size(size)
-                            .strong()
-                            .color(Color32::from_rgb(220, 255, 126)),
-                    );
+                    garden_card().inner_margin(10).show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("{arrow} UNCUT GRASS"))
+                                .size(size)
+                                .strong()
+                                .color(GARDEN_PINE),
+                        );
+                    });
                 });
         }
         if self.run.tutorial_enabled
@@ -922,31 +952,30 @@ impl LawnOrbitApp {
             egui::Area::new("tutorial".into())
                 .anchor(Align2::CENTER_BOTTOM, [0.0, -42.0])
                 .show(context, |ui| {
-                    egui::Frame::window(&context.style_of(egui::Theme::Dark))
-                        .fill(Color32::from_black_alpha(190))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(prompt).size(18.0));
-                        });
+                    garden_card().show(ui, |ui| {
+                        ui.label(RichText::new(prompt).size(18.0));
+                    });
                 });
         }
         if self.survey_started.is_some() {
             egui::Area::new("survey".into())
                 .anchor(Align2::CENTER_TOP, [0.0, 70.0])
                 .show(context, |ui| {
-                    ui.label(RichText::new("Surveying mountain routes…").size(20.0));
+                    garden_card().show(ui, |ui| {
+                        ui.label(RichText::new("Surveying mountain routes…").size(20.0));
+                    });
                 });
         }
         if self.run.mode == GameMode::Standard && self.run.completion_available {
             egui::Area::new("submit".into())
                 .anchor(Align2::CENTER_BOTTOM, [0.0, -90.0])
                 .show(context, |ui| {
-                    if ui
-                        .add_sized([260.0, 40.0], egui::Button::new("Submit Job (Enter)"))
-                        .clicked()
-                    {
-                        commands.push(UiCommand::Submit);
-                    }
-                    ui.label("or continue mowing to 100%");
+                    garden_card().show(ui, |ui| {
+                        if garden_button(ui, "Submit Job (Enter)", [260.0, 40.0], true).clicked() {
+                            commands.push(UiCommand::Submit);
+                        }
+                        ui.label("or continue mowing to 100%");
+                    });
                 });
         }
     }
@@ -959,7 +988,7 @@ impl LawnOrbitApp {
             .show(context, |ui| {
                 ui.set_min_width(300.0);
                 ui.label("Hold Recover at any time if the mower is stuck or overturned.");
-                if ui.button("Resume").clicked() {
+                if garden_button(ui, "Resume", [300.0, 38.0], true).clicked() {
                     commands.push(UiCommand::Resume);
                 }
                 if ui.button("Settings & Accessibility").clicked() {
@@ -1049,7 +1078,7 @@ impl LawnOrbitApp {
             .show(context, |ui| {
                 egui::ScrollArea::vertical().max_height(610.0).show(ui, |ui| {
                     if !self.profile_write_enabled {
-                        ui.colored_label(Color32::LIGHT_RED, "Changes apply for this session only: the existing profile could not be loaded.");
+                        ui.colored_label(GARDEN_ERROR, "Changes apply for this session only: the existing profile could not be loaded.");
                     }
                     ui.heading("Camera & controls");
                     let a = &mut self.profile.settings.accessibility;
@@ -1397,10 +1426,10 @@ impl LawnOrbitApp {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
-        renderer.set_scene_left_inset(if self.state == GameState::WorldEditor {
-            EDITOR_SCENE_INSET / context.content_rect().width()
-        } else {
-            0.0
+        renderer.set_scene_left_inset(match self.state {
+            GameState::WorldEditor => EDITOR_SCENE_INSET / context.content_rect().width(),
+            GameState::Title => TITLE_SCENE_INSET / context.content_rect().width(),
+            _ => 0.0,
         });
         // Texture deltas (especially the first font atlas) are independent of
         // surface acquisition. Upload them before any recoverable early return,
@@ -1604,18 +1633,95 @@ impl ApplicationHandler for LawnOrbitApp {
     }
 }
 
+fn garden_card() -> egui::Frame {
+    egui::Frame::NONE
+        .fill(GARDEN_CREAM)
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(228, 222, 202)))
+        .corner_radius(18)
+        .inner_margin(14)
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 5],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(32),
+        })
+}
+
+fn garden_button(ui: &mut egui::Ui, label: &str, size: [f32; 2], enabled: bool) -> egui::Response {
+    ui.scope(|ui| {
+        // Style each interaction state rather than overriding the button's fill,
+        // so hover and keyboard/gamepad focus remain clearly visible.
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = GARDEN_CORAL;
+        widgets.inactive.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(218, 119, 89));
+        widgets.hovered.weak_bg_fill = Color32::from_rgb(255, 172, 127);
+        widgets.hovered.bg_stroke = egui::Stroke::new(2.0, GARDEN_PINE);
+        widgets.active.weak_bg_fill = Color32::from_rgb(234, 130, 95);
+        widgets.active.bg_stroke = egui::Stroke::new(2.0, GARDEN_PINE);
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(RichText::new(label).strong()).min_size(size.into()),
+        )
+    })
+    .inner
+}
+
 fn configure_egui_style(context: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.window_fill = Color32::from_rgb(23, 31, 39);
-    visuals.panel_fill = Color32::from_rgb(20, 28, 36);
-    visuals.selection.bg_fill = Color32::from_rgb(79, 128, 68);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(95, 148, 77);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(67, 102, 61);
+    let mut visuals = egui::Visuals::light();
+    visuals.window_fill = GARDEN_CREAM;
+    visuals.panel_fill = GARDEN_CREAM;
+    visuals.window_corner_radius = egui::CornerRadius::same(18);
+    visuals.menu_corner_radius = egui::CornerRadius::same(10);
+    visuals.window_stroke = egui::Stroke::new(1.0, Color32::from_rgb(228, 222, 202));
+    visuals.window_shadow = garden_card().shadow;
+    visuals.weak_text_color = Some(GARDEN_MUTED);
+    visuals.selection.bg_fill = GARDEN_SAGE;
+    visuals.selection.stroke = egui::Stroke::new(1.0, GARDEN_PINE);
+    visuals.hyperlink_color = GARDEN_PINE;
+    visuals.extreme_bg_color = Color32::from_rgb(246, 239, 218);
+    visuals.text_edit_bg_color = Some(Color32::from_rgb(255, 253, 244));
+    visuals.faint_bg_color = Color32::from_rgb(241, 235, 214);
+    visuals.warn_fg_color = Color32::from_rgb(138, 85, 24);
+    visuals.error_fg_color = GARDEN_ERROR;
+    visuals.slider_trailing_fill = true;
+    visuals.text_cursor.stroke = egui::Stroke::new(2.0, GARDEN_PINE);
+    for widget in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        widget.corner_radius = egui::CornerRadius::same(9);
+        widget.fg_stroke = egui::Stroke::new(1.0, GARDEN_PINE);
+        widget.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(214, 217, 189));
+        widget.expansion = 0.0;
+    }
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(232, 229, 207);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(234, 237, 215);
+    visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(234, 237, 215);
+    visuals.widgets.hovered.bg_fill = GARDEN_SAGE;
+    visuals.widgets.hovered.weak_bg_fill = GARDEN_SAGE;
+    visuals.widgets.active.bg_fill = Color32::from_rgb(180, 203, 148);
+    visuals.widgets.active.weak_bg_fill = Color32::from_rgb(180, 203, 148);
+    visuals.widgets.open.bg_fill = GARDEN_SAGE;
+    visuals.widgets.open.weak_bg_fill = GARDEN_SAGE;
     context.set_visuals_of(egui::Theme::Dark, visuals.clone());
     context.set_visuals_of(egui::Theme::Light, visuals);
     context.all_styles_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(10.0, 9.0);
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.interact_size.y = 26.0;
+        for (text_style, size) in [
+            (egui::TextStyle::Heading, 22.0),
+            (egui::TextStyle::Body, 15.0),
+            (egui::TextStyle::Button, 15.0),
+            (egui::TextStyle::Small, 12.0),
+        ] {
+            style
+                .text_styles
+                .insert(text_style, egui::FontId::proportional(size));
+        }
     });
 }
 

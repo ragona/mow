@@ -458,6 +458,8 @@ Prompts disappear immediately after the corresponding action and do not repeat o
 
 Use a stylized, storybook miniature aesthetic with simplified forms, soft lighting, and strong material separation between tall grass, cut grass, and exposed rock. The sphere should look deliberately tiny rather than like a distant realistic planet.
 
+The shipping presentation is a golden-hour toy garden. Warm directional sunlight meets cool ambient shadows; rock is chalky, mower bodywork is coral enamel and cream, and hover pads have concentrated cyan emission. A dusty blue-to-peach sky, small round companion moon, and a soft camera-correct atmospheric rim frame the globe. Menus and the compact HUD use cream cards, pine text, sage controls, and coral primary actions.
+
 Key visual cues:
 
 - exaggerated horizon curvature;
@@ -486,7 +488,7 @@ The grass should exhibit:
 
 Hover-wash displacement scales with remaining blade height rather than applying a fixed world-space offset. Tall grass may flatten dramatically, partially cut blades respond progressively less, and finished stubble stays compact instead of stretching outward under the same force field.
 
-The current exaggerated presentation scales uncut blades to approximately 1.2–1.9 meters tall while retaining roughly 8.5-centimeter stubble, making every cut path dramatically legible from the mostly top-down camera.
+The current exaggerated presentation scales uncut blades to approximately 0.9–1.4 meters tall at the default grass-height scale while retaining roughly 6.4-centimeter stubble, making every cut path dramatically legible from the mostly top-down camera. Stubble scales down further for very short custom grass, so cutting never increases blade height.
 
 Variation should occur in patches as well as per blade. Fully independent random color and motion will resemble visual noise rather than vegetation.
 
@@ -803,8 +805,11 @@ Use a compact forward renderer built around one dominant directional light. The 
 3. opaque terrain, mountains, and vehicle;
 4. opaque geometric grass;
 5. clipping particles and other transparent effects;
-6. tone mapping and world upscaling; and
-7. user interface.
+6. quarter-resolution highlight extraction and separable bloom on Standard and High quality;
+7. sky, atmospheric rim, tone mapping, and world upscaling; and
+8. user interface.
+
+Bloom uses two persistent HDR textures and three fullscreen passes. Resizing rebuilds only its targets and bind groups, retaining its pipelines. Only HDR highlights glow; the lawn retains crisp geometry. Low quality skips bloom. The composite GPU timing includes bloom, and an explicit GPU readback test verifies its threshold, spread, color, and resize behavior.
 
 Individual grass blades do not cast shadows in the baseline or low-quality paths. Grass receives terrain and mountain shadows, while root darkening, directional blade normals, and inexpensive transmission provide local depth. A short-range grass shadow option may be tested for higher quality but cannot become necessary for the intended appearance.
 

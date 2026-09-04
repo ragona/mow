@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 use lawn_core::{
     cube_map::{CubeFace, direction_to_cell, face_uv_to_direction},
     planet::{Planet, SurfaceMaterial},
@@ -152,8 +152,8 @@ pub fn build_vehicle(
     vertices.clear();
     indices.clear();
 
-    // A dark lower skirt makes the orange shell read as a separate, floating
-    // chassis instead of one monolithic cube.
+    // A dark rubber skirt, a broad enamel shoulder, and a rounded cream canopy
+    // give the little mower distinct, tactile layers even at gameplay distance.
     add_chamfered_frustum(
         vertices,
         indices,
@@ -169,33 +169,80 @@ pub fn build_vehicle(
         vertices,
         indices,
         chassis_transform,
-        Vec3::new(0.0, 0.18, 0.0),
-        Vec2::splat(0.79),
-        Vec2::splat(0.65),
-        0.27,
-        0.19,
+        Vec3::new(0.0, 0.12, 0.0),
+        Vec2::splat(0.78),
+        Vec2::splat(0.83),
+        0.17,
+        0.28,
         2,
     );
     add_chamfered_frustum(
         vertices,
         indices,
         chassis_transform,
-        Vec3::new(0.0, 0.5, 0.0),
-        Vec2::splat(0.57),
-        Vec2::splat(0.42),
-        0.16,
-        0.14,
+        Vec3::new(0.0, 0.345, 0.0),
+        Vec2::splat(0.83),
+        Vec2::splat(0.65),
+        0.055,
+        0.28,
+        2,
+    );
+    add_ellipsoid(
+        vertices,
+        indices,
+        chassis_transform,
+        Vec3::new(0.0, 0.53, 0.0),
+        Vec3::new(0.55, 0.30, 0.55),
         3,
     );
     add_cylinder(
         vertices,
         indices,
         chassis_transform,
-        Vec3::new(0.0, 0.685, 0.0),
-        0.29,
-        0.035,
-        12,
+        Vec3::new(0.0, 0.835, 0.0),
+        0.19,
+        0.025,
+        10,
         2,
+    );
+
+    // The antenna bends against the springy chassis lean. Its small idle sway
+    // uses simulation time, so the whole silhouette holds still when paused.
+    let local_deck_up = chassis_transform.rotation.inverse() * deck_transform.up;
+    let antenna_sway = Vec3::new(local_deck_up.x, 0.0, local_deck_up.z) * 0.42
+        + Vec3::new(
+            (elapsed_seconds * 3.6).sin(),
+            0.0,
+            (elapsed_seconds * 2.9).cos(),
+        ) * 0.013;
+    let antenna_base = Vec3::new(0.36, 0.64, 0.22);
+    let antenna_mid = antenna_base + Vec3::Y * 0.24 + antenna_sway * 0.3;
+    let antenna_tip = antenna_base + Vec3::Y * 0.49 + antenna_sway;
+    for (from, to) in [(antenna_base, antenna_mid), (antenna_mid, antenna_tip)] {
+        let stem_rotation = Quat::from_rotation_arc(Vec3::Y, (to - from).normalize());
+        let stem_transform = VehicleTransform {
+            position: chassis_transform.position + chassis_transform.rotation * (from + to) * 0.5,
+            rotation: chassis_transform.rotation * stem_rotation,
+            ..chassis_transform
+        };
+        add_cylinder(
+            vertices,
+            indices,
+            stem_transform,
+            Vec3::ZERO,
+            0.026,
+            from.distance(to) * 0.5,
+            6,
+            4,
+        );
+    }
+    add_ellipsoid(
+        vertices,
+        indices,
+        chassis_transform,
+        antenna_tip,
+        Vec3::splat(0.095),
+        3,
     );
 
     // The omnidirectional mower deck sits directly beneath the chassis.
@@ -250,6 +297,66 @@ pub fn build_vehicle(
             10,
             5,
         );
+    }
+}
+
+/// A small smooth shape with shared ring vertices and separate pole fans. The
+/// poles avoid zero-area triangles, which also keeps the shadow pass clean.
+fn add_ellipsoid(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    transform: VehicleTransform,
+    center: Vec3,
+    radii: Vec3,
+    material: u32,
+) {
+    const SEGMENTS: u32 = 12;
+    const RINGS: u32 = 5;
+    let start = vertices.len() as u32;
+    push_model_vertex(
+        vertices,
+        transform,
+        center + Vec3::Y * radii.y,
+        Vec3::Y,
+        material,
+    );
+    for ring in 1..=RINGS {
+        let latitude = std::f32::consts::PI * ring as f32 / (RINGS + 1) as f32;
+        let (latitude_sin, latitude_cos) = latitude.sin_cos();
+        for segment in 0..SEGMENTS {
+            let angle = std::f32::consts::TAU * segment as f32 / SEGMENTS as f32;
+            let (sine, cosine) = angle.sin_cos();
+            let sphere = Vec3::new(latitude_sin * cosine, latitude_cos, latitude_sin * sine);
+            push_model_vertex(
+                vertices,
+                transform,
+                center + sphere * radii,
+                (sphere / radii).normalize(),
+                material,
+            );
+        }
+    }
+    let bottom = vertices.len() as u32;
+    push_model_vertex(
+        vertices,
+        transform,
+        center - Vec3::Y * radii.y,
+        Vec3::NEG_Y,
+        material,
+    );
+    for segment in 0..SEGMENTS {
+        let next = (segment + 1) % SEGMENTS;
+        indices.extend_from_slice(&[start, start + 1 + next, start + 1 + segment]);
+        for ring in 0..RINGS - 1 {
+            let row = start + 1 + ring * SEGMENTS;
+            let upper = row + segment;
+            let upper_next = row + next;
+            let lower = upper + SEGMENTS;
+            let lower_next = upper_next + SEGMENTS;
+            indices.extend_from_slice(&[upper, upper_next, lower, upper_next, lower_next, lower]);
+        }
+        let last_row = start + 1 + (RINGS - 1) * SEGMENTS;
+        indices.extend_from_slice(&[bottom, last_row + segment, last_row + next]);
     }
 }
 

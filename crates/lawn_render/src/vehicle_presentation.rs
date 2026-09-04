@@ -9,7 +9,7 @@ const HOVER_BOB_FREQUENCY: f32 = 2.4;
 const ATTITUDE_RESPONSE: f32 = 14.0;
 const LEAN_RESPONSE: f32 = 7.5;
 const LEAN_DAMPING_RATIO: f32 = 0.62;
-const LEAN_PER_ACCELERATION: f32 = 0.0045;
+const LEAN_PER_ACCELERATION: f32 = 0.0052;
 const MAX_LEAN: f32 = 0.2;
 
 #[derive(Clone, Debug)]
@@ -19,6 +19,7 @@ pub(crate) struct VehiclePresentation {
     lean: Vec3,
     lean_velocity: Vec3,
     previous_velocity: Vec3,
+    last_presented: VehicleTransform,
 }
 
 impl VehiclePresentation {
@@ -29,6 +30,10 @@ impl VehiclePresentation {
             lean: Vec3::ZERO,
             lean_velocity: Vec3::ZERO,
             previous_velocity: velocity,
+            last_presented: VehicleTransform {
+                position: transform.position + transform.up * CHASSIS_LIFT,
+                ..transform
+            },
         }
     }
 
@@ -46,6 +51,9 @@ impl VehiclePresentation {
         elapsed_seconds: f32,
         dt: f32,
     ) -> VehicleTransform {
+        if dt <= 0.0 {
+            return self.last_presented;
+        }
         let dt = dt.clamp(f32::EPSILON, 1.0 / 30.0);
         if self.base_up.dot(target.up) < 0.5 {
             self.reset(target, velocity);
@@ -84,14 +92,18 @@ impl VehiclePresentation {
             .unwrap_or_else(|| up.any_orthonormal_vector());
         let right = forward.cross(up).normalize();
         let rotation = Quat::from_mat3(&Mat3::from_cols(right, up, -forward));
-        let hover_bob = (elapsed_seconds * HOVER_BOB_FREQUENCY).sin() * HOVER_BOB_AMPLITUDE;
+        let phase = elapsed_seconds * HOVER_BOB_FREQUENCY;
+        let hover_bob = (phase.sin() + (phase * 2.0).sin() * 0.18) * HOVER_BOB_AMPLITUDE
+            / (1.0 + velocity.length() * 0.035);
 
-        VehicleTransform {
-            position: target.position + target.up * (CHASSIS_LIFT + hover_bob),
+        self.last_presented = VehicleTransform {
+            position: target.position
+                + target.up * (CHASSIS_LIFT + hover_bob - self.lean.length() * 0.06),
             rotation,
             forward,
             up,
-        }
+        };
+        self.last_presented
     }
 }
 
@@ -149,5 +161,19 @@ mod tests {
             visual.forward
         };
         assert!(sample(120).dot(sample(960)) > 0.999_9);
+    }
+
+    #[test]
+    fn paused_presentation_freezes_the_spring_and_pose() {
+        let target = level_transform();
+        let mut presentation = VehiclePresentation::new(target, Vec3::ZERO);
+        let visual = presentation.update(target, Vec3::X * 4.0, 0.4, 1.0 / 60.0);
+        let lean = presentation.lean;
+        let lean_velocity = presentation.lean_velocity;
+        for _ in 0..120 {
+            assert_eq!(presentation.update(target, Vec3::X * 4.0, 0.4, 0.0), visual);
+        }
+        assert_eq!(presentation.lean, lean);
+        assert_eq!(presentation.lean_velocity, lean_velocity);
     }
 }
