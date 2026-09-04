@@ -1,11 +1,12 @@
-//! Local-radial top-down camera without geographic poles.
+//! Mostly top-down local-radial chase camera without geographic poles.
 
 use glam::{Quat, Vec3};
 
 use crate::{planet::Planet, profile::AccessibilitySettings, vehicle::VehicleTransform};
 
-const TOP_DOWN_HEIGHT: f32 = 9.5;
-const TOP_DOWN_ZOOM_RANGE: f32 = 4.0;
+const CHASE_HEIGHT: f32 = 10.2;
+const CHASE_TARGET_DEPTH: f32 = 2.2;
+const CHASE_ZOOM_RANGE: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraState {
@@ -26,9 +27,15 @@ pub struct CameraRig {
 impl CameraRig {
     #[must_use]
     pub fn new(vehicle: VehicleTransform, settings: &AccessibilitySettings) -> Self {
+        let (position, target) = chase_pose(
+            vehicle,
+            vehicle.forward,
+            CHASE_HEIGHT,
+            settings.camera_tilt_degrees,
+        );
         let state = CameraState {
-            position: vehicle.position + vehicle.up * TOP_DOWN_HEIGHT,
-            target: vehicle.position,
+            position,
+            target,
             up: vehicle.forward,
             field_of_view_degrees: settings.field_of_view_degrees,
         };
@@ -87,9 +94,11 @@ impl CameraRig {
             settings.camera_shake * speed_shake * (self.elapsed_seconds * 31.0).sin() * 0.008;
         screen_up = Quat::from_axis_angle(local_up, shake_angle).mul_vec3(screen_up);
 
-        let height = (TOP_DOWN_HEIGHT + self.orbit_pitch * TOP_DOWN_ZOOM_RANGE).max(5.5);
-        self.state.position = vehicle.position + local_up * height;
-        self.state.target = vehicle.position;
+        let height = (CHASE_HEIGHT + self.orbit_pitch * CHASE_ZOOM_RANGE).max(5.5);
+        let (position, target) =
+            chase_pose(vehicle, screen_up, height, settings.camera_tilt_degrees);
+        self.state.position = position;
+        self.state.target = target;
         let stiffness = settings.camera_follow_stiffness;
         let follow = 1.0 - (-stiffness * dt).exp();
         let smoothed_up = self.state.up.lerp(screen_up, follow);
@@ -100,13 +109,26 @@ impl CameraRig {
     }
 }
 
+fn chase_pose(
+    vehicle: VehicleTransform,
+    screen_up: Vec3,
+    height: f32,
+    tilt_degrees: f32,
+) -> (Vec3, Vec3) {
+    let target = vehicle.position - vehicle.up * CHASE_TARGET_DEPTH;
+    let vertical_span = height + CHASE_TARGET_DEPTH;
+    let back_offset = vertical_span * tilt_degrees.clamp(0.0, 18.0).to_radians().tan();
+    let position = vehicle.position + vehicle.up * height - screen_up * back_offset;
+    (position, target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{GeneratorConfig, PlanetGenerator, WorldSeed, planet::CURRENT_GENERATOR_VERSION};
 
     #[test]
-    fn default_camera_is_exactly_top_down() {
+    fn default_camera_is_slightly_tipped_and_keeps_the_planet_in_frame() {
         let vehicle = VehicleTransform {
             position: Vec3::Y * 15.8,
             rotation: glam::Quat::IDENTITY,
@@ -117,22 +139,39 @@ mod tests {
         let position_offset = camera.state.position - vehicle.position;
         let view_direction = (camera.state.target - camera.state.position).normalize();
 
-        assert!((position_offset.dot(vehicle.up) - TOP_DOWN_HEIGHT).abs() < 1.0e-5);
-        assert!((position_offset - vehicle.up * TOP_DOWN_HEIGHT).length() < 1.0e-5);
-        assert!(view_direction.dot(-vehicle.up) > 0.999_99);
+        assert!((position_offset.dot(vehicle.up) - CHASE_HEIGHT).abs() < 1.0e-5);
+        let tilt = view_direction.dot(-vehicle.up).acos().to_degrees();
+        assert!((tilt - 12.0).abs() < 0.01);
         assert!(camera.state.up.dot(vehicle.up).abs() < 1.0e-5);
         assert!(camera.state.up.dot(vehicle.forward) > 0.999_99);
 
         let nominal_planet_radius = 15.0_f32;
-        let angular_diameter = 2.0
-            * (nominal_planet_radius / camera.state.position.length())
-                .asin()
-                .to_degrees();
-        let vertical_fill = angular_diameter / camera.state.field_of_view_degrees;
+        let angular_radius = (nominal_planet_radius / camera.state.position.length())
+            .asin()
+            .to_degrees();
+        let planet_center = (-camera.state.position).normalize();
+        let framing_offset = view_direction.dot(planet_center).acos().to_degrees();
         assert!(
-            (0.7..1.0).contains(&vertical_fill),
-            "planet should mostly fill without cropping the view; angular fill was {vertical_fill:.3}"
+            angular_radius + framing_offset < camera.state.field_of_view_degrees * 0.5,
+            "planet should remain fully framed: radius {angular_radius:.2}°, offset {framing_offset:.2}°"
         );
+    }
+
+    #[test]
+    fn zero_tilt_restores_the_exact_top_down_view() {
+        let vehicle = VehicleTransform {
+            position: Vec3::Y * 15.8,
+            rotation: glam::Quat::IDENTITY,
+            forward: Vec3::Z,
+            up: Vec3::Y,
+        };
+        let settings = AccessibilitySettings {
+            camera_tilt_degrees: 0.0,
+            ..AccessibilitySettings::default()
+        };
+        let camera = CameraRig::new(vehicle, &settings);
+        let view_direction = (camera.state.target - camera.state.position).normalize();
+        assert!(view_direction.dot(-vehicle.up) > 0.999_99);
     }
 
     #[test]

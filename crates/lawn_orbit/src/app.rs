@@ -726,6 +726,7 @@ impl LawnOrbitApp {
                     ui.heading("Camera & controls");
                     let a = &mut self.profile.settings.accessibility;
                     ui.add(egui::Slider::new(&mut a.camera_shake, 0.0..=1.0).text("Camera shake"));
+                    ui.add(egui::Slider::new(&mut a.camera_tilt_degrees, 0.0..=18.0).text("Camera tilt"));
                     ui.add(egui::Slider::new(&mut a.field_of_view_degrees, 60.0..=120.0).text("Field of view"));
                     ui.add(egui::Slider::new(&mut a.camera_follow_stiffness, 1.0..=20.0).text("Follow stiffness"));
                     ui.add(egui::Slider::new(&mut a.steering_sensitivity, 0.25..=2.0).text("Horizontal movement sensitivity"));

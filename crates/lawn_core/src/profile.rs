@@ -23,6 +23,7 @@ pub enum QualityPreset {
 #[serde(default)]
 pub struct AccessibilitySettings {
     pub camera_shake: f32,
+    pub camera_tilt_degrees: f32,
     pub field_of_view_degrees: f32,
     pub camera_follow_stiffness: f32,
     pub fixed_horizon: bool,
@@ -39,6 +40,7 @@ impl Default for AccessibilitySettings {
     fn default() -> Self {
         Self {
             camera_shake: 0.35,
+            camera_tilt_degrees: 12.0,
             field_of_view_degrees: 90.0,
             camera_follow_stiffness: 9.0,
             fixed_horizon: false,
@@ -178,6 +180,7 @@ impl Profile {
         self.settings.controls.bindings.remove(&Action::ToggleMower);
         self.version = PROFILE_VERSION;
         a.camera_shake = a.camera_shake.clamp(0.0, 1.0);
+        a.camera_tilt_degrees = a.camera_tilt_degrees.clamp(0.0, 18.0);
         a.field_of_view_degrees = a.field_of_view_degrees.clamp(60.0, 120.0);
         a.camera_follow_stiffness = a.camera_follow_stiffness.clamp(1.0, 20.0);
         a.steering_sensitivity = a.steering_sensitivity.clamp(0.25, 2.0);

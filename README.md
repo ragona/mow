@@ -6,7 +6,7 @@ Lawn Orbit is a complete tiny-planet hover-mowing game built directly in Rust,
 authoritative mowing, arcade hover driving, Standard jobs, Free Mow, a first-play
 tutorial, local records, accessibility settings, and keyboard/gamepad input.
 The shipping planets are 15-meter-radius lawn globes covered in exaggeratedly
-tall geometric grass and viewed from an undistorted top-down camera.
+tall geometric grass and viewed from an undistorted, mostly top-down chase camera.
 
 No reusable game engine is used. Gameplay simulation is headless and independent
 of the renderer, which keeps world generation, mowing, scoring, and vehicle rules
@@ -38,7 +38,7 @@ development packages.
 | Boost | Space | South button |
 | Look behind | Q | North button |
 | Recover | Hold R | Hold East button |
-| Rotate / zoom top-down camera | I/J/K/L or right-drag | Right stick |
+| Rotate / zoom chase camera | I/J/K/L or right-drag | Right stick |
 | Recenter camera | C | Right-stick click |
 | Pause | Escape | Start |
 | Submit completed job | Enter | South button in the prompt |
@@ -46,8 +46,8 @@ development packages.
 
 Movement bindings can be remapped in Settings and analog values are preserved.
 The mower deck is always active directly beneath the chassis whenever it is grounded.
-The settings screen also contains horizontal movement sensitivity/inversion, camera shake,
-camera auto-follow, field of view, motion reduction, boost disable, grass density,
+The settings screen also contains horizontal movement sensitivity/inversion, camera tilt,
+camera shake, camera auto-follow, field of view, motion reduction, boost disable, grass density,
 render scale, MSAA, fullscreen, and a high-contrast coverage overlay.
 
 ## Workspace layout

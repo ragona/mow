@@ -406,7 +406,7 @@ Post-MVP challenges may include:
 
 ### 11.1 Standard camera
 
-The current camera is a fully top-down local-radial view positioned directly above the vehicle. It looks straight into the planet, uses the chassis heading as screen-up, and uses an undistorted 90-degree perspective projection. Horizontal camera input temporarily rotates screen heading while vertical input adjusts height without tilting the view.
+The standard camera is a mostly top-down local-radial chase view. Its default angle is tipped approximately 12 degrees from vertical and shifted slightly behind the mower, revealing the vehicle's depth without losing the whole-globe composition. It aims a short distance beneath the mower so the planet remains comfortably framed in the undistorted 90-degree perspective projection. Horizontal camera input temporarily rotates screen heading while vertical input adjusts height without changing the chosen tilt.
 
 The camera must not rotate to follow velocity: strafing and reversing leave the chassis facing screen-up. It must not snap at geographic poles because the planet has no gameplay-facing longitude frame.
 
@@ -429,6 +429,7 @@ Only the standard camera is required for MVP.
 The camera must offer:
 
 - adjustable camera shake, including off;
+- an adjustable 0–18 degree chase tilt, with 0 restoring the exact top-down view;
 - adjustable field of view;
 - adjustable camera follow stiffness;
 - an optional fixed-horizon mode if testing shows surface rotation causes discomfort; and
@@ -526,7 +527,7 @@ The grass should exhibit:
 - strong localized bending from the mower's broad hover wash, with its wake following velocity rather than chassis facing; and
 - short geometric stubble after mowing.
 
-The current exaggerated presentation scales uncut blades to approximately 1.2–1.9 meters tall while retaining roughly 8.5-centimeter stubble, making every cut path dramatically legible from the top-down camera.
+The current exaggerated presentation scales uncut blades to approximately 1.2–1.9 meters tall while retaining roughly 8.5-centimeter stubble, making every cut path dramatically legible from the mostly top-down camera.
 
 Variation should occur in patches as well as per blade. Fully independent random color and motion will resemble visual noise rather than vegetation.
 
@@ -933,7 +934,7 @@ Instrument named CPU spans and GPU passes from the first visual prototype. Recor
 | `Renderer` | `wgpu` ownership, resources, explicit passes, instanced grass, culling, LOD, lighting, effects, and presentation |
 | `ObjectiveSystem` | Completion rules and optional job objectives |
 | `ScoreSystem` | Time, coverage, collisions, efficiency, recoveries, ratings, and per-seed records |
-| `CameraRig` | Top-down camera, local-up tracking, rotation, zoom, and comfort options |
+| `CameraRig` | Mostly top-down chase camera, local-up tracking, tilt, rotation, zoom, and comfort options |
 | `SaveProfile` | Settings, bindings, tutorial flags, unlocks, and records |
 | `RunRecorder` | Optional compact mowing-stamp history for result playback |
 | `DevTools` | `egui` tuning, seed inspection, debug views, timing graphs, and diagnostic capture |
