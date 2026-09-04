@@ -728,8 +728,8 @@ impl LawnOrbitApp {
                     ui.add(egui::Slider::new(&mut a.camera_shake, 0.0..=1.0).text("Camera shake"));
                     ui.add(egui::Slider::new(&mut a.field_of_view_degrees, 60.0..=120.0).text("Field of view"));
                     ui.add(egui::Slider::new(&mut a.camera_follow_stiffness, 1.0..=20.0).text("Follow stiffness"));
-                    ui.add(egui::Slider::new(&mut a.steering_sensitivity, 0.25..=2.0).text("Steering sensitivity"));
-                    ui.checkbox(&mut a.invert_steering, "Invert steering");
+                    ui.add(egui::Slider::new(&mut a.steering_sensitivity, 0.25..=2.0).text("Horizontal movement sensitivity"));
+                    ui.checkbox(&mut a.invert_steering, "Invert horizontal movement");
                     ui.checkbox(&mut a.invert_camera_y, "Invert camera Y");
                     ui.checkbox(&mut a.fixed_horizon, "Fixed-horizon comfort mode");
                     ui.checkbox(&mut a.boost_enabled, "Enable boost");
@@ -774,8 +774,10 @@ impl LawnOrbitApp {
                             Action::RecenterCamera, Action::Pause,
                         ] {
                             ui.label(match action {
-                                Action::SteerLeft => "TurnLeft".to_owned(),
-                                Action::SteerRight => "TurnRight".to_owned(),
+                                Action::SteerLeft => "Move left".to_owned(),
+                                Action::SteerRight => "Move right".to_owned(),
+                                Action::Accelerate => "Move forward".to_owned(),
+                                Action::BrakeReverse => "Move backward".to_owned(),
                                 _ => format!("{action:?}"),
                             });
                             let label = if self.input.rebind_action == Some(action) {

@@ -186,18 +186,23 @@ impl ClippingParticles {
     fn spawn(&mut self, vehicle: &VehicleState, count: usize) {
         let transform = vehicle.transform;
         let right = transform.forward.cross(transform.up).normalize();
-        let deck = transform.position + transform.forward * 0.9 - transform.up * 0.48;
+        let deck = transform.position - transform.up * 0.48;
+        let velocity_direction = (vehicle.linear_velocity
+            - transform.up * vehicle.linear_velocity.dot(transform.up))
+        .try_normalize()
+        .unwrap_or(Vec3::ZERO);
         for _ in 0..count {
             self.spawn_counter = self.spawn_counter.wrapping_add(1);
             let a = hash01(self.spawn_counter.wrapping_mul(0x9E37_79B9));
             let b = hash01(self.spawn_counter.wrapping_mul(0x85EB_CA6B));
             let c = hash01(self.spawn_counter.wrapping_mul(0xC2B2_AE35));
-            let position =
-                deck + right * ((a - 0.5) * 1.9) + transform.forward * ((b - 0.5) * 0.55);
+            let angle = a * std::f32::consts::TAU;
+            let outward = right * angle.cos() + transform.forward * angle.sin();
+            let position = deck + outward * b.sqrt();
             let velocity = vehicle.linear_velocity * 0.22
                 + transform.up * (1.2 + c * 2.0)
-                + right * ((a - 0.5) * 2.4)
-                - transform.forward * (0.4 + b);
+                + outward * (1.8 + c * 2.0)
+                - velocity_direction * 0.8;
             if self.particles.len() == MAX_PARTICLES {
                 self.particles.remove(0);
             }

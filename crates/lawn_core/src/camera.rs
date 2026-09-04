@@ -67,15 +67,11 @@ impl CameraRig {
         self.orbit_pitch *= (-1.8 * dt).exp();
 
         let local_up = vehicle.up;
-        let velocity_forward = (velocity - local_up * velocity.dot(local_up)).try_normalize();
-        let favored_forward = velocity_forward.map_or(vehicle.forward, |direction| {
-            vehicle.forward.lerp(direction, 0.55).normalize()
-        });
         let fixed_heading = Vec3::Y - local_up * Vec3::Y.dot(local_up);
         let base_screen_up = if settings.fixed_horizon {
-            fixed_heading.try_normalize().unwrap_or(favored_forward)
+            fixed_heading.try_normalize().unwrap_or(vehicle.forward)
         } else {
-            favored_forward
+            vehicle.forward
         };
         let heading_rotation = self.orbit_yaw
             + if look_behind {
@@ -214,5 +210,6 @@ mod tests {
             1.0 / 60.0,
         );
         assert!(slow.state.position.distance(fast.state.position) < 1.0e-6);
+        assert!(slow.state.up.distance(fast.state.up) < 1.0e-6);
     }
 }

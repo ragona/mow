@@ -32,10 +32,9 @@ development packages.
 
 ## Default controls
 
-| Action | Keyboard and mouse | Gamepad |
+| Action | Keyboard / mouse | Gamepad |
 | --- | --- | --- |
-| Accelerate / brake-reverse | W / S or Up / Down | Right / left trigger |
-| Steer | A / D or Left / Right | Left stick |
+| Move freely | WASD or arrow keys | Left stick (triggers also supported) |
 | Boost | Space | South button |
 | Look behind | Q | North button |
 | Recover | Hold R | Hold East button |
@@ -45,9 +44,9 @@ development packages.
 | Submit completed job | Enter | South button in the prompt |
 | Diagnostics | F3 | — |
 
-Driving bindings can be remapped in Settings and analog trigger values are preserved.
-The mower deck is always active whenever it is grounded.
-The settings screen also contains steering sensitivity/inversion, camera shake,
+Movement bindings can be remapped in Settings and analog values are preserved.
+The mower deck is always active directly beneath the chassis whenever it is grounded.
+The settings screen also contains horizontal movement sensitivity/inversion, camera shake,
 camera auto-follow, field of view, motion reduction, boost disable, grass density,
 render scale, MSAA, fullscreen, and a high-contrast coverage overlay.
 

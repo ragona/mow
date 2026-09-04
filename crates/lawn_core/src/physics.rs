@@ -23,9 +23,9 @@ use crate::{
 };
 
 const COLLISION_FACE_RESOLUTION: u32 = 32;
-const BODY_HALF_WIDTH: f32 = 0.88;
+const BODY_HALF_WIDTH: f32 = 0.95;
 const BODY_HALF_HEIGHT: f32 = 0.28;
-const BODY_HALF_LENGTH: f32 = 1.02;
+const BODY_HALF_LENGTH: f32 = 0.95;
 
 /// Desired behavior supplied by the arcade controller for one fixed tick.
 #[derive(Clone, Copy, Debug)]
@@ -201,10 +201,10 @@ impl PhysicsWorld {
             }
 
             let orientation_error =
-                current_up.cross(up) * 12.0 + current_forward.cross(desired_forward) * 3.8;
+                current_up.cross(up) * 18.0 + current_forward.cross(desired_forward) * 4.5;
             let angular_velocity = vector_to_glam(body.angvel());
             body.add_torque(
-                glam_vector((orientation_error - angular_velocity * 0.75) * mass * 3.0),
+                glam_vector((orientation_error - angular_velocity) * mass * 3.0),
                 true,
             );
         }
@@ -242,10 +242,10 @@ impl PhysicsWorld {
     fn hover_pad_samples(&self, position: Vec3, rotation: Quat, up: Vec3) -> [PadSample; 4] {
         let mut samples = [PadSample::default(); 4];
         let anchors = [
-            Vec3::new(-0.67, -0.18, -0.72),
-            Vec3::new(0.67, -0.18, -0.72),
-            Vec3::new(-0.67, -0.18, 0.72),
-            Vec3::new(0.67, -0.18, 0.72),
+            Vec3::new(-0.68, -0.18, -0.68),
+            Vec3::new(0.68, -0.18, -0.68),
+            Vec3::new(-0.68, -0.18, 0.68),
+            Vec3::new(0.68, -0.18, 0.68),
         ];
         for (sample, local) in samples.iter_mut().zip(anchors) {
             let anchor = position + rotation.mul_vec3(local);

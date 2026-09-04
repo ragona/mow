@@ -84,20 +84,12 @@ pub struct VehicleTickResult {
     pub recovered: bool,
     pub deck_from: Vec3,
     pub deck_to: Vec3,
-    pub reverse_cut_multiplier: f32,
 }
 
 #[derive(Debug)]
 pub struct HoverVehicle {
     pub state: VehicleState,
     previous_transform: VehicleTransform,
-    /// Integrated steering target. Keeping this independent of the physical
-    /// body's lag makes steering input accumulate immediately instead of
-    /// presenting Rapier with a target only one simulation tick ahead.
-    steering_forward: Vec3,
-    /// Controller-side velocity envelopes. Keeping these independent of the
-    /// rigid body's current speed prevents two serial acceleration filters.
-    commanded_forward_speed: f32,
     physics: PhysicsWorld,
 }
 
@@ -108,8 +100,6 @@ impl HoverVehicle {
         let physics = PhysicsWorld::new(planet, planet.spawn, tuning);
         Self {
             previous_transform: state.transform,
-            steering_forward: state.transform.forward,
-            commanded_forward_speed: 0.0,
             state,
             physics,
         }
@@ -131,6 +121,7 @@ impl HoverVehicle {
         planet: &Planet,
         tuning: &VehicleTuning,
         input: InputSnapshot,
+        movement_forward: Vec3,
         boost_allowed: bool,
         dt: f32,
     ) -> VehicleTickResult {
@@ -183,22 +174,15 @@ impl HoverVehicle {
             - up * self.state.transform.forward.dot(up))
         .try_normalize()
         .unwrap_or_else(|| tangent_frame(up).0);
-        self.steering_forward = (self.steering_forward - up * self.steering_forward.dot(up))
+        let screen_forward = (movement_forward - up * movement_forward.dot(up))
             .try_normalize()
             .unwrap_or(body_forward);
+        let screen_right = screen_forward.cross(up).normalize();
 
         let tangent_velocity = self.state.linear_velocity - up * self.state.linear_velocity.dot(up);
-        let forward_speed = tangent_velocity.dot(self.steering_forward);
-        let normalized_speed = (forward_speed.abs() / tuning.max_forward_speed).clamp(0.0, 1.0);
-        let turn_radius = tuning.low_speed_turn_radius
-            + (tuning.full_speed_turn_radius - tuning.low_speed_turn_radius) * normalized_speed;
-        let reference_speed = forward_speed.abs().max(3.0);
-        let yaw_rate = input.steer * reference_speed / turn_radius * tuning.steering_strength;
-        let travel_sign = if forward_speed < -0.2 { -1.0 } else { 1.0 };
-        self.steering_forward = Quat::from_axis_angle(up, -yaw_rate * travel_sign * dt)
-            .mul_vec3(self.steering_forward)
-            .normalize();
-        let movement_requested = input.accelerate > 0.05 || input.brake_reverse > 0.05;
+        let movement_input = glam::Vec2::new(input.steer, input.accelerate - input.brake_reverse)
+            .clamp_length_max(1.0);
+        let movement_requested = movement_input.length_squared() > 0.05 * 0.05;
         let boost_requested = boost_allowed && input.boost_held && movement_requested;
         self.state.boost_active = boost_requested && self.state.boost_charge > 0.0;
         if self.state.boost_active {
@@ -213,36 +197,40 @@ impl HoverVehicle {
             }
         }
 
-        let desired_speed = if input.accelerate >= input.brake_reverse {
-            let top_speed = if self.state.boost_active {
-                tuning.boost_max_speed
-            } else {
-                tuning.max_forward_speed
-            };
-            input.accelerate * top_speed
+        let top_speed = if self.state.boost_active {
+            tuning.boost_max_speed
         } else {
-            -input.brake_reverse * tuning.max_reverse_speed
+            tuning.max_speed
         };
-        let acceleration_rate = std::f32::consts::LN_10 / tuning.acceleration_time_90_percent
+        let desired_velocity =
+            (screen_right * movement_input.x + screen_forward * movement_input.y) * top_speed;
+        let alignment = tangent_velocity
+            .try_normalize()
+            .zip(desired_velocity.try_normalize())
+            .map_or(1.0, |(current, desired)| current.dot(desired));
+        let slowing_down = alignment >= 0.8
+            && desired_velocity.length_squared() + 0.01 < tangent_velocity.length_squared();
+        let response_time = if !movement_requested || slowing_down {
+            tuning.braking_time_90_percent
+        } else if alignment < 0.8 {
+            tuning.direction_change_time_90_percent
+        } else {
+            tuning.acceleration_time_90_percent
+        };
+        let drive_response = std::f32::consts::LN_10 / response_time.max(0.01)
             * if self.state.boost_active {
                 tuning.boost_acceleration_multiplier
             } else {
                 1.0
             };
-        self.commanded_forward_speed += (desired_speed - self.commanded_forward_speed)
-            * (1.0 - (-acceleration_rate * dt).exp());
-        let desired_velocity = self.steering_forward * self.commanded_forward_speed;
         let physics = self.physics.step(
             VehiclePhysicsInput {
                 desired_velocity,
-                desired_forward: self.steering_forward,
+                // Translation is omnidirectional. The chassis only maintains
+                // its heading while conforming to the changing surface normal.
+                desired_forward: body_forward,
                 desired_up: terrain.normal,
-                drive_response: 15.0
-                    * if self.state.boost_active {
-                        tuning.boost_acceleration_multiplier
-                    } else {
-                        1.0
-                    },
+                drive_response,
             },
             dt,
         );
@@ -258,7 +246,7 @@ impl HoverVehicle {
         let transform_up = physics.up.normalize_or(terrain.normal);
         let transform_forward = (physics.forward
             - transform_up * physics.forward.dot(transform_up))
-        .normalize_or(self.steering_forward);
+        .normalize_or(body_forward);
         self.state.transform = VehicleTransform {
             position: new_position,
             rotation: physics.rotation,
@@ -280,23 +268,17 @@ impl HoverVehicle {
             }
         });
         self.state.stuck_seconds =
-            if (input.accelerate > 0.5 || input.brake_reverse > 0.5) && self.state.speed() < 0.4 {
+            if movement_input.length_squared() > 0.25 && self.state.speed() < 0.4 {
                 self.state.stuck_seconds + dt
             } else {
                 0.0
             };
-        let reverse_cut_multiplier = if self.commanded_forward_speed < -0.1 {
-            0.7
-        } else {
-            1.0
-        };
         VehicleTickResult {
             traveled_distance,
             collision_impulse,
             recovered: false,
             deck_from: old_deck,
             deck_to: self.deck_position(tuning),
-            reverse_cut_multiplier,
         }
     }
 
@@ -304,8 +286,6 @@ impl HoverVehicle {
         let safe = planet.nearest_safe_point(self.state.transform.position.normalize_or(Vec3::Y));
         self.state.transform = make_transform(safe.position, self.state.transform.forward, safe.up);
         self.previous_transform = self.state.transform;
-        self.steering_forward = self.state.transform.forward;
-        self.commanded_forward_speed = 0.0;
         self.state.linear_velocity = Vec3::ZERO;
         self.physics.teleport(self.state.transform, Vec3::ZERO);
         self.state.recovery_hold = 0.0;
@@ -318,8 +298,7 @@ impl HoverVehicle {
 
     #[must_use]
     pub fn deck_position(&self, tuning: &VehicleTuning) -> Vec3 {
-        self.state.transform.position + self.state.transform.forward * (tuning.car_length * 0.36)
-            - self.state.transform.up * (tuning.hover_height * 0.72)
+        self.state.transform.position - self.state.transform.up * (tuning.hover_height * 0.72)
     }
 }
 
@@ -350,13 +329,25 @@ mod tests {
             .unwrap()
     }
 
+    fn tick(
+        vehicle: &mut HoverVehicle,
+        planet: &Planet,
+        tuning: &VehicleTuning,
+        input: InputSnapshot,
+        dt: f32,
+    ) -> VehicleTickResult {
+        let movement_forward = vehicle.state.transform.forward;
+        vehicle.tick(planet, tuning, input, movement_forward, true, dt)
+    }
+
     #[test]
     fn vehicle_stays_aligned_during_circumnavigation() {
         let planet = planet();
         let tuning = VehicleTuning::default();
         let mut vehicle = HoverVehicle::new(&planet, &tuning);
         for step in 0..120 * 25 {
-            vehicle.tick(
+            tick(
+                &mut vehicle,
                 &planet,
                 &tuning,
                 InputSnapshot {
@@ -364,7 +355,6 @@ mod tests {
                     steer: 0.15,
                     ..InputSnapshot::default()
                 },
-                true,
                 1.0 / 120.0,
             );
             let direction = vehicle.state.transform.position.normalize();
@@ -398,14 +388,14 @@ mod tests {
             ..VehicleTuning::default()
         };
         let mut vehicle = HoverVehicle::new(&planet, &tuning);
-        vehicle.tick(
+        tick(
+            &mut vehicle,
             &planet,
             &tuning,
             InputSnapshot {
                 recover_held: true,
                 ..InputSnapshot::default()
             },
-            true,
             0.03,
         );
         assert_eq!(vehicle.state.recoveries, 1);
@@ -413,49 +403,69 @@ mod tests {
     }
 
     #[test]
-    fn steering_rotates_the_chassis_and_tracks_forward_velocity() {
+    fn forward_backward_and_sideways_have_the_same_speed() {
         let planet = planet();
         let tuning = VehicleTuning::default();
-        let mut vehicle = HoverVehicle::new(&planet, &tuning);
-        let initial = vehicle.state.transform;
-        for _ in 0..120 {
-            vehicle.tick(
+        let mut forward = HoverVehicle::new(&planet, &tuning);
+        let mut backward = HoverVehicle::new(&planet, &tuning);
+        let mut sideways = HoverVehicle::new(&planet, &tuning);
+        for _ in 0..48 {
+            tick(
+                &mut forward,
                 &planet,
                 &tuning,
                 InputSnapshot {
                     accelerate: 1.0,
+                    ..InputSnapshot::default()
+                },
+                1.0 / 120.0,
+            );
+            tick(
+                &mut backward,
+                &planet,
+                &tuning,
+                InputSnapshot {
+                    brake_reverse: 1.0,
+                    ..InputSnapshot::default()
+                },
+                1.0 / 120.0,
+            );
+            tick(
+                &mut sideways,
+                &planet,
+                &tuning,
+                InputSnapshot {
                     steer: 1.0,
                     ..InputSnapshot::default()
                 },
-                true,
                 1.0 / 120.0,
             );
         }
-        let heading_change = initial
-            .forward
-            .dot(vehicle.state.transform.forward)
-            .clamp(-1.0, 1.0)
-            .acos();
+        let speeds = [
+            forward.state.speed(),
+            backward.state.speed(),
+            sideways.state.speed(),
+        ];
+        let slowest = speeds.into_iter().fold(f32::INFINITY, f32::min);
+        let fastest = speeds.into_iter().fold(0.0_f32, f32::max);
         assert!(
-            heading_change > 0.8,
-            "one second of full steering only rotated the chassis by {heading_change} radians"
+            slowest > fastest * 0.9,
+            "directional speeds diverged: {speeds:?}"
         );
-        let local_right = vehicle
+
+        let local_right = sideways
             .state
             .transform
             .forward
-            .cross(vehicle.state.transform.up)
+            .cross(sideways.state.transform.up)
             .normalize();
-        let lateral_velocity = vehicle.state.linear_velocity.dot(local_right).abs();
-        let forward_velocity = vehicle
+        let lateral_speed = sideways.state.linear_velocity.dot(local_right).abs();
+        let chassis_forward_speed = sideways
             .state
             .linear_velocity
-            .dot(vehicle.state.transform.forward)
+            .dot(sideways.state.transform.forward)
             .abs();
-        assert!(
-            forward_velocity > lateral_velocity * 1.5,
-            "turning should retain forward motion, but forward velocity was {forward_velocity} versus {lateral_velocity} lateral"
-        );
+        assert!(lateral_speed > chassis_forward_speed * 4.0);
     }
 
     #[test]
@@ -467,17 +477,18 @@ mod tests {
         let mut normal_peak = 0.0_f32;
         let mut boosted_peak = 0.0_f32;
         for _ in 0..120 {
-            normal.tick(
+            tick(
+                &mut normal,
                 &planet,
                 &tuning,
                 InputSnapshot {
                     accelerate: 1.0,
                     ..InputSnapshot::default()
                 },
-                true,
                 1.0 / 120.0,
             );
-            boosted.tick(
+            tick(
+                &mut boosted,
                 &planet,
                 &tuning,
                 InputSnapshot {
@@ -485,7 +496,6 @@ mod tests {
                     boost_held: true,
                     ..InputSnapshot::default()
                 },
-                true,
                 1.0 / 120.0,
             );
             normal_peak = normal_peak.max(normal.state.speed());
@@ -510,14 +520,14 @@ mod tests {
         let mut peak_speed = 0.0_f32;
         let mut traveled = 0.0_f32;
         for _ in 0..120 {
-            let result = vehicle.tick(
+            let result = tick(
+                &mut vehicle,
                 &planet,
                 &tuning,
                 InputSnapshot {
                     accelerate: 1.0,
                     ..InputSnapshot::default()
                 },
-                true,
                 1.0 / 120.0,
             );
             peak_speed = peak_speed.max(vehicle.state.speed());
@@ -528,10 +538,122 @@ mod tests {
             .linear_velocity
             .dot(vehicle.state.transform.forward);
         assert!(
-            forward_speed > tuning.max_forward_speed * 0.7,
+            forward_speed > tuning.max_speed * 0.9,
             "forward launch only reached {forward_speed} m/s after one second (peak speed {peak_speed}, final speed {}, distance {traveled})",
             vehicle.state.speed()
         );
+    }
+
+    #[test]
+    fn releasing_input_brakes_quickly() {
+        let planet = planet();
+        let tuning = VehicleTuning::default();
+        let mut vehicle = HoverVehicle::new(&planet, &tuning);
+        for _ in 0..120 {
+            tick(
+                &mut vehicle,
+                &planet,
+                &tuning,
+                InputSnapshot {
+                    accelerate: 1.0,
+                    ..InputSnapshot::default()
+                },
+                1.0 / 120.0,
+            );
+        }
+        let cruising_speed = vehicle.state.speed();
+        for _ in 0..24 {
+            tick(
+                &mut vehicle,
+                &planet,
+                &tuning,
+                InputSnapshot::default(),
+                1.0 / 120.0,
+            );
+        }
+        assert!(
+            vehicle.state.speed() < cruising_speed * 0.25,
+            "mower retained {} m/s from a {cruising_speed} m/s cruise",
+            vehicle.state.speed()
+        );
+    }
+
+    #[test]
+    fn reversing_direction_is_fast_but_not_instantaneous() {
+        let planet = planet();
+        let tuning = VehicleTuning::default();
+        let mut vehicle = HoverVehicle::new(&planet, &tuning);
+        for _ in 0..120 {
+            tick(
+                &mut vehicle,
+                &planet,
+                &tuning,
+                InputSnapshot {
+                    accelerate: 1.0,
+                    ..InputSnapshot::default()
+                },
+                1.0 / 120.0,
+            );
+        }
+        let initial_forward_speed = vehicle
+            .state
+            .linear_velocity
+            .dot(vehicle.state.transform.forward);
+        tick(
+            &mut vehicle,
+            &planet,
+            &tuning,
+            InputSnapshot {
+                brake_reverse: 1.0,
+                ..InputSnapshot::default()
+            },
+            1.0 / 120.0,
+        );
+        assert!(
+            vehicle
+                .state
+                .linear_velocity
+                .dot(vehicle.state.transform.forward)
+                > 0.0,
+            "direction change should sweep through momentum rather than snap"
+        );
+        for _ in 1..72 {
+            tick(
+                &mut vehicle,
+                &planet,
+                &tuning,
+                InputSnapshot {
+                    brake_reverse: 1.0,
+                    ..InputSnapshot::default()
+                },
+                1.0 / 120.0,
+            );
+        }
+        let reversed_speed = vehicle
+            .state
+            .linear_velocity
+            .dot(vehicle.state.transform.forward);
+        assert!(initial_forward_speed > tuning.max_speed * 0.9);
+        assert!(
+            reversed_speed < -tuning.max_speed * 0.8,
+            "reversal reached only {reversed_speed} m/s after 0.6 seconds"
+        );
+    }
+
+    #[test]
+    fn mower_deck_is_centered_under_the_chassis() {
+        let planet = planet();
+        let tuning = VehicleTuning::default();
+        let vehicle = HoverVehicle::new(&planet, &tuning);
+        let offset = vehicle.deck_position(&tuning) - vehicle.state.transform.position;
+        assert!(offset.dot(vehicle.state.transform.forward).abs() < 1.0e-6);
+        let right = vehicle
+            .state
+            .transform
+            .forward
+            .cross(vehicle.state.transform.up);
+        assert!(offset.dot(right).abs() < 1.0e-6);
+        assert!(offset.dot(vehicle.state.transform.up) < 0.0);
     }
 
     #[test]
@@ -540,11 +662,11 @@ mod tests {
         let tuning = VehicleTuning::default();
         let mut vehicle = HoverVehicle::new(&planet, &tuning);
         vehicle.state.mower_enabled = false;
-        vehicle.tick(
+        tick(
+            &mut vehicle,
             &planet,
             &tuning,
             InputSnapshot::default(),
-            true,
             1.0 / 120.0,
         );
         assert!(vehicle.state.mower_enabled);

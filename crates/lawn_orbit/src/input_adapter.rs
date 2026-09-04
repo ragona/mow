@@ -403,13 +403,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn analog_trigger_values_are_not_quantized() {
+    fn analog_movement_values_are_not_quantized() {
         let mut input = InputAdapter::default();
         input
             .axes
             .insert(format!("Button{:?}", Button::RightTrigger2), 0.37);
         let snapshot = input.snapshot(&ControlMap::default(), &AccessibilitySettings::default());
         assert!((snapshot.accelerate - 0.37).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn left_stick_supplies_both_movement_axes() {
+        let mut input = InputAdapter::default();
+        input.axes.insert(format!("{:?}", Axis::LeftStickX), 0.6);
+        input.axes.insert(format!("{:?}", Axis::LeftStickY), -0.8);
+        let snapshot = input.snapshot(&ControlMap::default(), &AccessibilitySettings::default());
+        assert!((snapshot.steer - 0.6).abs() < 1.0e-6);
+        assert!((snapshot.brake_reverse - 0.8).abs() < 1.0e-6);
     }
 
     #[test]
@@ -429,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn steering_inversion_applies_after_analog_mapping() {
+    fn horizontal_inversion_applies_after_analog_mapping() {
         let mut input = InputAdapter::default();
         input.axes.insert(format!("{:?}", Axis::LeftStickX), 0.6);
         let accessibility = AccessibilitySettings {

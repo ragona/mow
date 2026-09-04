@@ -6,9 +6,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Action {
+    /// Legacy action name retained for profile compatibility; moves screen-left.
     SteerLeft,
+    /// Legacy action name retained for profile compatibility; moves screen-right.
     SteerRight,
+    /// Legacy action name retained for profile compatibility; moves screen-up.
     Accelerate,
+    /// Legacy action name retained for profile compatibility; moves screen-down.
     BrakeReverse,
     Boost,
     /// Retained only so profiles from the toggle-mower build still deserialize.
@@ -53,6 +57,7 @@ impl Default for ControlMap {
             vec![
                 Key("KeyA".into()),
                 Key("ArrowLeft".into()),
+                GamepadButton("DPadLeft".into()),
                 GamepadAxis {
                     axis: "LeftStickX".into(),
                     direction: -1,
@@ -64,6 +69,7 @@ impl Default for ControlMap {
             vec![
                 Key("KeyD".into()),
                 Key("ArrowRight".into()),
+                GamepadButton("DPadRight".into()),
                 GamepadAxis {
                     axis: "LeftStickX".into(),
                     direction: 1,
@@ -75,6 +81,11 @@ impl Default for ControlMap {
             vec![
                 Key("KeyW".into()),
                 Key("ArrowUp".into()),
+                GamepadButton("DPadUp".into()),
+                GamepadAxis {
+                    axis: "LeftStickY".into(),
+                    direction: 1,
+                },
                 GamepadAxis {
                     axis: "RightZ".into(),
                     direction: 1,
@@ -90,6 +101,11 @@ impl Default for ControlMap {
             vec![
                 Key("KeyS".into()),
                 Key("ArrowDown".into()),
+                GamepadButton("DPadDown".into()),
+                GamepadAxis {
+                    axis: "LeftStickY".into(),
+                    direction: -1,
+                },
                 GamepadAxis {
                     axis: "LeftZ".into(),
                     direction: 1,
@@ -166,11 +182,11 @@ impl Default for ControlMap {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InputSnapshot {
-    /// Analog steering in `[-1, 1]`.
+    /// Camera-relative horizontal movement in `[-1, 1]` (legacy field name).
     pub steer: f32,
-    /// Preserved analog trigger value in `[0, 1]`.
+    /// Camera-relative forward movement in `[0, 1]` (legacy field name).
     pub accelerate: f32,
-    /// Preserved analog trigger value in `[0, 1]`.
+    /// Camera-relative backward movement in `[0, 1]` (legacy field name).
     pub brake_reverse: f32,
     pub camera_orbit: [f32; 2],
     pub boost_held: bool,
@@ -187,6 +203,18 @@ impl InputSnapshot {
         self.steer = self.steer.clamp(-1.0, 1.0);
         self.accelerate = self.accelerate.clamp(0.0, 1.0);
         self.brake_reverse = self.brake_reverse.clamp(0.0, 1.0);
+        let forward = self.accelerate - self.brake_reverse;
+        let length = self.steer.hypot(forward);
+        if length > 1.0 {
+            self.steer /= length;
+            if forward >= 0.0 {
+                self.accelerate = forward / length;
+                self.brake_reverse = 0.0;
+            } else {
+                self.accelerate = 0.0;
+                self.brake_reverse = -forward / length;
+            }
+        }
         self.camera_orbit[0] = self.camera_orbit[0].clamp(-1.0, 1.0);
         self.camera_orbit[1] = self.camera_orbit[1].clamp(-1.0, 1.0);
         self
@@ -201,5 +229,16 @@ mod tests {
     fn retired_fisheye_action_deserializes_to_the_existing_tombstone() {
         let action: Action = ron::from_str("ToggleFisheye").unwrap();
         assert_eq!(action, Action::ToggleMower);
+    }
+
+    #[test]
+    fn diagonal_movement_is_normalized_to_a_circular_envelope() {
+        let input = InputSnapshot {
+            steer: 1.0,
+            accelerate: 1.0,
+            ..InputSnapshot::default()
+        }
+        .sanitized();
+        assert!((input.steer.hypot(input.accelerate) - 1.0).abs() < 1.0e-6);
     }
 }

@@ -40,7 +40,7 @@ impl TutorialStage {
     #[must_use]
     pub const fn prompt(self) -> Option<&'static str> {
         match self {
-            Self::Drive => Some("Accelerate and steer to begin mowing"),
+            Self::Drive => Some("Move in any direction to begin mowing"),
             Self::NoticeMowing => Some("The always-on deck shortens grass and raises coverage"),
             Self::Boost => Some("Hold Boost on a clear stretch"),
             Self::Rock => Some("Rock cannot be mowed—route around steep faces"),
@@ -169,6 +169,7 @@ impl RunState {
             &self.planet,
             &self.vehicle_tuning,
             input,
+            self.camera.state.up,
             accessibility.boost_enabled,
             FIXED_DT,
         );
@@ -230,9 +231,7 @@ impl RunState {
                 .try_normalize()
                 .unwrap_or(self.vehicle.state.transform.forward),
             deck_width: self.vehicle_tuning.mower_width,
-            cut_delta: self.vehicle_tuning.cut_rate_per_second
-                * FIXED_DT
-                * tick.reverse_cut_multiplier,
+            cut_delta: self.vehicle_tuning.cut_rate_per_second * FIXED_DT,
             recent_epoch: ((self.simulation_seconds * 30.0) as u32 & 0xff) as u8,
         };
         let result = self.mowing.stamp(stamp);
@@ -282,7 +281,9 @@ impl RunState {
             return;
         }
         let next = match self.tutorial_stage {
-            TutorialStage::Drive if input.accelerate > 0.1 && input.steer.abs() > 0.05 => {
+            TutorialStage::Drive
+                if input.steer.hypot(input.accelerate - input.brake_reverse) > 0.1 =>
+            {
                 Some(TutorialStage::NoticeMowing)
             }
             TutorialStage::NoticeMowing

@@ -453,16 +453,9 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let transform = run.vehicle.interpolated_transform(interpolation_alpha);
-        let reversing = run
-            .vehicle
-            .state
-            .linear_velocity
-            .dot(run.vehicle.state.transform.forward)
-            < -0.15;
         let (vehicle_vertices, vehicle_indices) = mesh::build_vehicle(
             transform,
             run.vehicle.state.mower_enabled,
-            reversing,
             run.simulation_seconds,
         );
         self.queue.write_buffer(

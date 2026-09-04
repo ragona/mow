@@ -161,10 +161,12 @@ impl GrassInteraction {
             time: elapsed_seconds,
             source_count: sources.len() as u32,
             resolution: INTERACTION_RESOLUTION,
-            stiffness: 24.0,
-            damping: 8.5,
+            // Deliberately broad, forceful wash: nearby tall grass should
+            // visibly flatten and rebound instead of merely trembling.
+            stiffness: 18.0,
+            damping: 5.5,
             planet_radius: self.planet_radius,
-            maximum_displacement: 0.65,
+            maximum_displacement: 1.45,
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         {
@@ -240,38 +242,37 @@ fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_>
 fn force_sources(planet: &Planet, vehicle: &VehicleState, mower_width: f32) -> Vec<ForceSourceGpu> {
     let transform = vehicle.transform;
     let right = transform.forward.cross(transform.up).normalize();
-    let velocity_direction = vehicle
-        .linear_velocity
-        .try_normalize()
-        .unwrap_or(-transform.forward);
+    let tangent_velocity =
+        vehicle.linear_velocity - transform.up * vehicle.linear_velocity.dot(transform.up);
+    let velocity_direction = tangent_velocity.try_normalize().unwrap_or(Vec3::ZERO);
     let mut result = Vec::with_capacity(7);
-    for forward_offset in [-0.78_f32, 0.78] {
+    for forward_offset in [-0.72_f32, 0.72] {
         for side_offset in [-0.72_f32, 0.72] {
             let position =
                 transform.position + transform.forward * forward_offset + right * side_offset
                     - transform.up * 0.45;
-            result.push(source(position, 2.0, -velocity_direction * 0.2, 4.0));
+            result.push(source(position, 2.4, -velocity_direction * 0.45, 12.0));
         }
     }
     result.push(source(
         transform.position - transform.up * 0.35,
-        3.1,
-        -velocity_direction,
-        3.0 + vehicle.speed() * 0.18,
+        4.0,
+        -velocity_direction * 1.4,
+        14.0 + tangent_velocity.length() * 0.45,
     ));
-    let deck = transform.position + transform.forward * 0.86 - transform.up * 0.58;
+    let deck = transform.position - transform.up * 0.58;
     result.push(source(
         deck,
-        mower_width * 0.75,
-        -transform.forward * 0.35,
-        5.5,
+        mower_width * 1.25,
+        -velocity_direction * 0.6,
+        20.0,
     ));
-    let wake_position = transform.position - transform.forward * 2.2;
+    let wake_position = transform.position - velocity_direction * 2.2;
     result.push(source(
         wake_position,
-        4.2,
-        -velocity_direction * 1.8,
-        vehicle.speed() * 0.22,
+        5.5,
+        -velocity_direction * 2.4,
+        tangent_velocity.length() * 0.65,
     ));
     for source in &mut result {
         let direction =
@@ -289,5 +290,41 @@ fn source(position: Vec3, radius: f32, direction: Vec3, strength: f32) -> ForceS
     ForceSourceGpu {
         position_radius: [position.x, position.y, position.z, radius],
         direction_strength: [direction.x, direction.y, direction.z, strength],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lawn_core::{
+        GeneratorConfig, PlanetGenerator, VehicleTuning, WorldSeed,
+        planet::CURRENT_GENERATOR_VERSION, vehicle::VehicleState,
+    };
+
+    #[test]
+    fn centered_mower_emits_the_strongest_stationary_wash() {
+        let planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(WorldSeed(21), false)
+                .unwrap();
+        let vehicle = VehicleState::at_spawn(planet.spawn, &VehicleTuning::default());
+        let sources = force_sources(&planet, &vehicle, 2.2);
+
+        assert_eq!(sources.len(), 7);
+        assert!(sources[..4].iter().all(|source| {
+            (source.direction_strength[3] - 12.0).abs() < f32::EPSILON
+                && (source.position_radius[3] - 2.4).abs() < f32::EPSILON
+        }));
+        let central = sources[4];
+        let mower = sources[5];
+        let wake = sources[6];
+        assert_eq!(central.direction_strength[3], 14.0);
+        assert_eq!(mower.direction_strength[3], 20.0);
+        assert!((mower.position_radius[3] - 2.75).abs() < 1.0e-6);
+        assert_eq!(wake.direction_strength[3], 0.0);
+
+        let mower_direction =
+            Vec3::from_array(mower.position_radius[..3].try_into().unwrap()).normalize();
+        assert!(mower_direction.dot(vehicle.transform.position.normalize()) > 0.999_99);
     }
 }

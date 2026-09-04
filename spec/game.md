@@ -77,9 +77,9 @@ Mowing physically shortens grass into visible stubble and produces a crisp, cont
 
 Procedurally placed mountain groups turn an otherwise open sphere into a routing problem. They should create useful landmarks and force broad detours without fragmenting the lawn into tedious pockets or trapping the vehicle.
 
-### 3.4 Loose steering, precise results
+### 3.4 Nimble movement, precise results
 
-The car should be easy to slide and turn, but the player must always understand where the mower will cut. Mistakes should feel attributable to the player's line, not unpredictable physics.
+The mower should accelerate quickly and slide freely in any direction, but the player must always understand where it will cut. Mistakes should feel attributable to the player's line, not unpredictable physics.
 
 ### 3.5 Cozy stakes, meaningful mastery
 
@@ -207,21 +207,22 @@ The minimum shippable version includes:
 
 ### 7.1 Form and silhouette
 
-The vehicle is a small, rounded hover car with a visible front-mounted or belly-mounted mower deck. It should read as a charming utility machine rather than a weaponized racing vehicle. The deck's cutting width must be visually obvious from the driving camera.
+The vehicle is a small, rounded-square hover mower with a belly-mounted deck directly beneath its chassis. It should read as a charming utility machine rather than a weaponized racing vehicle. Its largely symmetric silhouette intentionally avoids implying that one travel direction is privileged.
 
 ### 7.2 Movement model
 
-The vehicle maintains a fixed hover distance above the local terrain and aligns its up vector toward the surface normal. Its forward and lateral movement are constrained to the tangent plane at its current position.
+The vehicle maintains a fixed hover distance above the local terrain and aligns its up vector toward the surface normal. Movement is omnidirectional, camera-relative, and constrained to the tangent plane at its current position. The chassis maintains its screen-forward heading instead of rotating to face its velocity.
 
 Handling is arcade-like:
 
-- strong acceleration at low speed;
+- strong, uniform acceleration in every direction;
 - a moderate, readable top speed;
-- speed-sensitive turning with a tight low-speed radius;
-- mild lateral slip that allows controlled drifting;
+- equal forward, backward, sideways, and diagonal speed;
+- a circular input envelope so diagonal movement is not faster;
+- stronger braking than acceleration for precise stops;
+- a short, controlled velocity sweep during large direction changes;
 - automatic stabilization after jumps or collisions;
 - no manual gears;
-- reverse speed lower than forward speed; and
 - forgiving collision response with minimal pinballing.
 
 The car may momentarily unload over bumps, but signed hover-pad suspension and strong radial attraction keep it glued to the lawn at boost speed. Nose-first tumbling is strongly damped, and the mower does not cut while it is too far above the lawn.
@@ -236,12 +237,10 @@ These values are starting points and should be exposed as data rather than compi
 | Hover height | 0.8 m |
 | Car length | 2.4 m |
 | Mower cut width | 2.2 m |
-| Maximum forward speed | 12 m/s |
-| Maximum reverse speed | 4 m/s |
-| Time to 90% top speed | 0.9 s |
-| Full-speed turn radius | 6 m |
-| Low-speed turn radius | 2 m |
-| Steering strength | 1.0 |
+| Maximum speed in any direction | 12 m/s |
+| Time to 90% top speed | 0.35 s |
+| Time to shed 90% speed on release | 0.20 s |
+| Time to complete 90% of a direction change | 0.42 s |
 | Boost maximum speed | 28 m/s |
 | Recovery hold time | 1.0 s |
 
@@ -265,9 +264,8 @@ Recovery adds a small time penalty in rated modes but never removes progress.
 
 | Action | Default input |
 | --- | --- |
-| Strafe with gentle auto-yaw | Left stick |
-| Accelerate | Right trigger |
-| Brake / reverse | Left trigger |
+| Move in any direction | Left stick or D-pad |
+| Optional forward / backward movement | Right / left trigger |
 | Boost | South face button |
 | Look behind | North face button |
 | Recover vehicle | Hold East face button |
@@ -279,9 +277,7 @@ Recovery adds a small time penalty in rated modes but never removes progress.
 
 | Action | Default input |
 | --- | --- |
-| Strafe with gentle auto-yaw | A / D or Left / Right |
-| Accelerate | W or Up |
-| Brake / reverse | S or Down |
+| Move in any direction | WASD or arrow keys |
 | Boost | Space |
 | Look behind | Q |
 | Recover vehicle | Hold R |
@@ -317,7 +313,7 @@ While the mower is close enough to the ground, the game projects a rectangular o
 
 The cutting footprint must be sampled continuously between physics frames so fast movement cannot leave dotted gaps. A practical rule is to stamp the mask at intervals no greater than one quarter of the deck width along the traveled path.
 
-The mower should still cut while reversing, at reduced effectiveness if needed for balance.
+The mower cuts identically in every travel direction.
 
 ### 9.3 Geometric cutting result
 
@@ -410,9 +406,9 @@ Post-MVP challenges may include:
 
 ### 11.1 Standard camera
 
-The current camera is a fully top-down local-radial view positioned directly above the vehicle. It looks straight into the planet, uses the travel direction as screen-up, and uses an undistorted 90-degree perspective projection. Horizontal camera input rotates screen heading while vertical input adjusts height without tilting the view.
+The current camera is a fully top-down local-radial view positioned directly above the vehicle. It looks straight into the planet, uses the chassis heading as screen-up, and uses an undistorted 90-degree perspective projection. Horizontal camera input temporarily rotates screen heading while vertical input adjusts height without tilting the view.
 
-The camera should favor the vehicle's velocity direction over its nose during a drift. It must not snap at geographic poles because the planet has no gameplay-facing longitude frame.
+The camera must not rotate to follow velocity: strafing and reversing leave the chassis facing screen-up. It must not snap at geographic poles because the planet has no gameplay-facing longitude frame.
 
 ### 11.2 Collision and obstruction
 
@@ -486,7 +482,7 @@ Required menus:
 
 The tutorial occurs inside the first standard job and does not require a separate level.
 
-1. Prompt the player to accelerate and steer.
+1. Prompt the player to move in any direction.
 2. Once moving, call attention to the active mower and rising coverage value.
 3. Introduce boost on a clear stretch of grass.
 4. Guide the player around a rocky mountain and explain which slopes and surfaces are not mowable.
@@ -527,7 +523,7 @@ The grass should exhibit:
 - darker roots or inexpensive root occlusion;
 - subtle light transmission or wrap lighting at backlit tips;
 - coherent wind traveling through the local tangent field;
-- localized bending from hover wash and the mower; and
+- strong localized bending from the mower's broad hover wash, with its wake following velocity rather than chassis facing; and
 - short geometric stubble after mowing.
 
 The current exaggerated presentation scales uncut blades to approximately 1.2–1.9 meters tall while retaining roughly 8.5-centimeter stubble, making every cut path dramatically legible from the top-down camera.
@@ -544,11 +540,11 @@ Mowing stripes come primarily from the comb direction written by the mower. Shor
 
 The hover car communicates forces through:
 
-- body lean during steering;
+- body lean opposite acceleration and braking;
 - deck vibration while cutting;
 - hover-pad compression or light intensity;
 - dust and clipping direction tied to velocity;
-- brake and reverse lights; and
+- a strong radial grass wash with a velocity-driven wake; and
 - a short squash-and-settle response on landing.
 
 ---
@@ -566,7 +562,7 @@ Required options:
 - full input remapping;
 - camera shake slider;
 - field-of-view adjustment;
-- steering sensitivity and inversion;
+- horizontal movement sensitivity and inversion;
 - hold/toggle options where applicable;
 - high-contrast cut-grass mode;
 - reduced particle mode;
@@ -673,7 +669,7 @@ Use a planet-centered world frame. At vehicle position **p** relative to planet 
 up = normalize(p - c)
 ```
 
-Project desired movement and steering forces onto the local tangent plane:
+Project desired omnidirectional movement forces onto the local tangent plane:
 
 ```text
 tangent(v) = v - dot(v, up) * up
@@ -1210,8 +1206,7 @@ The following should remain tunable rather than settled on paper:
 - precise mountain count, angular spacing, height, footprint, and rock ratio;
 - cube-sphere versus subdivided-icosphere terrain patches;
 - whether arbitrary seeds are always exposed or primarily selected through a curated flow;
-- whether the mower is front-mounted or centered beneath the car;
-- strength of drift and air control;
+- final acceleration, braking, direction-change, and air-control response;
 - whether boost temporarily reduces cutting effectiveness;
 - exact completion and rating thresholds;
 - the need for a fixed-horizon camera mode; and

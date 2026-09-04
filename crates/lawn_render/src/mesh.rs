@@ -139,7 +139,6 @@ pub fn build_tuft() -> (Vec<TuftVertex>, Vec<u16>) {
 pub fn build_vehicle(
     transform: VehicleTransform,
     mower_enabled: bool,
-    reversing: bool,
     elapsed_seconds: f32,
 ) -> (Vec<MeshVertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity(80);
@@ -149,33 +148,32 @@ pub fn build_vehicle(
         &mut indices,
         transform,
         Vec3::new(0.0, 0.05, 0.0),
-        Vec3::new(1.05, 0.36, 1.2),
+        Vec3::new(1.05, 0.36, 1.05),
         2,
     );
     add_box(
         &mut vertices,
         &mut indices,
         transform,
-        Vec3::new(0.0, 0.42, 0.18),
-        Vec3::new(0.72, 0.27, 0.68),
+        Vec3::new(0.0, 0.42, 0.0),
+        Vec3::new(0.68, 0.27, 0.68),
         3,
     );
-    // Front-mounted deck makes the exact cutting width readable.
+    // The omnidirectional mower deck sits directly beneath the chassis.
     add_box(
         &mut vertices,
         &mut indices,
         transform,
         Vec3::new(
             0.0,
-            -0.22
-                + if mower_enabled {
-                    (elapsed_seconds * 57.0).sin() * 0.018
-                } else {
-                    0.0
-                },
-            -1.18,
+            -0.3 + if mower_enabled {
+                (elapsed_seconds * 57.0).sin() * 0.018
+            } else {
+                0.0
+            },
+            0.0,
         ),
-        Vec3::new(1.1, 0.11, 0.38),
+        Vec3::new(1.1, 0.08, 1.1),
         if mower_enabled { 7 } else { 4 },
     );
     for side in [-0.72_f32, 0.72] {
@@ -187,18 +185,6 @@ pub fn build_vehicle(
                 Vec3::new(side, -0.31, longitudinal),
                 Vec3::new(0.22, 0.06, 0.24),
                 5,
-            );
-        }
-    }
-    if reversing {
-        for side in [-0.58_f32, 0.58] {
-            add_box(
-                &mut vertices,
-                &mut indices,
-                transform,
-                Vec3::new(side, 0.08, 1.205),
-                Vec3::new(0.11, 0.08, 0.025),
-                6,
             );
         }
     }

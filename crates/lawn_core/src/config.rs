@@ -79,12 +79,10 @@ pub struct VehicleTuning {
     pub car_length: f32,
     pub mower_width: f32,
     pub mower_length: f32,
-    pub max_forward_speed: f32,
-    pub max_reverse_speed: f32,
+    pub max_speed: f32,
     pub acceleration_time_90_percent: f32,
-    pub full_speed_turn_radius: f32,
-    pub low_speed_turn_radius: f32,
-    pub steering_strength: f32,
+    pub braking_time_90_percent: f32,
+    pub direction_change_time_90_percent: f32,
     pub boost_max_speed: f32,
     pub boost_acceleration_multiplier: f32,
     pub boost_capacity_seconds: f32,
@@ -104,12 +102,10 @@ impl Default for VehicleTuning {
             car_length: 2.4,
             mower_width: 2.2,
             mower_length: 0.8,
-            max_forward_speed: 12.0,
-            max_reverse_speed: 4.0,
-            acceleration_time_90_percent: 0.9,
-            full_speed_turn_radius: 6.0,
-            low_speed_turn_radius: 2.0,
-            steering_strength: 1.0,
+            max_speed: 12.0,
+            acceleration_time_90_percent: 0.35,
+            braking_time_90_percent: 0.2,
+            direction_change_time_90_percent: 0.42,
             boost_max_speed: 28.0,
             boost_acceleration_multiplier: 3.0,
             boost_capacity_seconds: 1.5,
@@ -180,8 +176,10 @@ mod tests {
         assert_eq!(config.generator.mowing_resolution, 512);
         assert_eq!(config.generator.grass_height_scale, 2.25);
         assert_eq!(config.vehicle.mower_width, 2.2);
-        assert_eq!(config.vehicle.acceleration_time_90_percent, 0.9);
-        assert_eq!(config.vehicle.steering_strength, 1.0);
+        assert_eq!(config.vehicle.max_speed, 12.0);
+        assert_eq!(config.vehicle.acceleration_time_90_percent, 0.35);
+        assert_eq!(config.vehicle.braking_time_90_percent, 0.2);
+        assert_eq!(config.vehicle.direction_change_time_90_percent, 0.42);
         assert_eq!(config.vehicle.boost_max_speed, 28.0);
         assert_eq!(config.vehicle.surface_glue_acceleration, 42.0);
         assert_eq!(config.job.completion_coverage, 0.98);
