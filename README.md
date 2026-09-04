@@ -1,12 +1,12 @@
 # Lawn Orbit
 
-Lawn Orbit is a complete tiny-planet hover-mowing game built directly in Rust,
+Lawn Orbit is a tiny-planet hover-mowing sandbox built directly in Rust,
 `wgpu`, WGSL, Rapier, winit, and egui. It implements
 [`spec/game.md`](spec/game.md): deterministic fuzzy spherical worlds, seam-safe
-authoritative mowing, arcade hover driving, Standard jobs, Free Mow, a first-play
-tutorial, local records, accessibility settings, and keyboard/gamepad input.
-The shipping planets are 15-meter-radius lawn globes covered in exaggeratedly
-tall geometric grass and viewed from an undistorted, mostly top-down chase camera.
+authoritative mowing, nimble omnidirectional hover driving, a world editor, an
+unscored mowing sandbox, a first-play tutorial, accessibility settings, and
+keyboard/gamepad input. Planets can range from compact meadows to larger rocky
+worlds and are viewed from an undistorted, mostly top-down chase camera.
 
 No reusable game engine is used. Gameplay simulation is headless and independent
 of the renderer, which keeps world generation, mowing, scoring, and vehicle rules
@@ -21,10 +21,11 @@ The workspace requires Rust 1.93 or newer and a desktop GPU/driver supported by
 cargo run --release -p lawn_orbit
 ```
 
-The first launch opens the title screen. Choose the fixed tutorial seed, enter a
-hexadecimal/decimal/phrase seed, or create a random Standard or Free Mow planet.
-Profiles and seed-specific records are saved atomically in the operating system's
-per-user application-data directory.
+The first launch opens the title screen. Open the world editor to choose a terrain
+preset or tune planet size, rockiness, peak count, peak height, and rolling terrain.
+Enter a hexadecimal, decimal, or phrase seed, then grow the planet and mow freely.
+Settings plus favorite and recent seeds are saved atomically in the operating
+system's per-user application-data directory.
 
 On Linux, the platform libraries required by winit and gilrs must be installed;
 package names vary by distribution and commonly include Wayland or X11 and udev
@@ -41,22 +42,21 @@ development packages.
 | Rotate / zoom chase camera | I/J/K/L or right-drag | Right stick |
 | Recenter camera | C | Right-stick click |
 | Pause | Escape | Start |
-| Submit completed job | Enter | South button in the prompt |
 | Diagnostics | F3 | — |
 
 Movement bindings can be remapped in Settings and analog values are preserved.
 The mower deck is always active directly beneath the chassis whenever it is grounded.
 The settings screen also contains horizontal movement sensitivity/inversion, camera tilt,
 camera shake, camera auto-follow, field of view, motion reduction, boost disable, grass density,
-render scale, MSAA, fullscreen, and a high-contrast coverage overlay.
+grass height, render scale, MSAA, fullscreen, and a high-contrast coverage overlay.
 
 ## Workspace layout
 
 | Crate | Responsibility |
 | --- | --- |
-| `lawn_core` | Versioned generation, cube-sphere math, validation, fixed-step simulation, Rapier vehicle, camera, mowing state, jobs, scoring, flow, and profiles |
+| `lawn_core` | Versioned generation, cube-sphere math, validation, fixed-step simulation, Rapier vehicle, camera, mowing state, sandbox flow, and profiles |
 | `lawn_render` | `wgpu` terrain/vehicle/grass rendering, interaction compute field, shadows, clipping particles, HDR composite, culling, dirty texture uploads, and diagnostics |
-| `lawn_orbit` | Desktop lifecycle, menus/HUD/results, input and rumble, and atomic persistence |
+| `lawn_orbit` | Desktop lifecycle, world editor, menus/HUD, input and rumble, and atomic persistence |
 | `lawn_tools` | Headless seed inspection, generation timing, and deterministic validation batches |
 
 Runtime tuning lives in [`config/game.ron`](config/game.ron). The external file is

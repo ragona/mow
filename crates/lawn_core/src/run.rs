@@ -105,7 +105,7 @@ pub struct RunState {
     pub vehicle: HoverVehicle,
     pub camera: CameraRig,
     pub metrics: RunMetrics,
-    /// Always-running active simulation time used by visual epochs and Free Mow.
+    /// Always-running active simulation time used by visual epochs and the sandbox.
     pub simulation_seconds: f32,
     pub recorder: RunRecorder,
     pub tutorial_stage: TutorialStage,
@@ -132,7 +132,11 @@ impl RunState {
     ) -> Self {
         let mowing = MowingField::from_planet(&planet);
         let vehicle = HoverVehicle::new(&planet, &vehicle_tuning);
-        let camera = CameraRig::new(vehicle.state.transform, accessibility);
+        let camera = CameraRig::new(
+            vehicle.state.transform,
+            planet.config.base_radius,
+            accessibility,
+        );
         let ideal_distance =
             planet.validation.mowable_area as f32 / vehicle_tuning.mower_width * 1.18;
         Self {
@@ -319,7 +323,13 @@ impl RunState {
             TutorialStage::Recovery if self.metrics.recoveries > 0 => {
                 Some(TutorialStage::WaitForLocator)
             }
-            TutorialStage::Locator if self.completion_available => Some(TutorialStage::Submit),
+            TutorialStage::Locator if self.completion_available => {
+                Some(if self.mode == GameMode::FreeMow {
+                    TutorialStage::Complete
+                } else {
+                    TutorialStage::Submit
+                })
+            }
             _ => None,
         };
         if let Some(next) = next {
@@ -365,7 +375,11 @@ impl RunState {
     pub fn restart(&mut self, accessibility: &AccessibilitySettings) {
         self.mowing = MowingField::from_planet(&self.planet);
         self.vehicle = HoverVehicle::new(&self.planet, &self.vehicle_tuning);
-        self.camera = CameraRig::new(self.vehicle.state.transform, accessibility);
+        self.camera = CameraRig::new(
+            self.vehicle.state.transform,
+            self.planet.config.base_radius,
+            accessibility,
+        );
         self.metrics = RunMetrics {
             estimated_ideal_distance: self.planet.validation.mowable_area as f32
                 / self.vehicle_tuning.mower_width
@@ -423,6 +437,18 @@ mod tests {
         }
         assert_eq!(run.metrics.elapsed_seconds, 0.0);
         assert!(run.metrics.distance_traveled > 0.0);
+    }
+
+    #[test]
+    fn sandbox_tutorial_finishes_without_a_submission_step() {
+        let mut run = run(GameMode::FreeMow);
+        run.tutorial_enabled = true;
+        run.tutorial_stage = TutorialStage::Locator;
+        run.completion_available = true;
+
+        run.update_tutorial(InputSnapshot::default(), &AccessibilitySettings::default());
+
+        assert_eq!(run.tutorial_stage, TutorialStage::Complete);
     }
 
     #[test]

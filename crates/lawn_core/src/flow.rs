@@ -8,7 +8,7 @@ pub enum GameState {
     #[default]
     Boot,
     Title,
-    ModeSelect,
+    WorldEditor,
     Loading,
     Playing,
     Paused,
@@ -18,13 +18,13 @@ pub enum GameState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowAction {
     BootComplete,
-    OpenModeSelect,
+    OpenWorldEditor,
     StartLoading,
     LoadComplete,
     Pause,
     Resume,
     Finish,
-    ReturnToModeSelect,
+    ReturnToWorldEditor,
     ReturnToTitle,
 }
 
@@ -47,15 +47,15 @@ impl GameFlow {
     /// current state; the current state is left unchanged.
     pub fn transition(&mut self, action: FlowAction) -> Result<GameState, InvalidTransition> {
         use FlowAction::{
-            BootComplete, Finish, LoadComplete, OpenModeSelect, Pause, Resume, ReturnToModeSelect,
-            ReturnToTitle, StartLoading,
+            BootComplete, Finish, LoadComplete, OpenWorldEditor, Pause, Resume, ReturnToTitle,
+            ReturnToWorldEditor, StartLoading,
         };
-        use GameState::{Boot, Loading, ModeSelect, Paused, Playing, Results, Title};
+        use GameState::{Boot, Loading, Paused, Playing, Results, Title, WorldEditor};
         let next = match (self.state, action) {
-            (Boot, BootComplete) | (ModeSelect | Results, ReturnToTitle) => Title,
-            (Title | Results, OpenModeSelect)
-            | (Paused | Playing | Results, ReturnToModeSelect) => ModeSelect,
-            (ModeSelect | Results, StartLoading) => Loading,
+            (Boot, BootComplete) | (WorldEditor | Results, ReturnToTitle) => Title,
+            (Title | Results, OpenWorldEditor)
+            | (Paused | Playing | Results, ReturnToWorldEditor) => WorldEditor,
+            (WorldEditor | Results, StartLoading) => Loading,
             (Loading, LoadComplete) | (Paused, Resume) => Playing,
             (Playing, Pause) => Paused,
             (Playing, Finish) => Results,
@@ -87,7 +87,7 @@ mod tests {
         let mut flow = GameFlow::default();
         for action in [
             FlowAction::BootComplete,
-            FlowAction::OpenModeSelect,
+            FlowAction::OpenWorldEditor,
             FlowAction::StartLoading,
             FlowAction::LoadComplete,
             FlowAction::Pause,

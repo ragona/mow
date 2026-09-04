@@ -2,14 +2,14 @@
 
 ## Game Design and Implementation Specification
 
-**Status:** Revised implementation specification  
-**Genre:** Cozy driving / score-attack / lawn-mowing game  
-**Mode:** Single-player  
-**Target platform:** Desktop, landscape display  
-**Primary input:** Gamepad; keyboard supported  
-**Implementation language:** Rust  
-**Rendering API:** `wgpu` with WGSL shaders  
-**Target session length:** 2–8 minutes per planet  
+**Status:** Revised implementation specification
+**Genre:** Cozy hover-driving / lawn-mowing sandbox
+**Mode:** Single-player
+**Target platform:** Desktop, landscape display
+**Primary input:** Gamepad; keyboard supported
+**Implementation language:** Rust
+**Rendering API:** `wgpu` with WGSL shaders
+**Target session length:** 2–8 minutes per planet
 
 ---
 
@@ -102,9 +102,8 @@ There is no death. Falling away from the surface, becoming stuck, or overturning
 1. **Generate and survey:** A seed produces the planet. The opening camera circles it and reveals its largest mountain groups, open lawns, and narrow routes.
 2. **Mow:** The player drives freely and cuts tall grass beneath the active mower deck.
 3. **Route:** The player chooses efficient paths around rock faces, through passes, and across already-cut areas while cleaning up missed patches.
-4. **Finish:** The job becomes complete when required grass coverage reaches the target threshold.
-5. **Review:** The game presents time, coverage, collisions, efficiency, and an animated map of the player's route.
-6. **Replay or regenerate:** The player can retry the same seed for a better rating or generate a different planet.
+4. **Explore:** The player can continue refining the cut pattern, revisit terrain, or simply drive.
+5. **Reset or regenerate:** The player can regrow the current lawn or return to the world editor for a different planet.
 
 The player is never forced to stop at the completion threshold. They may continue to 100% coverage before submitting the job.
 
@@ -194,11 +193,10 @@ The minimum shippable version includes:
 - one deterministic planet generator and one grassland/rock biome;
 - a fixed tutorial seed plus the ability to enter, copy, replay, and randomly generate seeds;
 - one hover mower;
-- a standard mowing job;
-- a relaxed Free Mow mode;
-- local best scores;
+- a world editor for planet size, rock coverage, peak count and scale, terrain roll, and seed;
+- one unscored mowing sandbox;
 - keyboard and gamepad input;
-- pause, settings, results, and restart flows; and
+- pause, settings, world-editor return, and restart flows; and
 - a short first-play tutorial delivered through contextual prompts.
 
 ---
@@ -357,50 +355,17 @@ Rated modes record substantial rock collisions, but glancing contact should not 
 
 ---
 
-## 10. Objectives, Completion, and Scoring
+## 10. Sandbox and Future Objectives
 
-### 10.1 Standard job
+### 10.1 Current sandbox
 
-The standard job requires at least **98.0%** of the generated planet's mowable grass to be cut.
+The current prototype has one play experience rather than a mode selection: an unscored planet sandbox. Coverage remains visible because it makes mowing progress legible, but there is no required completion threshold, timer, rating, penalty, submission action, or forced results flow. The player may regrow the current lawn, generate a new seed, or return to the world editor at any time.
 
-The final 2% tolerance prevents the player from hunting indefinitely for tiny invisible slivers. A “nearby uncut grass” assist becomes available after 95% coverage.
+The world editor is the primary pre-play screen. It exposes friendly, bounded controls for planet radius, approximate rock coverage, peak clusters, peak height, rolling-terrain amplitude, and seed. Meadow, Classic, and Craggy presets provide useful starting points. Edited planets still pass the same connectivity, clearance, and deterministic-generation validation as default planets.
 
-### 10.2 Score categories
+### 10.2 Deferred objectives
 
-The results screen reports categories separately instead of hiding everything behind one opaque score.
-
-| Category | Measurement |
-| --- | --- |
-| Coverage | Percentage of mowable area cut |
-| Time | Seconds from gaining control to submission |
-| Control | Number and severity of collisions with rocky terrain |
-| Efficiency | Total distance traveled relative to estimated ideal coverage distance |
-| Recoveries | Manual and automatic recoveries |
-
-The game also awards an overall rating from one to three stars. Completion always awards at least one star.
-
-Suggested initial thresholds:
-
-- **1 star:** Complete the job.
-- **2 stars:** Complete under 18 minutes with at most two substantial collisions.
-- **3 stars:** Complete under 13 minutes, reach at least 99.5% coverage, and record no substantial collisions or recovery events.
-
-These are tuning values, not contractual difficulty targets.
-
-### 10.3 Free Mow
-
-Free Mow removes the timer, rating, collision penalties, and forced results flow. The player can reset the grass or generate a new seed at any time. This mode is available from the start.
-
-### 10.4 Optional medals
-
-Post-MVP challenges may include:
-
-- no overlapping passes beyond a tolerance;
-- mow without boost;
-- complete using cockpit camera;
-- complete without contacting exposed rock;
-- cut a continuous spiral; and
-- complete without using recovery.
+Scored jobs, ratings, medals, curated challenges, and results playback are deferred until the mowing loop has a coherent objective structure worth measuring. The existing authoritative coverage and telemetry systems may remain internally, but they must not imply a competitive mode in the current player flow.
 
 ---
 
@@ -446,37 +411,25 @@ The camera must offer:
 Keep the HUD small and readable. It contains:
 
 - lawn coverage percentage;
-- elapsed time in rated jobs;
 - active cutting feedback;
 - boost meter;
-- substantial-collision count; and
+- optional collision telemetry; and
 - contextual prompts during the tutorial.
 
 A miniature globe map is not required during ordinary play. After 95% coverage, an optional locator can point toward the largest nearby uncut region.
 
-### 12.2 Results screen
+### 12.2 World editor
 
-The results screen shows:
-
-- overall rating;
-- final coverage;
-- completion time;
-- collisions and recoveries;
-- efficiency;
-- personal-best comparisons; and
-- retry, Free Mow, and menu actions.
-
-The centerpiece is a slowly rotating planet displaying the final cut pattern. If practical, replay the mowing field filling in over time using recorded deck stamps.
+The world editor replaces mode selection in the current prototype. It presents terrain presets, bounded shape controls, seed entry and history, a concise size/grass summary, and one clear action to grow the planet and enter the sandbox.
 
 ### 12.3 Menus
 
 Required menus:
 
 - title screen;
-- mode selection;
+- world editor;
 - pause;
 - settings;
-- results; and
 - confirmation for reset or return-to-menu actions that discard an active run.
 
 ---
@@ -584,9 +537,9 @@ Avoid communicating mower state, grass state, or rock boundaries through color a
 ### 17.1 Top-level game states
 
 ```text
-Boot -> Title -> Mode Select -> Loading -> Playing -> Results
-                                      |-> Paused -> Playing
-                                      |-> Paused -> Mode Select
+Boot -> Title -> World Editor -> Loading -> Sandbox
+                                        |-> Paused -> Sandbox
+                                        |-> Paused -> World Editor
 ```
 
 ### 17.2 Run state
@@ -594,7 +547,7 @@ Boot -> Title -> Mode Select -> Loading -> Playing -> Results
 A run contains at least:
 
 - generator version and world seed;
-- mode;
+- selected world-editor parameters;
 - elapsed active time;
 - current mowing field;
 - weighted coverage value;
@@ -604,7 +557,7 @@ A run contains at least:
 - recovery count;
 - distance traveled;
 - tutorial progress; and
-- optional compact history of mowing stamps for results playback.
+- optional compact history of mowing stamps for later visualization tools.
 
 ### 17.3 Persistent profile
 
@@ -613,11 +566,8 @@ Persist:
 - settings and control bindings;
 - tutorial completion;
 - unlocked content;
-- recently played and favorited seeds;
-- best rating by seed;
-- best time by seed;
-- highest coverage by seed; and
-- best efficiency by seed.
+- recently played and favorited seeds; and
+- visual and control settings.
 
 An active run may be saved on clean exit, but mid-run persistence is not required for MVP because sessions are short.
 
@@ -1014,20 +964,19 @@ The MVP is complete when all of the following are true:
 - Coverage is independent of render frame rate.
 - Exposed rock never contributes to the required coverage denominator.
 
-### Objectives
+### Sandbox
 
-- The job becomes complete at the configured coverage threshold.
-- Substantial collisions with mountain terrain are detected and reported.
-- Results accurately report seed, coverage, time, collisions, distance, and recoveries.
+- The world editor generates valid planets throughout every exposed parameter range.
+- Substantial collisions with mountain terrain are detected and reported as feedback, not penalties.
 - Restarting resets all run state and grass state.
-- Retrying preserves the seed; generating a new planet changes it.
+- Regrowing preserves the seed and world shape; generating a new planet changes the seed.
 
 ### User experience
 
-- A first-time player can discover driving, mowing, boosting, and completion without external instructions.
+- A first-time player can discover driving, mowing, and boosting without external instructions.
 - Keyboard and gamepad can complete every flow.
 - Pause and settings function during gameplay.
-- Free Mow, the standard job, replay seed, copy seed, and new random seed are accessible from the title or results flow.
+- World editing, replay seed, copy seed, and new random seed are accessible from the title and pause flow.
 - The game maintains the selected profile's target frame rate while mowing dense grass beside a mountain at the visible horizon.
 - Changing grass density, render scale, MSAA, particles, or shadow quality never changes vehicle physics, mowing coverage, or score results.
 
@@ -1086,11 +1035,11 @@ The MVP is complete when all of the following are true:
 - Geometry-driven blade shortening and striping
 - Coverage percentage
 - Mountain collision accounting
-- Timer, per-seed scoring, completion, and results
-- Title, mode select, pause, and restart
-- Persistent settings and best scores
+- World editor, seed tools, pause, and restart
+- Unscored sandbox flow with visible coverage
+- Persistent visual and control settings
 
-**Exit condition:** A fresh launch supports a complete generated run and same-seed replay, and the player can reach 98% without seam artifacts or persistent false gaps.
+**Exit condition:** A fresh launch supports editing, generating, mowing, resetting, and same-seed replay without seam artifacts or persistent false gaps.
 
 ### Milestone 5: Feel and presentation
 

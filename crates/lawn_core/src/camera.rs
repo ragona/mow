@@ -7,6 +7,7 @@ use crate::{planet::Planet, profile::AccessibilitySettings, vehicle::VehicleTran
 const CHASE_HEIGHT: f32 = 10.2;
 const CHASE_TARGET_DEPTH: f32 = 2.2;
 const CHASE_ZOOM_RANGE: f32 = 4.0;
+const REFERENCE_PLANET_RADIUS: f32 = 15.0;
 const FOLLOW_DAMPING_RATIO: f32 = 0.72;
 const FOLLOW_TELEPORT_DISTANCE: f32 = CHASE_HEIGHT * 2.0;
 
@@ -31,11 +32,17 @@ pub struct CameraRig {
 
 impl CameraRig {
     #[must_use]
-    pub fn new(vehicle: VehicleTransform, settings: &AccessibilitySettings) -> Self {
+    pub fn new(
+        vehicle: VehicleTransform,
+        planet_radius: f32,
+        settings: &AccessibilitySettings,
+    ) -> Self {
+        let scale = chase_scale(planet_radius);
         let (position, target) = chase_pose(
             vehicle,
             vehicle.forward,
-            CHASE_HEIGHT,
+            CHASE_HEIGHT * scale,
+            CHASE_TARGET_DEPTH * scale,
             settings.camera_tilt_degrees,
         );
         let state = CameraState {
@@ -90,7 +97,7 @@ impl CameraRig {
 
     pub fn update(
         &mut self,
-        _planet: &Planet,
+        planet: &Planet,
         vehicle: VehicleTransform,
         velocity: Vec3,
         orbit: [f32; 2],
@@ -136,9 +143,16 @@ impl CameraRig {
             settings.camera_shake * speed_shake * (self.elapsed_seconds * 31.0).sin() * 0.008;
         screen_up = Quat::from_axis_angle(local_up, shake_angle).mul_vec3(screen_up);
 
-        let height = (CHASE_HEIGHT + self.orbit_pitch * CHASE_ZOOM_RANGE).max(5.5);
-        let (desired_position, desired_target) =
-            chase_pose(vehicle, screen_up, height, settings.camera_tilt_degrees);
+        let scale = chase_scale(planet.config.base_radius);
+        let height =
+            (CHASE_HEIGHT * scale + self.orbit_pitch * CHASE_ZOOM_RANGE * scale).max(5.5 * scale);
+        let (desired_position, desired_target) = chase_pose(
+            vehicle,
+            screen_up,
+            height,
+            CHASE_TARGET_DEPTH * scale,
+            settings.camera_tilt_degrees,
+        );
         let stiffness = settings.camera_follow_stiffness;
         if self.state.position.distance(desired_position) > FOLLOW_TELEPORT_DISTANCE {
             self.state.position = desired_position;
@@ -191,13 +205,18 @@ fn chase_pose(
     vehicle: VehicleTransform,
     screen_up: Vec3,
     height: f32,
+    target_depth: f32,
     tilt_degrees: f32,
 ) -> (Vec3, Vec3) {
-    let target = vehicle.position - vehicle.up * CHASE_TARGET_DEPTH;
-    let vertical_span = height + CHASE_TARGET_DEPTH;
+    let target = vehicle.position - vehicle.up * target_depth;
+    let vertical_span = height + target_depth;
     let back_offset = vertical_span * tilt_degrees.clamp(0.0, 18.0).to_radians().tan();
     let position = vehicle.position + vehicle.up * height - screen_up * back_offset;
     (position, target)
+}
+
+fn chase_scale(planet_radius: f32) -> f32 {
+    (planet_radius / REFERENCE_PLANET_RADIUS).clamp(0.8, 1.5)
 }
 
 #[cfg(test)]
@@ -213,7 +232,11 @@ mod tests {
             forward: Vec3::Z,
             up: Vec3::Y,
         };
-        let camera = CameraRig::new(vehicle, &AccessibilitySettings::default());
+        let camera = CameraRig::new(
+            vehicle,
+            REFERENCE_PLANET_RADIUS,
+            &AccessibilitySettings::default(),
+        );
         let position_offset = camera.state.position - vehicle.position;
         let view_direction = (camera.state.target - camera.state.position).normalize();
 
@@ -247,9 +270,33 @@ mod tests {
             camera_tilt_degrees: 0.0,
             ..AccessibilitySettings::default()
         };
-        let camera = CameraRig::new(vehicle, &settings);
+        let camera = CameraRig::new(vehicle, REFERENCE_PLANET_RADIUS, &settings);
         let view_direction = (camera.state.target - camera.state.position).normalize();
         assert!(view_direction.dot(-vehicle.up) > 0.999_99);
+    }
+
+    #[test]
+    fn chase_distance_scales_to_keep_editor_planet_sizes_framed() {
+        let settings = AccessibilitySettings::default();
+        for planet_radius in [12.0_f32, 15.0, 22.0] {
+            let vehicle = VehicleTransform {
+                position: Vec3::Y * (planet_radius + 0.8),
+                rotation: glam::Quat::IDENTITY,
+                forward: Vec3::Z,
+                up: Vec3::Y,
+            };
+            let camera = CameraRig::new(vehicle, planet_radius, &settings);
+            let view_direction = (camera.state.target - camera.state.position).normalize();
+            let angular_radius = (planet_radius / camera.state.position.length())
+                .asin()
+                .to_degrees();
+            let planet_center = (-camera.state.position).normalize();
+            let framing_offset = view_direction.dot(planet_center).acos().to_degrees();
+            assert!(
+                angular_radius + framing_offset < camera.state.field_of_view_degrees * 0.5,
+                "radius {planet_radius} was not fully framed"
+            );
+        }
     }
 
     #[test]
@@ -265,7 +312,7 @@ mod tests {
             forward: Vec3::Y,
             up: Vec3::X,
         };
-        let mut camera = CameraRig::new(vehicle, &settings);
+        let mut camera = CameraRig::new(vehicle, planet.config.base_radius, &settings);
         for step in 0..720 {
             let angle = step as f32 * std::f32::consts::TAU / 720.0;
             let up = Vec3::new(angle.cos(), angle.sin(), 0.0);
@@ -304,8 +351,8 @@ mod tests {
             forward: planet.spawn.forward,
             up: planet.spawn.up,
         };
-        let mut slow = CameraRig::new(vehicle, &settings);
-        let mut fast = CameraRig::new(vehicle, &settings);
+        let mut slow = CameraRig::new(vehicle, planet.config.base_radius, &settings);
+        let mut fast = CameraRig::new(vehicle, planet.config.base_radius, &settings);
         slow.update(
             &planet,
             vehicle,
@@ -343,13 +390,14 @@ mod tests {
             forward: planet.spawn.forward,
             up: planet.spawn.up,
         };
-        let mut camera = CameraRig::new(vehicle, &settings);
+        let mut camera = CameraRig::new(vehicle, planet.config.base_radius, &settings);
         let initial_position = camera.state.position;
         vehicle.position += vehicle.forward * 2.0;
         let desired_position = chase_pose(
             vehicle,
             vehicle.forward,
             CHASE_HEIGHT,
+            CHASE_TARGET_DEPTH,
             settings.camera_tilt_degrees,
         )
         .0;
