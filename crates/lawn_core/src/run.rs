@@ -1,10 +1,12 @@
 //! Complete active-run composition: vehicle, mowing, tutorial, objectives, and scoring.
 
+use std::cell::Cell;
+
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    FIXED_DT,
+    FIXED_DT, SIMULATION_HZ,
     camera::CameraRig,
     config::{JobConfig, VehicleTuning},
     input::InputSnapshot,
@@ -63,20 +65,36 @@ pub struct RecordedStamp {
 #[derive(Clone, Debug, Default)]
 pub struct RunRecorder {
     stamps: Vec<RecordedStamp>,
+    last_recorded_seconds: f32,
 }
 
 impl RunRecorder {
     pub fn record(&mut self, stamp: RecordedStamp) {
         // A complete 20-minute run at 120 Hz can be large. Coalesce nearly
         // collinear adjacent stamps while retaining a faithful results replay.
-        if let Some(last) = self.stamps.last_mut()
-            && last.to.normalize().dot(stamp.from.normalize()) > 0.999_999
-            && (last.width - stamp.width).abs() < 0.01
-            && last.to.normalize().dot(stamp.to.normalize()) > 0.999_95
-        {
-            last.to = stamp.to;
-            return;
+        if let Some(last) = self.stamps.last_mut() {
+            let start = last.from.normalize_or_zero();
+            let join = last.to.normalize_or_zero();
+            let end = stamp.to.normalize_or_zero();
+            let old_normal = start.cross(join).try_normalize();
+            let new_normal = join.cross(end).try_normalize();
+            let same_arc = old_normal
+                .zip(new_normal)
+                .is_some_and(|(a, b)| a.dot(b) > 0.9995);
+            let stationary = last.from.distance_squared(last.to) < 1.0e-8
+                && stamp.from.distance_squared(stamp.to) < 1.0e-8;
+            if last.to.distance_squared(stamp.from) < 1.0e-6
+                && (last.width - stamp.width).abs() < 0.01
+                && (0.0..=0.05).contains(&(stamp.elapsed_seconds - self.last_recorded_seconds))
+                && start.dot(end) > 0.9995
+                && (same_arc || stationary)
+            {
+                last.to = stamp.to;
+                self.last_recorded_seconds = stamp.elapsed_seconds;
+                return;
+            }
         }
+        self.last_recorded_seconds = stamp.elapsed_seconds;
         self.stamps.push(stamp);
     }
 
@@ -118,6 +136,8 @@ pub struct RunState {
     pub job_config: JobConfig,
     previous_milestone: u8,
     recent_events: Vec<RunEvent>,
+    simulation_ticks: u64,
+    locator_cache: Cell<(f32, Option<Vec3>)>,
 }
 
 impl RunState {
@@ -161,6 +181,8 @@ impl RunState {
             job_config,
             previous_milestone: 0,
             recent_events: Vec::new(),
+            simulation_ticks: 0,
+            locator_cache: Cell::new((f32::NEG_INFINITY, None)),
         }
     }
 
@@ -177,12 +199,14 @@ impl RunState {
             accessibility.boost_enabled,
             FIXED_DT,
         );
-        self.simulation_seconds += FIXED_DT;
+        self.simulation_ticks += 1;
+        self.simulation_seconds = (self.simulation_ticks as f64 / f64::from(SIMULATION_HZ)) as f32;
         if self.tutorial_enabled {
             self.tutorial_stage_seconds += FIXED_DT;
         }
         if self.mode == GameMode::Standard {
-            self.metrics.elapsed_seconds += FIXED_DT;
+            self.metrics.elapsed_seconds = self.simulation_seconds
+                + self.metrics.recoveries as f32 * self.job_config.recovery_time_penalty;
         }
         self.metrics.distance_traveled += tick.traveled_distance;
         self.record_vehicle_events(tick);
@@ -222,7 +246,7 @@ impl RunState {
     }
 
     fn cut_if_valid(&mut self, tick: VehicleTickResult) {
-        if !self.vehicle.state.grounded {
+        if tick.recovered || !self.vehicle.state.grounded {
             return;
         }
         let stamp = MowingStamp {
@@ -345,9 +369,17 @@ impl RunState {
 
     #[must_use]
     pub fn locator_direction(&self) -> Option<Vec3> {
-        (self.mowing.coverage() >= self.job_config.locator_coverage)
-            .then(|| self.mowing.largest_uncut_direction())
-            .flatten()
+        let coverage = self.mowing.coverage();
+        if coverage < self.job_config.locator_coverage || coverage >= 1.0 {
+            return None;
+        }
+        let (updated_seconds, direction) = self.locator_cache.get();
+        if self.simulation_seconds - updated_seconds < 0.25 {
+            return direction;
+        }
+        let direction = self.mowing.largest_uncut_direction();
+        self.locator_cache.set((self.simulation_seconds, direction));
+        direction
     }
 
     #[must_use]
@@ -362,7 +394,7 @@ impl RunState {
     }
 
     pub fn submit(&mut self) -> Option<Results> {
-        if self.mode == GameMode::FreeMow || !self.completion_available {
+        if !self.active || self.mode == GameMode::FreeMow || !self.completion_available {
             return None;
         }
         self.active = false;
@@ -391,6 +423,8 @@ impl RunState {
             ..RunMetrics::default()
         };
         self.simulation_seconds = 0.0;
+        self.simulation_ticks = 0;
+        self.locator_cache.set((f32::NEG_INFINITY, None));
         self.recorder = RunRecorder::default();
         self.tutorial_stage = TutorialStage::Drive;
         self.tutorial_stage_seconds = 0.0;
@@ -441,6 +475,87 @@ mod tests {
         }
         assert_eq!(run.metrics.elapsed_seconds, 0.0);
         assert!(run.metrics.distance_traveled > 0.0);
+    }
+
+    #[test]
+    fn recovering_never_cuts_a_path_to_the_recovery_point() {
+        let mut run = run(GameMode::Standard);
+        let before = run.mowing.packed_cells().to_vec();
+        run.cut_if_valid(VehicleTickResult {
+            recovered: true,
+            deck_from: Vec3::X * 15.0,
+            deck_to: Vec3::Y * 15.0,
+            ..VehicleTickResult::default()
+        });
+        assert_eq!(run.mowing.packed_cells(), before);
+        assert!(run.recorder.stamps().is_empty());
+    }
+
+    #[test]
+    fn run_clock_uses_tick_count_without_long_session_accumulation_error() {
+        let mut run = run(GameMode::Standard);
+        run.simulation_ticks = 120 * 1200;
+        run.metrics.recoveries = 2;
+        run.tick(InputSnapshot::default(), &AccessibilitySettings::default());
+        assert_eq!(run.simulation_seconds, (1200.0_f64 + 1.0 / 120.0) as f32);
+        assert_eq!(run.metrics.elapsed_seconds, run.simulation_seconds + 6.0);
+    }
+
+    #[test]
+    fn completed_run_can_only_be_submitted_once() {
+        let mut run = run(GameMode::Standard);
+        run.completion_available = true;
+        assert!(run.submit().is_some());
+        assert!(run.submit().is_none());
+    }
+
+    #[test]
+    fn recorder_keeps_turns_and_long_arcs_instead_of_collapsing_the_route() {
+        let mut recorder = RunRecorder::default();
+        let mut previous = Vec3::X * 15.0;
+        for tick in 1..=400 {
+            let angle = tick as f32 * 0.001;
+            let next = Vec3::new(angle.cos(), angle.sin(), 0.0) * 15.0;
+            recorder.record(RecordedStamp {
+                elapsed_seconds: tick as f32 / 120.0,
+                from: previous,
+                to: next,
+                width: 2.2,
+            });
+            previous = next;
+        }
+        assert!(recorder.stamps().len() > 10);
+        assert!(recorder.stamps().len() < 100);
+        let count = recorder.stamps().len();
+        recorder.record(RecordedStamp {
+            elapsed_seconds: 401.0 / 120.0,
+            from: previous,
+            to: (previous + Vec3::Z * 0.01).normalize() * 15.0,
+            width: 2.2,
+        });
+        assert_eq!(recorder.stamps().len(), count + 1);
+    }
+
+    #[test]
+    fn recorder_preserves_an_out_and_back_path() {
+        let mut recorder = RunRecorder::default();
+        let from = Vec3::X * 15.0;
+        let to = (Vec3::X + Vec3::Y * 0.01).normalize() * 15.0;
+        recorder.record(RecordedStamp {
+            elapsed_seconds: 0.0,
+            from,
+            to,
+            width: 2.2,
+        });
+        recorder.record(RecordedStamp {
+            elapsed_seconds: FIXED_DT,
+            from: to,
+            to: from,
+            width: 2.2,
+        });
+        assert_eq!(recorder.stamps().len(), 2);
+        assert_eq!(recorder.stamps()[0].to, to);
+        assert_eq!(recorder.stamps()[1].to, from);
     }
 
     #[test]

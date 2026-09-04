@@ -59,6 +59,80 @@ impl Default for GeneratorConfig {
 }
 
 impl GeneratorConfig {
+    /// Validates numeric domains before allocation, random sampling, or geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of the first unsupported configuration value.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(8..=512).contains(&self.terrain_resolution)
+            || !(8..=2048).contains(&self.mowing_resolution)
+        {
+            return Err("terrain resolution must be 8..=512 and mowing resolution 8..=2048".into());
+        }
+        if self.patch_cells == 0 || self.patch_cells > self.terrain_resolution {
+            return Err("patch cells must be between 1 and the terrain resolution".into());
+        }
+        for (name, value) in [
+            ("base radius", self.base_radius),
+            ("rolling amplitude", self.rolling_amplitude),
+            ("minimum mountain height", self.mountain_height_min),
+            ("maximum mountain height", self.mountain_height_max),
+            ("minimum mowable ratio", self.mowable_ratio_min),
+            ("maximum mowable ratio", self.mowable_ratio_max),
+            ("required reachable ratio", self.required_reachable_ratio),
+            ("mountain separation", self.mountain_separation_radians),
+            ("pass clearance", self.pass_clearance),
+            ("spawn clearance", self.spawn_clearance),
+            ("maximum spawn slope", self.spawn_max_slope_degrees),
+            ("grass root density", self.grass_roots_per_square_meter),
+            ("grass height scale", self.grass_height_scale),
+            ("minimum ideal time", self.ideal_time_min_seconds),
+            ("maximum ideal time", self.ideal_time_max_seconds),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{name} must be finite and non-negative"));
+            }
+        }
+        // Four noise octaves sum to less than 1.06. Keep the radial surface
+        // strictly positive even at the lowest point of the rolling terrain.
+        if self.base_radius <= self.rolling_amplitude * 1.06 || self.base_radius > 128.0 {
+            return Err(
+                "base radius must exceed 1.06 times rolling amplitude and be at most 128".into(),
+            );
+        }
+        if self.mountain_count_min > self.mountain_count_max
+            || self.mountain_height_min > self.mountain_height_max
+            || self.mountain_height_max > self.base_radius
+        {
+            return Err(
+                "mountain count/height ranges must be ordered, with height at most the base radius"
+                    .into(),
+            );
+        }
+        if self.mowable_ratio_min <= 0.0
+            || self.mowable_ratio_min > self.mowable_ratio_max
+            || self.mowable_ratio_max > 1.0
+            || !(0.0..=1.0).contains(&self.required_reachable_ratio)
+        {
+            return Err(
+                "mowable ratios must satisfy 0 < min <= max <= 1 and reachability must be 0..=1"
+                    .into(),
+            );
+        }
+        if self.mountain_separation_radians > std::f32::consts::PI
+            || self.spawn_max_slope_degrees >= 90.0
+            || self.pass_clearance <= 0.0
+            || self.grass_height_scale <= 0.0
+            || self.ideal_time_min_seconds > self.ideal_time_max_seconds
+            || self.ideal_time_max_seconds <= 0.0
+            || !(1..=1024).contains(&self.maximum_generation_attempts)
+        {
+            return Err("invalid separation, slope, clearance, grass scale, ideal-time range, or attempt limit".into());
+        }
+        Ok(())
+    }
+
     /// Fast deterministic configuration intended for unit and fuzz tests.
     #[must_use]
     pub fn test_quality() -> Self {
@@ -120,6 +194,65 @@ impl Default for VehicleTuning {
     }
 }
 
+impl VehicleTuning {
+    /// Validates the domains required by the hover and driving controllers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first unsupported numeric value or inconsistent speed limit.
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("hover height", self.hover_height),
+            ("car length", self.car_length),
+            ("mower width", self.mower_width),
+            ("mower length", self.mower_length),
+            ("maximum speed", self.max_speed),
+            (
+                "acceleration response time",
+                self.acceleration_time_90_percent,
+            ),
+            ("braking response time", self.braking_time_90_percent),
+            (
+                "direction-change response time",
+                self.direction_change_time_90_percent,
+            ),
+            ("boost maximum speed", self.boost_max_speed),
+            (
+                "boost acceleration multiplier",
+                self.boost_acceleration_multiplier,
+            ),
+            ("boost capacity", self.boost_capacity_seconds),
+            ("boost recharge time", self.boost_recharge_seconds),
+            ("recovery hold time", self.recovery_hold_time),
+            ("automatic recovery delay", self.automatic_recovery_delay),
+            ("surface glue acceleration", self.surface_glue_acceleration),
+            ("cut rate", self.cut_rate_per_second),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("{name} must be finite and positive"));
+            }
+        }
+        for (name, value) in [
+            ("boost recharge delay", self.boost_recharge_delay),
+            ("surface glue damping", self.surface_glue_damping),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{name} must be finite and non-negative"));
+            }
+        }
+        if !(0.41..=2.8).contains(&self.hover_height) {
+            return Err(
+                "hover height must be 0.41..=2.8 to clear the body and remain within pad reach"
+                    .into(),
+            );
+        }
+        if self.boost_max_speed < self.max_speed {
+            return Err("boost maximum speed must be at least the normal maximum speed".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JobConfig {
     pub completion_coverage: f64,
@@ -145,6 +278,36 @@ impl Default for JobConfig {
     }
 }
 
+impl JobConfig {
+    /// Validates completion thresholds and scoring limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of a non-finite value or inconsistent threshold.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.completion_coverage.is_finite()
+            || !self.locator_coverage.is_finite()
+            || !self.three_star_coverage.is_finite()
+            || self.completion_coverage <= 0.0
+            || self.completion_coverage > 1.0
+            || !(0.0..=self.completion_coverage).contains(&self.locator_coverage)
+            || !(self.completion_coverage..=1.0).contains(&self.three_star_coverage)
+        {
+            return Err("coverage thresholds must satisfy 0 <= locator <= completion <= three-star <= 1, with completion positive".into());
+        }
+        if !self.two_star_seconds.is_finite()
+            || !self.three_star_seconds.is_finite()
+            || self.three_star_seconds <= 0.0
+            || self.two_star_seconds < self.three_star_seconds
+            || !self.recovery_time_penalty.is_finite()
+            || self.recovery_time_penalty < 0.0
+        {
+            return Err("star time limits must be finite, positive, and ordered; recovery penalty must be finite and non-negative".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GameConfig {
     pub generator: GeneratorConfig,
@@ -153,6 +316,17 @@ pub struct GameConfig {
 }
 
 impl GameConfig {
+    /// Checks configuration before it reaches allocation or simulation code.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first invalid generator, vehicle, or job setting.
+    pub fn validate(&self) -> Result<(), String> {
+        self.generator.validate()?;
+        self.vehicle.validate()?;
+        self.job.validate()
+    }
+
     /// Parses the shipping tuning data bundled with the application.
     ///
     /// # Errors
@@ -171,6 +345,7 @@ mod tests {
     #[test]
     fn shipping_tuning_is_valid_and_matches_documented_defaults() {
         let config = GameConfig::shipping().unwrap();
+        config.validate().unwrap();
         assert_eq!(config, GameConfig::default());
         assert_eq!(config.generator.base_radius, 15.0);
         assert_eq!(config.generator.mowing_resolution, 512);
@@ -183,5 +358,21 @@ mod tests {
         assert_eq!(config.vehicle.boost_max_speed, 28.0);
         assert_eq!(config.vehicle.surface_glue_acceleration, 42.0);
         assert_eq!(config.job.completion_coverage, 0.98);
+    }
+
+    #[test]
+    fn invalid_controller_and_objective_settings_are_rejected() {
+        let mut config = GameConfig::default();
+        config.vehicle.boost_recharge_seconds = 0.0;
+        assert!(config.validate().is_err());
+        config.vehicle = VehicleTuning::default();
+        config.vehicle.cut_rate_per_second = f32::NAN;
+        assert!(config.validate().is_err());
+        config.vehicle = VehicleTuning::default();
+        config.job.locator_coverage = 0.99;
+        assert!(config.validate().is_err());
+        config.job = JobConfig::default();
+        config.job.recovery_time_penalty = f32::INFINITY;
+        assert!(config.validate().is_err());
     }
 }

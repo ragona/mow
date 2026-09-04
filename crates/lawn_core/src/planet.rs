@@ -57,7 +57,7 @@ impl FromStr for WorldSeed {
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-#[error("a seed cannot be empty")]
+#[error("expected a nonempty seed phrase, decimal integer, or valid 0x-prefixed hexadecimal seed")]
 pub struct SeedParseError;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,11 +256,9 @@ impl PlanetGenerator {
         seed: WorldSeed,
         include_roots: bool,
     ) -> Result<Planet, GenerationError> {
-        if self.config.terrain_resolution < 8 || self.config.mowing_resolution < 8 {
-            return Err(GenerationError::InvalidConfig(
-                "terrain and mowing resolutions must be at least 8".into(),
-            ));
-        }
+        self.config
+            .validate()
+            .map_err(GenerationError::InvalidConfig)?;
         let mut last_report = ValidationReport::default();
         for attempt in 0..self.config.maximum_generation_attempts {
             let planet = self.generate_attempt(seed, attempt, include_roots);
@@ -284,7 +282,8 @@ impl PlanetGenerator {
         let resolution = self.config.terrain_resolution;
         let mut terrain = CubeGrid::new(resolution, TerrainCell::default());
 
-        for cell in terrain.cells().collect::<Vec<_>>() {
+        for index in 0..terrain.len() {
+            let cell = terrain.cell_from_index(index);
             let direction = cell_center_direction(cell, resolution);
             let (radius, influence) = sample_radius_and_influence(
                 direction,
@@ -333,21 +332,23 @@ impl PlanetGenerator {
 
         let clearance = distance_from_rock(&terrain);
         let spawn = select_spawn(&self.config, &terrain, &clearance);
-        let validation = validate_planet(&self.config, &terrain, &mountains, spawn);
+        let validation = validate_planet(&self.config, &terrain, &mountains, spawn, &clearance);
 
-        let (grass_roots, grass_patches) =
-            if include_roots && self.config.grass_roots_per_square_meter > 0.0 {
-                generate_grass_roots(
-                    &self.config,
-                    self.version,
-                    seed,
-                    attempt,
-                    &terrain,
-                    &mountains,
-                )
-            } else {
-                (Vec::new(), Vec::new())
-            };
+        let (grass_roots, grass_patches) = if validation.valid
+            && include_roots
+            && self.config.grass_roots_per_square_meter > 0.0
+        {
+            generate_grass_roots(
+                &self.config,
+                self.version,
+                seed,
+                attempt,
+                &terrain,
+                &mountains,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         let deterministic_hash = hash_planet(
             self.version,
@@ -425,6 +426,9 @@ fn random_unit_vector(rng: &mut ChaCha8Rng) -> Vec3 {
 }
 
 fn classify_rock(terrain: &mut CubeGrid<TerrainCell>, target_ratio: f32) {
+    if target_ratio <= 0.0 {
+        return;
+    }
     let total_area: f64 = terrain.iter().map(|cell| f64::from(cell.area)).sum();
     let target_area = total_area * f64::from(target_ratio);
     let mut ranked: Vec<(usize, f32)> = terrain
@@ -571,6 +575,7 @@ fn validate_planet(
     terrain: &CubeGrid<TerrainCell>,
     mountains: &[Mountain],
     spawn: SpawnPoint,
+    clearance: &[u16],
 ) -> ValidationReport {
     let total_area: f64 = terrain.iter().map(|cell| f64::from(cell.area)).sum();
     let mowable_area: f64 = terrain
@@ -579,13 +584,12 @@ fn validate_planet(
         .map(|cell| f64::from(cell.area))
         .sum();
     let components = grass_components(terrain);
-    let clearance = distance_from_rock(terrain);
     let approximate_cell_width = config.base_radius * 2.0 / terrain.resolution() as f32;
     let corridor_clearance_cells = ((config.pass_clearance * 0.5) / approximate_cell_width)
         .ceil()
         .max(1.0) as u16;
     let corridor_components =
-        grass_clearance_components(terrain, &clearance, corridor_clearance_cells);
+        grass_clearance_components(terrain, clearance, corridor_clearance_cells);
     let corridor_core_area: f64 = corridor_components.iter().map(|(_, area)| *area).sum();
     let corridor_core_regions = corridor_components
         .iter()
@@ -603,6 +607,14 @@ fn validate_planet(
     let ideal_distance = mowable_area as f32 / 2.2 * 1.18;
     let estimated_ideal_seconds = ideal_distance / 8.0;
     let mut errors = Vec::new();
+
+    // Fractional stochastic rounding adds at most one root per terrain cell.
+    // Check the actual generated area before allocating the immutable GPU buffer.
+    let root_bound =
+        mowable_area * f64::from(config.grass_roots_per_square_meter) + terrain.len() as f64;
+    if root_bound > 16_000_000.0 {
+        errors.push("grass density exceeds the 16 million root allocation budget".into());
+    }
 
     if !(f64::from(config.mowable_ratio_min)..=f64::from(config.mowable_ratio_max))
         .contains(&mowable_ratio)
@@ -717,12 +729,15 @@ fn generate_grass_roots(
     let resolution = terrain.resolution();
     let patch_cells = config.patch_cells.max(1);
     let patches_per_face = resolution.div_ceil(patch_cells);
-    let estimated_roots = terrain
+    // Stochastic rounding can exceed the sum of expected counts and force a
+    // full-buffer copy/doubling for just a few extra roots. Reserve the exact
+    // per-cell upper count; validation has already bounded this allocation.
+    let maximum_roots = terrain
         .iter()
         .filter(|cell| cell.material == SurfaceMaterial::Grass)
-        .map(|cell| cell.area * config.grass_roots_per_square_meter)
-        .sum::<f32>() as usize;
-    let mut roots = Vec::with_capacity(estimated_roots);
+        .map(|cell| (cell.area * config.grass_roots_per_square_meter).ceil() as usize)
+        .sum();
+    let mut roots = Vec::with_capacity(maximum_roots);
     let mut patches = Vec::with_capacity((6 * patches_per_face * patches_per_face) as usize);
     let mut rng = stage_rng(version, seed, attempt, 3);
 
@@ -751,6 +766,7 @@ fn generate_grass_roots(
                         // Cartesian sub-grid. The per-cell offset prevents phase
                         // alignment at terrain-cell boundaries.
                         let sequence_offset = Vec2::new(rng.random::<f32>(), rng.random::<f32>());
+                        let packed_normal = pack_normal_seed(sample.normal, 0);
                         for root_index in 0..count {
                             let index = root_index as f32;
                             let jitter = Vec2::new(
@@ -774,7 +790,7 @@ fn generate_grass_roots(
                             let variation = rng.random::<u32>() & 0x0fff;
                             roots.push(GrassRootGpu {
                                 position: (direction * radius).to_array(),
-                                packed_normal_seed: pack_normal_seed(sample.normal, variation),
+                                packed_normal_seed: packed_normal | (variation << 20),
                             });
                         }
                     }
@@ -789,14 +805,21 @@ fn generate_grass_roots(
                     ((y_start + y_end) as f32 * 0.5).mul_add(2.0 / resolution as f32, -1.0),
                 );
                 let center = face_uv_to_direction(face, center_uv);
-                let corner_uv = Vec2::new(
-                    x_start as f32 * 2.0 / resolution as f32 - 1.0,
-                    y_start as f32 * 2.0 / resolution as f32 - 1.0,
-                );
-                let angular_radius = center
-                    .dot(face_uv_to_direction(face, corner_uv))
-                    .clamp(-1.0, 1.0)
-                    .acos();
+                let mut angular_radius = 0.0_f32;
+                for y in [y_start, y_end] {
+                    for x in [x_start, x_end] {
+                        let corner_uv = Vec2::new(
+                            x as f32 * 2.0 / resolution as f32 - 1.0,
+                            y as f32 * 2.0 / resolution as f32 - 1.0,
+                        );
+                        angular_radius = angular_radius.max(
+                            center
+                                .dot(face_uv_to_direction(face, corner_uv))
+                                .clamp(-1.0, 1.0)
+                                .acos(),
+                        );
+                    }
+                }
                 patches.push(GrassPatch {
                     face,
                     tile_x,
@@ -924,6 +947,9 @@ fn sample_radius_and_influence(
     for (index, mountain) in mountains.iter().enumerate() {
         let angle = direction.dot(mountain.center).clamp(-1.0, 1.0).acos();
         let x = (1.0 - angle / mountain.angular_radius).clamp(0.0, 1.0);
+        if x <= 0.0 {
+            continue;
+        }
         let smooth_mass = x * x * (3.0 - 2.0 * x);
         let ridged = 1.0
             - value_noise(
@@ -1080,6 +1106,77 @@ mod tests {
 
     fn generator() -> PlanetGenerator {
         PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+    }
+
+    #[test]
+    fn invalid_generator_config_returns_an_error_before_generation() {
+        for mutate in [
+            |c: &mut GeneratorConfig| c.base_radius = f32::NAN,
+            |c: &mut GeneratorConfig| c.rolling_amplitude = f32::INFINITY,
+            |c: &mut GeneratorConfig| c.mountain_count_min = c.mountain_count_max + 1,
+            |c: &mut GeneratorConfig| c.mountain_height_min = c.mountain_height_max + 1.0,
+            |c: &mut GeneratorConfig| c.mowable_ratio_min = c.mowable_ratio_max + 0.1,
+            |c: &mut GeneratorConfig| c.terrain_resolution = u32::MAX,
+            |c: &mut GeneratorConfig| c.mowing_resolution = 0,
+            |c: &mut GeneratorConfig| c.patch_cells = 0,
+            |c: &mut GeneratorConfig| c.maximum_generation_attempts = 0,
+        ] {
+            let mut config = GeneratorConfig::default();
+            mutate(&mut config);
+            let result =
+                PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config).generate(WorldSeed(42));
+            assert!(matches!(result, Err(GenerationError::InvalidConfig(_))));
+        }
+    }
+
+    #[test]
+    fn rejected_attempts_do_not_allocate_cosmetic_grass() {
+        let mut config = GeneratorConfig::test_quality();
+        config.grass_roots_per_square_meter = 3.25;
+        config.ideal_time_min_seconds = 0.0;
+        config.ideal_time_max_seconds = 1.0;
+        let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config).generate_attempt(
+            WorldSeed(42),
+            0,
+            true,
+        );
+        assert!(!planet.validation.valid);
+        assert!(planet.grass_roots.is_empty());
+        assert!(planet.grass_patches.is_empty());
+    }
+
+    #[test]
+    fn excessive_grass_density_is_rejected_before_allocating_roots() {
+        let mut config = GeneratorConfig::test_quality();
+        config.grass_roots_per_square_meter = f32::MAX;
+        let result =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config).generate(WorldSeed(42));
+        assert!(matches!(
+            result,
+            Err(GenerationError::AttemptsExhausted { .. })
+        ));
+    }
+
+    #[test]
+    fn grass_patch_bounds_contain_every_root_including_partial_tiles() {
+        let mut config = GeneratorConfig::test_quality();
+        config.grass_roots_per_square_meter = 3.25;
+        config.patch_cells = 7;
+        let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config)
+            .generate(WorldSeed(42))
+            .unwrap();
+        for patch in &planet.grass_patches {
+            for root in &planet.grass_roots[patch.roots.start as usize..patch.roots.end as usize] {
+                let direction = Vec3::from_array(root.position).normalize();
+                let angle = direction.dot(patch.center).clamp(-1.0, 1.0).acos();
+                assert!(
+                    angle <= patch.angular_radius + 1.0e-5,
+                    "root is outside patch {:?}: {angle} > {}",
+                    patch.face,
+                    patch.angular_radius
+                );
+            }
+        }
     }
 
     #[test]

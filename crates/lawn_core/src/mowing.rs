@@ -1,15 +1,13 @@
 //! CPU-authoritative six-face mowing field.
 
-use std::collections::{HashSet, VecDeque};
+use std::{collections::VecDeque, sync::OnceLock};
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cube_map::{
-        CubeCell, CubeFace, cell_center_direction, cell_solid_angle, direction_to_cell, offset_cell,
-    },
+    cube_map::{CubeCell, CubeFace, cell_center_direction, cell_solid_angle, offset_cell},
     planet::{Planet, SurfaceMaterial},
 };
 
@@ -83,6 +81,9 @@ pub struct DirtyTileUpdate {
 pub struct MowingFieldSnapshot {
     pub resolution: u32,
     pub cells: Vec<PackedMowingCell>,
+    /// Sub-byte cut progress; absent in snapshots from older builds.
+    #[serde(default)]
+    pub cut_residuals: Vec<f32>,
     pub cut_weight: f64,
 }
 
@@ -92,12 +93,17 @@ pub struct MowingFieldSnapshot {
 pub struct MowingField {
     resolution: u32,
     cells: Vec<PackedMowingCell>,
+    // One extra float per cell (6 MiB at 512² per face) avoids discarding
+    // sub-byte progress from slow cuts and time-divided sweep samples.
+    cut_residuals: Vec<f32>,
     mowable: Vec<bool>,
     weights: Vec<f32>,
     total_mowable_weight: f64,
     cut_weight: f64,
     dirty_tile_size: u32,
-    dirty_tiles: HashSet<u32>,
+    dirty_tiles: Vec<u32>,
+    dirty_flags: Vec<bool>,
+    locator_cache: OnceLock<Option<Vec3>>,
     nominal_radius: f32,
 }
 
@@ -132,12 +138,18 @@ impl MowingField {
         Self {
             resolution,
             cells: vec![PackedMowingCell::default(); len],
+            cut_residuals: vec![0.0; len],
             mowable,
             weights,
             total_mowable_weight,
             cut_weight: 0.0,
             dirty_tile_size: DEFAULT_DIRTY_TILE_SIZE,
-            dirty_tiles: HashSet::new(),
+            dirty_tiles: Vec::new(),
+            dirty_flags: vec![
+                false;
+                6 * resolution.div_ceil(DEFAULT_DIRTY_TILE_SIZE).pow(2) as usize
+            ],
+            locator_cache: OnceLock::new(),
             nominal_radius: planet.config.base_radius,
         }
     }
@@ -192,6 +204,7 @@ impl MowingField {
         MowingFieldSnapshot {
             resolution: self.resolution,
             cells: self.cells.clone(),
+            cut_residuals: self.cut_residuals.clone(),
             cut_weight: self.cut_weight,
         }
     }
@@ -201,12 +214,27 @@ impl MowingField {
     /// # Errors
     ///
     /// Returns [`SnapshotError::ResolutionMismatch`] if the snapshot dimensions
-    /// do not exactly match this field.
+    /// do not exactly match this field, or [`SnapshotError::InvalidCutResiduals`]
+    /// if optional fractional progress has the wrong shape or numeric domain.
     pub fn restore(&mut self, snapshot: &MowingFieldSnapshot) -> Result<(), SnapshotError> {
         if snapshot.resolution != self.resolution || snapshot.cells.len() != self.cells.len() {
             return Err(SnapshotError::ResolutionMismatch);
         }
+        if !snapshot.cut_residuals.is_empty()
+            && (snapshot.cut_residuals.len() != self.cells.len()
+                || snapshot
+                    .cut_residuals
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..1.0).contains(value)))
+        {
+            return Err(SnapshotError::InvalidCutResiduals);
+        }
         self.cells.clone_from(&snapshot.cells);
+        if snapshot.cut_residuals.is_empty() {
+            self.cut_residuals.fill(0.0);
+        } else {
+            self.cut_residuals.clone_from(&snapshot.cut_residuals);
+        }
         self.cut_weight = self
             .cells
             .iter()
@@ -218,22 +246,34 @@ impl MowingField {
             .sum();
         // Never trust a serialized cached aggregate over authoritative cells.
         self.dirty_tiles.clear();
+        self.dirty_flags.fill(false);
+        self.locator_cache.take();
         let tiles_per_face = self.resolution.div_ceil(self.dirty_tile_size);
         for face in CubeFace::ALL {
             for y in 0..tiles_per_face {
                 for x in 0..tiles_per_face {
-                    self.dirty_tiles.insert(tile_key(face, x, y));
+                    self.mark_dirty(CubeCell {
+                        face,
+                        x: x * self.dirty_tile_size,
+                        y: y * self.dirty_tile_size,
+                    });
                 }
             }
         }
         Ok(())
     }
 
-    /// Apply a swept circular deck footprint. Spatial subdivision is at most one
-    /// quarter deck width and each subdivision receives its share of elapsed cut
-    /// time, making results insensitive to physics/render frame grouping.
+    /// Apply a swept circular deck footprint. Subdivide at quarter deck width,
+    /// with a half-texel lower bound, and share elapsed cut time among samples.
     pub fn stamp(&mut self, stamp: MowingStamp) -> StampResult {
-        if stamp.deck_width <= 0.0 || stamp.cut_delta <= 0.0 {
+        if !stamp.deck_width.is_finite()
+            || !stamp.cut_delta.is_finite()
+            || !stamp.from.is_finite()
+            || !stamp.to.is_finite()
+            || !stamp.comb_direction.is_finite()
+            || stamp.deck_width <= 0.0
+            || stamp.cut_delta <= 0.0
+        {
             return StampResult::default();
         }
         let from_direction = stamp.from.normalize_or_zero();
@@ -243,11 +283,13 @@ impl MowingField {
         }
         let angle = from_direction.dot(to_direction).clamp(-1.0, 1.0).acos();
         let distance = angle * self.nominal_radius;
-        let max_interval = stamp.deck_width * 0.25;
+        // Going below half a texel adds work without improving the footprint,
+        // whose conservative boundary already extends by 1.5 texels.
+        let max_interval =
+            (stamp.deck_width * 0.25).max(self.nominal_radius / self.resolution as f32 * 0.5);
         let samples = (distance / max_interval).ceil().max(1.0) as u32;
         let cut_delta = stamp.cut_delta / samples as f32;
         let mut result = StampResult::default();
-        let mut touched = HashSet::new();
         for sample_index in 0..samples {
             let t = (sample_index as f32 + 0.5) / samples as f32;
             let direction = slerp_direction(from_direction, to_direction, t);
@@ -257,17 +299,12 @@ impl MowingField {
                 stamp.deck_width * 0.5,
                 cut_delta,
                 stamp.recent_epoch,
-                &mut touched,
                 &mut result,
             );
-            // Cells can legitimately receive cut time from overlapping samples;
-            // clear only duplicate candidate mappings within the next disc.
-            touched.clear();
         }
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn stamp_disc(
         &mut self,
         center_direction: Vec3,
@@ -275,67 +312,91 @@ impl MowingField {
         radius: f32,
         cut_delta: f32,
         recent_epoch: u8,
-        touched: &mut HashSet<usize>,
         result: &mut StampResult,
     ) {
-        let center_cell = direction_to_cell(center_direction, self.resolution);
-        // Conservative bound at cube corners, where angular texel size is smallest.
-        let cell_radius =
-            (radius * self.resolution as f32 / self.nominal_radius * 0.9).ceil() as i32 + 2;
-        let angular_radius = radius / self.nominal_radius;
+        let angular_radius =
+            (radius / self.nominal_radius + 1.5 / self.resolution as f32).min(std::f32::consts::PI);
+        let minimum_dot = angular_radius.cos();
         let comb = encode_octahedral(
             (comb_direction - center_direction * comb_direction.dot(center_direction))
                 .try_normalize()
                 .unwrap_or(Vec3::ZERO),
         );
-        let cut_increment = (cut_delta.clamp(0.0, 1.0) * 255.0).round() as u8;
-        for dy in -cell_radius..=cell_radius {
-            for dx in -cell_radius..=cell_radius {
-                let cell = offset_cell(center_cell, dx, dy, self.resolution);
-                let index = flat_index(cell, self.resolution);
-                if !touched.insert(index) {
-                    continue;
+        let fractional_increment = cut_delta.clamp(0.0, 1.0) * 255.0;
+        for face in CubeFace::ALL {
+            let Some((min_x, max_x, min_y, max_y)) =
+                cap_cell_bounds(face, center_direction, angular_radius, self.resolution)
+            else {
+                continue;
+            };
+            for y in min_y..=max_y {
+                for x in min_x..=max_x {
+                    let cell = CubeCell { face, x, y };
+                    let index = flat_index(cell, self.resolution);
+                    let direction = cell_center_direction(cell, self.resolution);
+                    if center_direction.dot(direction) < minimum_dot {
+                        continue;
+                    }
+                    if !self.mowable[index] {
+                        result.touched_rock = true;
+                        continue;
+                    }
+                    result.touched_grass_cells += 1;
+                    let previous = self.cells[index];
+                    let was_covered = previous.cut_amount() >= CUT_COVERAGE_THRESHOLD;
+                    let cut = if previous.cut_amount() < u8::MAX {
+                        let progress = self.cut_residuals[index] + fractional_increment;
+                        let increment = progress.floor() as u8;
+                        let cut = previous.cut_amount().saturating_add(increment);
+                        self.cut_residuals[index] = if cut == u8::MAX {
+                            0.0
+                        } else {
+                            progress - f32::from(increment)
+                        };
+                        cut
+                    } else {
+                        u8::MAX
+                    };
+                    let updated = PackedMowingCell::packed(cut, comb, recent_epoch);
+                    if updated != previous {
+                        self.cells[index] = updated;
+                        self.mark_dirty(cell);
+                    }
+                    if !was_covered && cut >= CUT_COVERAGE_THRESHOLD {
+                        result.newly_covered_cells += 1;
+                        let weight = f64::from(self.weights[index]);
+                        result.newly_cut_weight += weight;
+                        self.cut_weight += weight;
+                        self.locator_cache.take();
+                    }
                 }
-                let direction = cell_center_direction(cell, self.resolution);
-                if center_direction.dot(direction).clamp(-1.0, 1.0).acos()
-                    > angular_radius + 1.5 / self.resolution as f32
-                {
-                    continue;
-                }
-                if !self.mowable[index] {
-                    result.touched_rock = true;
-                    continue;
-                }
-                result.touched_grass_cells += 1;
-                let previous = self.cells[index];
-                let was_covered = previous.cut_amount() >= CUT_COVERAGE_THRESHOLD;
-                let cut = previous.cut_amount().saturating_add(cut_increment);
-                self.cells[index] = PackedMowingCell::packed(cut, comb, recent_epoch);
-                if !was_covered && cut >= CUT_COVERAGE_THRESHOLD {
-                    result.newly_covered_cells += 1;
-                    let weight = f64::from(self.weights[index]);
-                    result.newly_cut_weight += weight;
-                    self.cut_weight += weight;
-                }
-                self.mark_dirty(cell);
             }
         }
     }
 
     fn mark_dirty(&mut self, cell: CubeCell) {
-        self.dirty_tiles.insert(tile_key(
-            cell.face,
-            cell.x / self.dirty_tile_size,
-            cell.y / self.dirty_tile_size,
-        ));
+        let tiles_per_face = self.resolution.div_ceil(self.dirty_tile_size);
+        let x = cell.x / self.dirty_tile_size;
+        let y = cell.y / self.dirty_tile_size;
+        let index =
+            (cell.face as u32 * tiles_per_face * tiles_per_face + y * tiles_per_face + x) as usize;
+        if !self.dirty_flags[index] {
+            self.dirty_flags[index] = true;
+            self.dirty_tiles.push(tile_key(cell.face, x, y));
+        }
     }
 
     /// Drain compact tile uploads for the GPU mirror.
     pub fn take_dirty_tiles(&mut self) -> Vec<DirtyTileUpdate> {
-        let mut keys: Vec<_> = self.dirty_tiles.drain().collect();
+        if self.dirty_tiles.is_empty() {
+            return Vec::new();
+        }
+        self.dirty_flags.fill(false);
+        let mut keys = std::mem::take(&mut self.dirty_tiles);
         keys.sort_unstable();
-        keys.into_iter()
-            .map(|key| {
+        let updates = keys
+            .iter()
+            .map(|&key| {
                 let (face, tile_x, tile_y) = decode_tile_key(key);
                 let origin_x = tile_x * self.dirty_tile_size;
                 let origin_y = tile_y * self.dirty_tile_size;
@@ -356,16 +417,26 @@ impl MowingField {
                     cells,
                 }
             })
-            .collect()
+            .collect();
+        keys.clear();
+        self.dirty_tiles = keys;
+        updates
     }
 
     /// Weighted centroid of the largest connected uncut region, used by the 95%
     /// locator assist. Returns `None` only when no required grass remains.
     #[must_use]
     pub fn largest_uncut_direction(&self) -> Option<Vec3> {
+        *self
+            .locator_cache
+            .get_or_init(|| self.compute_largest_uncut_direction())
+    }
+
+    fn compute_largest_uncut_direction(&self) -> Option<Vec3> {
         let mut visited = vec![false; self.cells.len()];
         let mut best_weight = 0.0;
         let mut best_centroid = Vec3::ZERO;
+        let mut best_fallback = Vec3::Y;
         for start in 0..self.cells.len() {
             if visited[start]
                 || !self.mowable[start]
@@ -403,16 +474,75 @@ impl MowingField {
             if weight_sum > best_weight {
                 best_weight = weight_sum;
                 best_centroid = centroid;
+                best_fallback =
+                    cell_center_direction(cell_from_index(start, self.resolution), self.resolution);
             }
         }
-        (best_weight > 0.0).then(|| best_centroid.normalize())
+        (best_weight > 0.0).then(|| best_centroid.normalize_or(best_fallback))
     }
+}
+
+/// Project the spherical cap onto each cube face independently. Remapping a
+/// square of offsets from just its center face can skip texels near cube corners.
+fn cap_cell_bounds(
+    face: CubeFace,
+    center: Vec3,
+    angle: f32,
+    resolution: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let (normal, u, v) = match face {
+        CubeFace::PositiveX => (center.x, -center.z, center.y),
+        CubeFace::NegativeX => (-center.x, center.z, center.y),
+        CubeFace::PositiveY => (center.y, center.x, -center.z),
+        CubeFace::NegativeY => (-center.y, center.x, center.z),
+        CubeFace::PositiveZ => (center.z, center.x, center.y),
+        CubeFace::NegativeZ => (-center.z, -center.x, center.y),
+    };
+    if angle >= std::f32::consts::FRAC_PI_2 {
+        return Some((0, resolution - 1, 0, resolution - 1));
+    }
+    let (sine, cosine) = angle.sin_cos();
+    let maximum_normal = if normal >= cosine {
+        1.0
+    } else {
+        normal * cosine + (1.0 - normal * normal).max(0.0).sqrt() * sine
+    };
+    // Every direction assigned to this face has normal component >= 1/sqrt(3).
+    if maximum_normal + 1.0e-6 < 1.0 / 3.0_f32.sqrt() {
+        return None;
+    }
+    if normal <= sine {
+        return Some((0, resolution - 1, 0, resolution - 1));
+    }
+    let projection_bounds = |axis: f32| {
+        let denominator = normal * normal - sine * sine;
+        let extent = sine
+            * (normal * normal + axis * axis - sine * sine)
+                .max(0.0)
+                .sqrt();
+        let minimum = (normal * axis - extent) / denominator;
+        let maximum = (normal * axis + extent) / denominator;
+        if minimum > 1.0 || maximum < -1.0 {
+            return None;
+        }
+        // One guard texel protects the analytic bound from floating-point rounding.
+        let first = ((minimum.clamp(-1.0, 1.0) + 1.0) * 0.5 * resolution as f32).floor() as u32;
+        let last = ((maximum.clamp(-1.0, 1.0) + 1.0) * 0.5 * resolution as f32).ceil() as u32;
+        Some((first.saturating_sub(1), last.min(resolution - 1)))
+    };
+    let (min_x, max_x) = projection_bounds(u)?;
+    let (min_y, max_y) = projection_bounds(v)?;
+    Some((min_x, max_x, min_y, max_y))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotError {
     #[error("mowing snapshot resolution does not match this planet")]
     ResolutionMismatch,
+    #[error(
+        "mowing snapshot fractional progress must match the field and contain finite values in [0, 1)"
+    )]
+    InvalidCutResiduals,
 }
 
 fn slerp_direction(from: Vec3, to: Vec3, t: f32) -> Vec3 {
@@ -420,19 +550,16 @@ fn slerp_direction(from: Vec3, to: Vec3, t: f32) -> Vec3 {
     if dot > 0.9995 {
         return from.lerp(to, t).normalize();
     }
-    if dot < -0.9995 {
-        let axis = if from.x.abs() < 0.8 {
+    let cross = from.cross(to);
+    let axis = cross.try_normalize().unwrap_or_else(|| {
+        if from.x.abs() < 0.8 {
             from.cross(Vec3::X).normalize()
         } else {
             from.cross(Vec3::Y).normalize()
-        };
-        return glam::Quat::from_axis_angle(axis, std::f32::consts::PI * t)
-            .mul_vec3(from)
-            .normalize();
-    }
-    let theta = dot.acos();
-    let sin_theta = theta.sin();
-    (from * ((1.0 - t) * theta).sin() + to * (t * theta).sin()) / sin_theta
+        }
+    });
+    let angle = cross.length().atan2(dot);
+    (glam::Quat::from_axis_angle(axis, angle * t) * from).normalize()
 }
 
 fn encode_octahedral(normal: Vec3) -> (u8, u8) {
@@ -481,7 +608,10 @@ fn decode_tile_key(key: u32) -> (CubeFace, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GeneratorConfig, PlanetGenerator, planet::CURRENT_GENERATOR_VERSION};
+    use crate::{
+        GeneratorConfig, PlanetGenerator, cube_map::direction_to_cell,
+        planet::CURRENT_GENERATOR_VERSION,
+    };
 
     fn field() -> MowingField {
         let planet =
@@ -489,6 +619,217 @@ mod tests {
                 .generate_with_roots(crate::WorldSeed(7), false)
                 .unwrap();
         MowingField::from_planet(&planet)
+    }
+
+    #[test]
+    fn disc_footprints_match_exhaustive_spherical_caps_at_seams_and_corners() {
+        let template = field();
+        for center in [Vec3::X, Vec3::new(1.0, 0.0, 1.0), Vec3::ONE] {
+            let mut field = template.clone();
+            let center = center.normalize();
+            let deck_width = 2.2;
+            let minimum_dot =
+                (deck_width * 0.5 / field.nominal_radius + 1.5 / field.resolution as f32).cos();
+            field.stamp(MowingStamp {
+                from: center * field.nominal_radius,
+                to: center * field.nominal_radius,
+                comb_direction: Vec3::Y,
+                deck_width,
+                cut_delta: 1.0,
+                recent_epoch: 1,
+            });
+            for index in 0..field.cells.len() {
+                let cell = cell_from_index(index, field.resolution);
+                let expected = field.mowable[index]
+                    && cell_center_direction(cell, field.resolution).dot(center) >= minimum_dot;
+                assert_eq!(
+                    field.cells[index].cut_amount() > 0,
+                    expected,
+                    "center {center}, cell {cell:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projected_cap_bounds_include_all_cells_across_every_cube_face() {
+        let resolution = 32;
+        for source_face in CubeFace::ALL {
+            for uv in [
+                glam::Vec2::ZERO,
+                glam::Vec2::new(-1.0, 0.0),
+                glam::Vec2::new(1.0, 0.0),
+                glam::Vec2::new(0.0, -1.0),
+                glam::Vec2::new(0.0, 1.0),
+                glam::Vec2::new(-1.0, -1.0),
+                glam::Vec2::new(-1.0, 1.0),
+                glam::Vec2::new(1.0, -1.0),
+                glam::Vec2::ONE,
+            ] {
+                let center = crate::cube_map::face_uv_to_direction(source_face, uv);
+                for angle in [0.02_f32, 0.1, 0.4, 1.2, 2.0] {
+                    for target_face in CubeFace::ALL {
+                        let bounds = cap_cell_bounds(target_face, center, angle, resolution);
+                        for y in 0..resolution {
+                            for x in 0..resolution {
+                                let direction = cell_center_direction(
+                                    CubeCell {
+                                        face: target_face,
+                                        x,
+                                        y,
+                                    },
+                                    resolution,
+                                );
+                                if center.dot(direction) >= angle.cos() {
+                                    assert!(
+                                        bounds.is_some_and(|(min_x, max_x, min_y, max_y)| {
+                                            (min_x..=max_x).contains(&x)
+                                                && (min_y..=max_y).contains(&y)
+                                        }),
+                                        "missing {target_face:?} ({x}, {y}), cap {source_face:?} {uv}, {angle}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_packed_cells_do_not_generate_redundant_gpu_uploads() {
+        let mut field = field();
+        let stamp = MowingStamp {
+            from: Vec3::X * 15.0,
+            to: Vec3::X * 15.0,
+            comb_direction: Vec3::Y,
+            deck_width: 2.2,
+            cut_delta: 1.0,
+            recent_epoch: 1,
+        };
+        field.stamp(stamp);
+        assert!(!field.take_dirty_tiles().is_empty());
+        field.stamp(stamp);
+        assert!(field.take_dirty_tiles().is_empty());
+    }
+
+    #[test]
+    fn fractional_cuts_accumulate_and_survive_snapshot_restore() {
+        let mut field = field();
+        let stamp = MowingStamp {
+            from: Vec3::X * 15.0,
+            to: Vec3::X * 15.0,
+            comb_direction: Vec3::Y,
+            deck_width: 2.2,
+            cut_delta: 1.0 / 1024.0,
+            recent_epoch: 1,
+        };
+        field.stamp(stamp);
+        let snapshot = field.snapshot();
+        assert!(snapshot.cells.iter().all(|cell| cell.cut_amount() == 0));
+        assert!(snapshot.cut_residuals.iter().any(|value| *value > 0.0));
+        let mut restored = field.clone();
+        restored.restore(&snapshot).unwrap();
+        for _ in 1..1024 {
+            field.stamp(stamp);
+            restored.stamp(stamp);
+        }
+        assert!(field.cut_weight() > 0.0);
+        assert_eq!(field.cells, restored.cells);
+        assert_eq!(field.cut_residuals, restored.cut_residuals);
+
+        // The same elapsed cut time grouped into larger stamps reaches the
+        // same packed result, including the coverage threshold.
+        let mut grouped = field.clone();
+        grouped.cells.fill(PackedMowingCell::default());
+        grouped.cut_residuals.fill(0.0);
+        grouped.cut_weight = 0.0;
+        grouped.stamp(MowingStamp {
+            cut_delta: 1.0,
+            ..stamp
+        });
+        assert_eq!(field.cells, grouped.cells);
+        assert_eq!(field.coverage(), grouped.coverage());
+    }
+
+    #[test]
+    fn subdivided_sweeps_retain_sub_byte_cut_progress() {
+        let mut field = field();
+        let stamp = MowingStamp {
+            from: Vec3::X * 15.0,
+            to: Vec3::Y * 15.0,
+            comb_direction: Vec3::Y,
+            deck_width: 2.2,
+            cut_delta: 0.02,
+            recent_epoch: 1,
+        };
+        for _ in 0..20 {
+            field.stamp(stamp);
+        }
+        assert!(field.cells.iter().any(|cell| cell.cut_amount() > 0));
+    }
+
+    #[test]
+    fn old_snapshots_default_fractional_progress_and_invalid_snapshots_are_atomic() {
+        let mut field = field();
+        let mut snapshot = field.snapshot();
+        let mut legacy_json = serde_json::to_value(&snapshot).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("cut_residuals");
+        snapshot = serde_json::from_value(legacy_json).unwrap();
+        assert!(snapshot.cut_residuals.is_empty());
+        snapshot.cut_residuals.clear();
+        field.restore(&snapshot).unwrap();
+        assert!(field.cut_residuals.iter().all(|value| *value == 0.0));
+        let before = field.snapshot();
+        for residuals in [
+            vec![0.0],
+            vec![f32::NAN; field.cells.len()],
+            vec![1.0; field.cells.len()],
+        ] {
+            snapshot.cut_residuals = residuals;
+            assert_eq!(
+                field.restore(&snapshot),
+                Err(SnapshotError::InvalidCutResiduals)
+            );
+            assert_eq!(field.cells, before.cells);
+            assert_eq!(field.cut_residuals, before.cut_residuals);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual shipping-resolution CPU benchmark"]
+    fn shipping_resolution_mowing_benchmark() {
+        let config = GeneratorConfig {
+            mowing_resolution: 512,
+            ..GeneratorConfig::test_quality()
+        };
+        let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config)
+            .generate_with_roots(crate::WorldSeed(7), false)
+            .unwrap();
+        let mut field = MowingField::from_planet(&planet);
+        let started = std::time::Instant::now();
+        let mut previous = Vec3::X * 15.0;
+        for tick in 0..2400 {
+            let angle = (tick + 1) as f32 * 0.005;
+            let next = Vec3::new(angle.cos(), angle.sin(), 0.2).normalize() * 15.0;
+            std::hint::black_box(field.stamp(MowingStamp {
+                from: previous,
+                to: next,
+                comb_direction: next - previous,
+                deck_width: 2.2,
+                cut_delta: 8.0 / 120.0,
+                recent_epoch: (tick / 4) as u8,
+            }));
+            if tick % 2 == 0 {
+                std::hint::black_box(field.take_dirty_tiles());
+            }
+            previous = next;
+        }
+        eprintln!(
+            "mowing: {:.2} microseconds/tick",
+            started.elapsed().as_secs_f64() * 1.0e6 / 2400.0
+        );
     }
 
     #[test]
@@ -645,5 +986,16 @@ mod tests {
             assert!(direction.is_finite());
             assert!((direction.length() - 1.0).abs() < 1.0e-5);
         }
+    }
+
+    #[test]
+    fn nearly_antipodal_sweep_reaches_its_actual_endpoint_on_the_correct_plane() {
+        let from = Vec3::X;
+        let to = glam::Quat::from_rotation_z(std::f32::consts::PI - 0.01) * from;
+        assert!(slerp_direction(from, to, 0.0).distance(from) < 1.0e-6);
+        assert!(slerp_direction(from, to, 1.0).distance(to) < 1.0e-6);
+        let middle = slerp_direction(from, to, 0.5);
+        assert!(middle.z.abs() < 1.0e-6);
+        assert!(middle.y > 0.99);
     }
 }

@@ -61,6 +61,7 @@ pub struct PhysicsWorld {
     pad_target_distance: f32,
     surface_glue_acceleration: f32,
     surface_glue_damping: f32,
+    grounded: bool,
 }
 
 impl fmt::Debug for PhysicsWorld {
@@ -75,6 +76,7 @@ impl fmt::Debug for PhysicsWorld {
             .field("pad_target_distance", &self.pad_target_distance)
             .field("surface_glue_acceleration", &self.surface_glue_acceleration)
             .field("surface_glue_damping", &self.surface_glue_damping)
+            .field("grounded", &self.grounded)
             .finish()
     }
 }
@@ -130,6 +132,7 @@ impl PhysicsWorld {
             pad_target_distance: (tuning.hover_height - 0.18).max(0.25),
             surface_glue_acceleration: tuning.surface_glue_acceleration,
             surface_glue_damping: tuning.surface_glue_damping,
+            grounded: true,
         };
         result.teleport(transform, Vec3::ZERO);
         result.world.integration_parameters.dt = FIXED_DT;
@@ -141,6 +144,9 @@ impl PhysicsWorld {
 
     /// Advance the dynamic body using four hover-pad springs and PD orientation.
     pub fn step(&mut self, input: VehiclePhysicsInput, dt: f32) -> VehiclePhysicsOutput {
+        if !dt.is_finite() || dt <= 0.0 {
+            return self.output(self.grounded);
+        }
         self.world.integration_parameters.dt = dt;
         let body = &self.world.bodies[self.vehicle_body];
         let position = vector_to_glam(body.translation());
@@ -159,8 +165,11 @@ impl PhysicsWorld {
             body.reset_torques(true);
             let velocity = vector_to_glam(body.linvel());
             let tangent_velocity = velocity - up * velocity.dot(up);
-            let drive_force = (input.desired_velocity - tangent_velocity)
-                * (mass * input.drive_response.max(0.0));
+            let desired_tangent = input.desired_velocity - up * input.desired_velocity.dot(up);
+            // Integrate the servo exponentially so aggressive tuning cannot
+            // overshoot or reverse the velocity within one fixed step.
+            let response = -(-input.drive_response.max(0.0) * dt).exp_m1() / dt;
+            let drive_force = (desired_tangent - tangent_velocity) * (mass * response);
             body.add_force(glam_vector(drive_force), true);
 
             // A light radial preload holds normal hover height. When every pad
@@ -210,13 +219,16 @@ impl PhysicsWorld {
         }
 
         self.world.step();
-        self.output(
-            pad_samples
-                .iter()
-                .filter(|sample| sample.hit.is_some())
-                .count()
-                >= 2,
-        )
+        self.grounded = pad_samples
+            .iter()
+            .filter(|sample| {
+                sample
+                    .hit
+                    .is_some_and(|hit| hit.distance <= sample.target_distance + 0.45)
+            })
+            .count()
+            >= 2;
+        self.output(self.grounded)
     }
 
     /// Place the body at a known-safe pose for manual/automatic recovery.
@@ -441,6 +453,66 @@ mod tests {
         let output = physics.output(true);
         assert!(output.linear_velocity.length() < 1.0e-5);
         assert!(output.position.distance(transform.position) < 1.0e-4);
+    }
+
+    #[test]
+    fn distant_hover_ray_hits_do_not_allow_airborne_mowing() {
+        let planet = planet();
+        let tuning = VehicleTuning::default();
+        let mut physics = PhysicsWorld::new(&planet, planet.spawn, &tuning);
+        let mut transform = spawn_transform(planet.spawn);
+        transform.position += transform.up * 1.0;
+        physics.teleport(transform, Vec3::ZERO);
+        let output = physics.step(
+            VehiclePhysicsInput {
+                desired_velocity: Vec3::ZERO,
+                desired_forward: transform.forward,
+                desired_up: transform.up,
+                drive_response: 15.0,
+            },
+            FIXED_DT,
+        );
+        assert!(!output.grounded);
+    }
+
+    #[test]
+    fn drive_servo_ignores_radial_requests_and_remains_stable_at_high_response() {
+        let planet = planet();
+        let tuning = VehicleTuning::default();
+        let mut physics = PhysicsWorld::new(&planet, planet.spawn, &tuning);
+        let output = physics.step(
+            VehiclePhysicsInput {
+                desired_velocity: planet.spawn.forward * 10.0 + planet.spawn.up * 100.0,
+                desired_forward: planet.spawn.forward,
+                desired_up: planet.spawn.up,
+                drive_response: 10_000.0,
+            },
+            FIXED_DT,
+        );
+        assert!(output.linear_velocity.dot(planet.spawn.forward) > 8.0);
+        assert!(output.linear_velocity.dot(planet.spawn.forward) < 10.1);
+        assert!(output.linear_velocity.dot(planet.spawn.up).abs() < 1.0);
+    }
+
+    #[test]
+    fn invalid_time_steps_leave_physics_unchanged() {
+        let planet = planet();
+        let mut physics = PhysicsWorld::new(&planet, planet.spawn, &VehicleTuning::default());
+        let input = VehiclePhysicsInput {
+            desired_velocity: planet.spawn.forward * 10.0,
+            desired_forward: planet.spawn.forward,
+            desired_up: planet.spawn.up,
+            drive_response: 15.0,
+        };
+        let before = physics.step(input, FIXED_DT);
+        for dt in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let output = physics.step(input, dt);
+            assert_eq!(output.position, before.position);
+            assert_eq!(output.rotation, before.rotation);
+            assert_eq!(output.linear_velocity, before.linear_velocity);
+            assert_eq!(output.grounded, before.grounded);
+        }
+        assert!(physics.step(input, FIXED_DT).position.is_finite());
     }
 
     #[test]

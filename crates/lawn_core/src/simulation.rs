@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::FIXED_DT;
+use crate::SIMULATION_HZ;
 
 #[derive(Clone, Debug)]
 pub struct FixedStepClock {
@@ -16,7 +16,7 @@ impl Default for FixedStepClock {
     fn default() -> Self {
         Self {
             accumulator: 0.0,
-            fixed_seconds: f64::from(FIXED_DT),
+            fixed_seconds: 1.0 / f64::from(SIMULATION_HZ),
             maximum_catch_up_steps: 8,
             dropped_time_seconds: 0.0,
         }
@@ -25,19 +25,18 @@ impl Default for FixedStepClock {
 
 impl FixedStepClock {
     pub fn advance(&mut self, elapsed: Duration, mut tick: impl FnMut()) -> u32 {
-        self.accumulator += elapsed.as_secs_f64().min(0.25);
+        let elapsed = elapsed.as_secs_f64();
+        let admitted = elapsed.min(0.25);
+        self.dropped_time_seconds += elapsed - admitted;
+        self.accumulator += admitted;
         let available = (self.accumulator / self.fixed_seconds).floor() as u32;
         let steps = available.min(self.maximum_catch_up_steps);
         for _ in 0..steps {
             tick();
         }
-        self.accumulator -= f64::from(steps) * self.fixed_seconds;
+        self.accumulator -= f64::from(available) * self.fixed_seconds;
         if available > self.maximum_catch_up_steps {
-            let dropped = self.accumulator - self.fixed_seconds;
-            if dropped > 0.0 {
-                self.dropped_time_seconds += dropped;
-                self.accumulator = self.fixed_seconds;
-            }
+            self.dropped_time_seconds += f64::from(available - steps) * self.fixed_seconds;
         }
         steps
     }
@@ -72,5 +71,14 @@ mod tests {
         assert_eq!(steps, 8);
         assert_eq!(ticks, 8);
         assert!(clock.dropped_time_seconds > 0.0);
+    }
+
+    #[test]
+    fn dropped_time_is_accounted_for_without_leaving_a_stale_tick() {
+        let mut clock = FixedStepClock::default();
+        assert_eq!(clock.advance(Duration::from_secs(1), || {}), 8);
+        assert!((clock.dropped_time_seconds - (1.0 - 8.0 / 120.0)).abs() < 1.0e-12);
+        assert_eq!(clock.advance(Duration::ZERO, || panic!("stale tick")), 0);
+        assert!(clock.interpolation_alpha() < 1.0);
     }
 }

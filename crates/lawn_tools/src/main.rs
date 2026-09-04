@@ -22,9 +22,7 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("validate") => {
-            let count = parse_count(args.next(), 1_000)?;
-            let start = parse_u64(args.next(), 0)?;
-            let quick = args.any(|arg| arg == "--quick");
+            let (count, start, quick) = parse_validation_args(args)?;
             validate_batch(count, start, quick)
         }
         Some("inspect") => {
@@ -32,6 +30,9 @@ fn run() -> Result<()> {
                 .next()
                 .context("inspect requires a hexadecimal, decimal, or phrase seed")?
                 .parse::<WorldSeed>()?;
+            if let Some(extra) = args.next() {
+                bail!("unexpected argument {extra:?}; quote a seed phrase as one argument");
+            }
             inspect(seed)
         }
         Some("help" | "--help" | "-h") | None => {
@@ -40,6 +41,31 @@ fn run() -> Result<()> {
         }
         Some(command) => bail!("unknown command {command:?}; run `lawn_tools help`"),
     }
+}
+
+fn parse_validation_args(args: impl Iterator<Item = String>) -> Result<(usize, u64, bool)> {
+    let mut positional = Vec::with_capacity(2);
+    let mut quick = false;
+    for arg in args {
+        if arg == "--quick" {
+            if quick {
+                bail!("--quick may only be specified once");
+            }
+            quick = true;
+        } else if arg.starts_with('-') {
+            bail!("unknown validate option {arg:?}");
+        } else if positional.len() < 2 {
+            positional.push(arg);
+        } else {
+            bail!("unexpected validate argument {arg:?}");
+        }
+    }
+    let mut positional = positional.into_iter();
+    Ok((
+        parse_count(positional.next(), 1_000)?,
+        parse_u64(positional.next(), 0)?,
+        quick,
+    ))
 }
 
 fn parse_count(value: Option<String>, default: usize) -> Result<usize> {
@@ -72,7 +98,10 @@ fn validate_batch(count: usize, start: u64, quick: bool) -> Result<()> {
     };
     let generator = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config);
     let started = Instant::now();
-    let mut timings_ms = Vec::with_capacity(count);
+    let mut timings_ms = Vec::new();
+    timings_ms
+        .try_reserve_exact(count)
+        .context("requested seed count is too large for the timing report")?;
     let mut attempts = [0_u64; 8];
     let mut ratios = [f64::MAX, f64::MIN];
     let mut reachable_min = 1.0_f64;
@@ -101,10 +130,14 @@ fn validate_batch(count: usize, start: u64, quick: bool) -> Result<()> {
         "generator_version": CURRENT_GENERATOR_VERSION.0,
         "quality": if quick { "quick" } else { "shipping" },
         "requested_seeds": count,
+        "start_index": start,
         "valid_seeds": count - failures.len(),
         "failures": failures,
-        "mowable_ratio": { "minimum": ratios[0], "maximum": ratios[1] },
-        "minimum_reachable_ratio": reachable_min,
+        "mowable_ratio": {
+            "minimum": (!timings_ms.is_empty()).then_some(ratios[0]),
+            "maximum": (!timings_ms.is_empty()).then_some(ratios[1]),
+        },
+        "minimum_reachable_ratio": (!timings_ms.is_empty()).then_some(reachable_min),
         "generation_attempt_histogram": attempts,
         "timing_ms": {
             "median": percentile(&timings_ms, 0.50),
@@ -175,6 +208,35 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_flag_is_independent_of_optional_positionals() {
+        for (args, expected) in [
+            (vec![], (1_000, 0, false)),
+            (vec!["--quick"], (1_000, 0, true)),
+            (vec!["100", "--quick"], (100, 0, true)),
+            (vec!["100", "500", "--quick"], (100, 500, true)),
+            (vec!["--quick", "100", "500"], (100, 500, true)),
+        ] {
+            assert_eq!(
+                parse_validation_args(args.into_iter().map(str::to_owned)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_validation_arguments_are_rejected() {
+        for args in [
+            vec!["0"],
+            vec!["100", "nope"],
+            vec!["--quik"],
+            vec!["1", "2", "3"],
+            vec!["--quick", "--quick"],
+        ] {
+            assert!(parse_validation_args(args.into_iter().map(str::to_owned)).is_err());
+        }
+    }
 
     #[test]
     fn percentile_handles_empty_and_bounds() {

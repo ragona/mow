@@ -128,6 +128,15 @@ pub fn direction_to_cell(direction: Vec3, resolution: u32) -> CubeCell {
 /// corners without special-case adjacency tables.
 #[must_use]
 pub fn offset_cell(cell: CubeCell, dx: i32, dy: i32, resolution: u32) -> CubeCell {
+    let x = i64::from(cell.x) + i64::from(dx);
+    let y = i64::from(cell.y) + i64::from(dy);
+    if (0..i64::from(resolution)).contains(&x) && (0..i64::from(resolution)).contains(&y) {
+        return CubeCell {
+            face: cell.face,
+            x: x as u32,
+            y: y as u32,
+        };
+    }
     let uv = Vec2::new(
         (cell.x as f32 + 0.5 + dx as f32).mul_add(2.0 / resolution as f32, -1.0),
         (cell.y as f32 + 0.5 + dy as f32).mul_add(2.0 / resolution as f32, -1.0),
@@ -289,6 +298,29 @@ mod tests {
                     for dx in -4..=4 {
                         let cell = offset_cell(origin, dx, dy, 16);
                         assert!(cell.x < 16 && cell.y < 16);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interior_offset_fast_path_matches_cube_projection() {
+        for resolution in [8, 24, 64] {
+            for face in CubeFace::ALL {
+                for y in 0..resolution {
+                    for x in 0..resolution {
+                        let cell = CubeCell { face, x, y };
+                        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-3, 2)] {
+                            let uv = Vec2::new(
+                                (x as f32 + 0.5 + dx as f32).mul_add(2.0 / resolution as f32, -1.0),
+                                (y as f32 + 0.5 + dy as f32).mul_add(2.0 / resolution as f32, -1.0),
+                            );
+                            assert_eq!(
+                                offset_cell(cell, dx, dy, resolution),
+                                direction_to_cell(face_uv_to_direction(face, uv), resolution)
+                            );
+                        }
                     }
                 }
             }

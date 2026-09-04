@@ -200,6 +200,19 @@ pub struct InputSnapshot {
 impl InputSnapshot {
     #[must_use]
     pub fn sanitized(mut self) -> Self {
+        for value in [
+            &mut self.steer,
+            &mut self.accelerate,
+            &mut self.brake_reverse,
+            &mut self.camera_orbit[0],
+        ] {
+            if !value.is_finite() {
+                *value = 0.0;
+            }
+        }
+        if !self.camera_orbit[1].is_finite() {
+            self.camera_orbit[1] = 0.0;
+        }
         self.steer = self.steer.clamp(-1.0, 1.0);
         self.accelerate = self.accelerate.clamp(0.0, 1.0);
         self.brake_reverse = self.brake_reverse.clamp(0.0, 1.0);
@@ -224,6 +237,19 @@ impl InputSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_finite_axes_cannot_poison_the_simulation() {
+        let input = InputSnapshot {
+            steer: f32::NAN,
+            accelerate: f32::INFINITY,
+            brake_reverse: f32::NEG_INFINITY,
+            camera_orbit: [f32::NAN, f32::INFINITY],
+            ..InputSnapshot::default()
+        }
+        .sanitized();
+        assert_eq!(input, InputSnapshot::default());
+    }
 
     #[test]
     fn retired_fisheye_action_deserializes_to_the_existing_tombstone() {

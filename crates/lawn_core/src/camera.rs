@@ -178,10 +178,15 @@ impl CameraRig {
             );
         }
         let follow = 1.0 - (-stiffness * dt).exp();
-        let smoothed_up = self.state.up.lerp(screen_up, follow);
-        self.state.up = (smoothed_up - local_up * smoothed_up.dot(local_up))
-            .try_normalize()
-            .unwrap_or(screen_up);
+        let previous_up =
+            (self.state.up - local_up * self.state.up.dot(local_up)).normalize_or(screen_up);
+        // Normalized linear interpolation cannot rotate opposite headings: it
+        // repeatedly normalizes back to the starting vector while looking back.
+        let heading_delta = local_up
+            .dot(previous_up.cross(screen_up))
+            .atan2(previous_up.dot(screen_up));
+        self.state.up = (Quat::from_axis_angle(local_up, heading_delta * follow) * previous_up)
+            .normalize_or(screen_up);
         self.state.field_of_view_degrees = settings.field_of_view_degrees;
     }
 }
@@ -431,5 +436,37 @@ mod tests {
             );
         }
         assert!(camera.state.position.distance(desired_position) < 0.01);
+    }
+
+    #[test]
+    fn look_behind_rotates_the_screen_heading_even_when_exactly_opposite() {
+        let planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(WorldSeed(91), false)
+                .unwrap();
+        let settings = AccessibilitySettings {
+            camera_shake: 0.0,
+            ..AccessibilitySettings::default()
+        };
+        let vehicle = VehicleTransform {
+            position: planet.spawn.position,
+            rotation: glam::Quat::IDENTITY,
+            forward: planet.spawn.forward,
+            up: planet.spawn.up,
+        };
+        let mut camera = CameraRig::new(vehicle, planet.config.base_radius, &settings);
+        for _ in 0..120 {
+            camera.update(
+                &planet,
+                vehicle,
+                Vec3::ZERO,
+                [0.0; 2],
+                true,
+                false,
+                &settings,
+                crate::FIXED_DT,
+            );
+        }
+        assert!(camera.state.up.dot(vehicle.forward) < -0.99);
     }
 }

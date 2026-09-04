@@ -23,16 +23,12 @@ impl VehicleTransform {
     #[must_use]
     pub fn interpolated(self, next: Self, alpha: f32) -> Self {
         let alpha = alpha.clamp(0.0, 1.0);
-        let up = self.up.lerp(next.up, alpha).normalize();
-        let forward = self.forward.lerp(next.forward, alpha);
-        let forward = (forward - up * forward.dot(up))
-            .try_normalize()
-            .unwrap_or_else(|| tangent_frame(up).0);
+        let rotation = self.rotation.slerp(next.rotation, alpha).normalize();
         Self {
             position: self.position.lerp(next.position, alpha),
-            rotation: self.rotation.slerp(next.rotation, alpha),
-            forward,
-            up,
+            rotation,
+            forward: rotation * Vec3::NEG_Z,
+            up: rotation * Vec3::Y,
         }
     }
 }
@@ -133,6 +129,7 @@ impl HoverVehicle {
         boost_allowed: bool,
         dt: f32,
     ) -> VehicleTickResult {
+        let input = input.sanitized();
         self.previous_transform = self.state.transform;
         self.previous_linear_velocity = self.state.linear_velocity;
         let old_deck = self.deck_position(tuning);
@@ -245,12 +242,7 @@ impl HoverVehicle {
         );
         let new_position = physics.position;
 
-        let traveled_distance = position
-            .normalize()
-            .dot(new_position.normalize())
-            .clamp(-1.0, 1.0)
-            .acos()
-            * terrain.radius;
+        let traveled_distance = surface_distance(position, new_position, terrain.radius);
         self.state.linear_velocity = physics.linear_velocity;
         let transform_up = physics.up.normalize_or(terrain.normal);
         let transform_forward = (physics.forward
@@ -312,6 +304,13 @@ impl HoverVehicle {
     }
 }
 
+fn surface_distance(from: Vec3, to: Vec3, radius: f32) -> f32 {
+    let from = from.normalize_or_zero();
+    let to = to.normalize_or_zero();
+    // atan2 retains sub-texel movement; acos(dot) rounds slow movement to zero.
+    from.cross(to).length().atan2(from.dot(to)) * radius
+}
+
 fn make_transform(position: Vec3, forward: Vec3, up: Vec3) -> VehicleTransform {
     let up = up.normalize();
     let forward = (forward - up * forward.dot(up))
@@ -332,6 +331,26 @@ fn make_transform(position: Vec3, forward: Vec3, up: Vec3) -> VehicleTransform {
 mod tests {
     use super::*;
     use crate::{GeneratorConfig, PlanetGenerator, WorldSeed, planet::CURRENT_GENERATOR_VERSION};
+
+    #[test]
+    fn slow_travel_remains_measurable() {
+        let radius = 15.0;
+        let angle = 0.000_01;
+        let from = Vec3::X * radius;
+        let to = Quat::from_rotation_z(angle) * from;
+        assert!((surface_distance(from, to, radius) - angle * radius).abs() < 1.0e-7);
+    }
+
+    #[test]
+    fn opposite_up_vectors_interpolate_to_a_valid_pose() {
+        let from = make_transform(Vec3::Y, Vec3::NEG_Z, Vec3::Y);
+        let to = make_transform(Vec3::NEG_Y, Vec3::NEG_Z, Vec3::NEG_Y);
+        let middle = from.interpolated(to, 0.5);
+        assert!(middle.up.is_normalized());
+        assert!(middle.forward.is_normalized());
+        assert!(middle.up.dot(middle.forward).abs() < 1.0e-6);
+        assert!(middle.up.distance(middle.rotation * Vec3::Y) < 1.0e-6);
+    }
 
     fn planet() -> Planet {
         PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
