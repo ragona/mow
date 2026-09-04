@@ -123,7 +123,12 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let comb_tangent = normalize(comb - surface_normal * dot(comb, surface_normal) + rotated_tangent * 0.0001);
     let interaction_offset = interaction[interaction_index(input.root_position)].xyz;
     let interaction_scale = mix(1.0, height_scale, 0.35);
-    let bend = (wind * (1.0 - cut) + comb_tangent * cut * 0.13 + interaction_offset * interaction_scale) * tip * tip;
+    // Interaction is stored as a world-space offset, so attenuate it by the
+    // remaining flexible blade length. Squaring the ratio keeps the broad wash
+    // dramatic in tall grass while preventing tiny stubble from stretching.
+    let remaining_height_ratio = clamp(blade_height / max(uncut_height, 0.001), 0.0, 1.0);
+    let wash_response = remaining_height_ratio * remaining_height_ratio;
+    let bend = (wind * (1.0 - cut) + comb_tangent * cut * 0.13 + interaction_offset * interaction_scale * wash_response) * tip * tip;
     let world_position = input.root_position + surface_normal * (tip * blade_height) + horizontal + bend;
 
     var output: VertexOutput;

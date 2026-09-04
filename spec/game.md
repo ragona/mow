@@ -529,6 +529,8 @@ The grass should exhibit:
 - strong localized bending from the mower's broad hover wash, with its wake following velocity rather than chassis facing; and
 - short geometric stubble after mowing.
 
+Hover-wash displacement scales with remaining blade height rather than applying a fixed world-space offset. Tall grass may flatten dramatically, partially cut blades respond progressively less, and finished stubble stays compact instead of stretching outward under the same force field.
+
 The current exaggerated presentation scales uncut blades to approximately 1.2–1.9 meters tall while retaining roughly 8.5-centimeter stubble, making every cut path dramatically legible from the mostly top-down camera.
 
 Variation should occur in patches as well as per blade. Fully independent random color and motion will resemble visual noise rather than vegetation.
