@@ -40,7 +40,7 @@ impl TutorialStage {
     #[must_use]
     pub const fn prompt(self) -> Option<&'static str> {
         match self {
-            Self::Drive => Some("Accelerate and strafe to begin mowing"),
+            Self::Drive => Some("Accelerate and steer to begin mowing"),
             Self::NoticeMowing => Some("The always-on deck shortens grass and raises coverage"),
             Self::Boost => Some("Hold Boost on a clear stretch"),
             Self::Rock => Some("Rock cannot be mowed—route around steep faces"),
@@ -223,7 +223,12 @@ impl RunState {
         let stamp = MowingStamp {
             from: tick.deck_from,
             to: tick.deck_to,
-            comb_direction: self.vehicle.state.transform.forward,
+            comb_direction: self
+                .vehicle
+                .state
+                .linear_velocity
+                .try_normalize()
+                .unwrap_or(self.vehicle.state.transform.forward),
             deck_width: self.vehicle_tuning.mower_width,
             cut_delta: self.vehicle_tuning.cut_rate_per_second
                 * FIXED_DT
@@ -336,7 +341,7 @@ impl RunState {
     }
 
     /// Called once before a displayed frame's fixed ticks. Events from every
-    /// catch-up tick are retained for audio, particles, rumble, and captions.
+    /// catch-up tick are retained for particles and controller rumble.
     pub fn clear_frame_events(&mut self) {
         self.recent_events.clear();
     }

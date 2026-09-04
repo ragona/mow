@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-pub const CURRENT_GENERATOR_VERSION: GeneratorVersion = GeneratorVersion(1);
+pub const CURRENT_GENERATOR_VERSION: GeneratorVersion = GeneratorVersion(2);
 pub const TUTORIAL_SEED: WorldSeed = WorldSeed(0x4c41_574e_4f52_4249);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -631,7 +631,9 @@ fn validate_planet(
             "spawn slope {spawn_slope_degrees:.2} degrees is too steep"
         ));
     }
-    if !(8.0 * 60.0..=22.0 * 60.0).contains(&estimated_ideal_seconds) {
+    if !(config.ideal_time_min_seconds..=config.ideal_time_max_seconds)
+        .contains(&estimated_ideal_seconds)
+    {
         errors.push(format!(
             "estimated ideal time {estimated_ideal_seconds:.1}s is implausible"
         ));

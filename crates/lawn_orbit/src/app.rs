@@ -14,7 +14,7 @@ use lawn_core::{
     input::{Action, InputSnapshot},
     planet::{Planet, TUTORIAL_SEED},
     profile::{Profile, QualityPreset, RecordKey},
-    run::{GameMode, RunEvent, RunState, TutorialStage},
+    run::{GameMode, RunState, TutorialStage},
     score::Results,
     simulation::FixedStepClock,
 };
@@ -27,7 +27,7 @@ use winit::{
     window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
 
-use crate::{audio::AudioDirector, input_adapter::InputAdapter, profile_store::ProfileStore};
+use crate::{input_adapter::InputAdapter, profile_store::ProfileStore};
 
 #[derive(Clone, Copy, Debug)]
 enum ConfirmAction {
@@ -75,7 +75,6 @@ pub struct LawnOrbitApp {
     pending_input: InputSnapshot,
     profile: Profile,
     profile_store: ProfileStore,
-    audio: Option<AudioDirector>,
     results: Option<Results>,
     pending_generation: Option<PendingGeneration>,
     seed_text: String,
@@ -86,7 +85,6 @@ pub struct LawnOrbitApp {
     app_started: Instant,
     show_diagnostics: bool,
     frame_times_ms: VecDeque<f32>,
-    sound_caption: Option<(&'static str, Instant)>,
 }
 
 impl LawnOrbitApp {
@@ -111,12 +109,6 @@ impl LawnOrbitApp {
             &profile.settings.accessibility,
             !profile.tutorial_completed,
         );
-        let audio = AudioDirector::new()
-            .map_err(|error| {
-                tracing::warn!(%error, "audio device unavailable; continuing silently");
-                error
-            })
-            .ok();
         Ok(Self {
             window: None,
             renderer: None,
@@ -133,7 +125,6 @@ impl LawnOrbitApp {
             pending_input: InputSnapshot::default(),
             profile,
             profile_store,
-            audio,
             results: None,
             pending_generation: None,
             seed_text: TUTORIAL_SEED.to_string(),
@@ -144,7 +135,6 @@ impl LawnOrbitApp {
             app_started: Instant::now(),
             show_diagnostics: false,
             frame_times_ms: VecDeque::with_capacity(240),
-            sound_caption: None,
         })
     }
 
@@ -257,9 +247,6 @@ impl LawnOrbitApp {
         if submit && self.run.completion_available {
             self.finish_run();
         }
-        if let Some(audio) = &mut self.audio {
-            audio.update(&self.run, &self.profile.settings.audio);
-        }
         self.input.update_feedback(&self.run);
     }
 
@@ -273,9 +260,6 @@ impl LawnOrbitApp {
             self.profile.record_result(&results);
             self.results = Some(results);
             self.state = GameState::Results;
-            if let Some(audio) = &mut self.audio {
-                audio.play_completion(&self.profile.settings.audio);
-            }
             self.save_profile();
         }
     }
@@ -348,9 +332,13 @@ impl LawnOrbitApp {
 
     fn animate_planet_camera(&mut self, speed: f32) {
         let angle = self.app_started.elapsed().as_secs_f32() * speed;
-        let radius = 52.0;
-        self.run.camera.state.position =
-            glam::Vec3::new(angle.cos() * radius, 22.0, angle.sin() * radius);
+        let planet_radius = self.run.planet.config.base_radius;
+        let radius = planet_radius * 1.8;
+        self.run.camera.state.position = glam::Vec3::new(
+            angle.cos() * radius,
+            planet_radius * 0.72,
+            angle.sin() * radius,
+        );
         self.run.camera.state.target = glam::Vec3::ZERO;
         self.run.camera.state.up = glam::Vec3::Y;
     }
@@ -633,35 +621,6 @@ impl LawnOrbitApp {
                     ui.label("or continue mowing to 100%");
                 });
         }
-        if let Some(caption) = self
-            .run
-            .events()
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                RunEvent::GrassCut { .. } => Some("✦ clippings rustle"),
-                RunEvent::RockScrape => Some("⚠ deck scraping rock"),
-                RunEvent::SubstantialCollision { .. } => Some("◆ rock impact"),
-                RunEvent::Recovered => Some("↻ mower recovered"),
-                RunEvent::CompletionAvailable => Some("★ job target reached"),
-                _ => None,
-            })
-        {
-            self.sound_caption = Some((caption, Instant::now()));
-        }
-        if self
-            .sound_caption
-            .is_some_and(|(_, started)| started.elapsed() > Duration::from_secs_f32(1.4))
-        {
-            self.sound_caption = None;
-        }
-        if let Some((caption, _)) = self.sound_caption {
-            egui::Area::new("sound-caption".into())
-                .anchor(Align2::RIGHT_BOTTOM, [-18.0, -18.0])
-                .show(context, |ui| {
-                    ui.label(RichText::new(caption).color(Color32::WHITE));
-                });
-        }
     }
 
     fn draw_pause(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
@@ -764,19 +723,13 @@ impl LawnOrbitApp {
             .default_width(600.0)
             .show(context, |ui| {
                 egui::ScrollArea::vertical().max_height(610.0).show(ui, |ui| {
-                    ui.heading("Audio");
-                    ui.add(egui::Slider::new(&mut self.profile.settings.audio.master, 0.0..=1.0).text("Master"));
-                    ui.add(egui::Slider::new(&mut self.profile.settings.audio.music, 0.0..=1.0).text("Music"));
-                    ui.add(egui::Slider::new(&mut self.profile.settings.audio.effects, 0.0..=1.0).text("Effects"));
-                    ui.add(egui::Slider::new(&mut self.profile.settings.audio.ambience, 0.0..=1.0).text("Ambience"));
-                    ui.separator();
                     ui.heading("Camera & controls");
                     let a = &mut self.profile.settings.accessibility;
                     ui.add(egui::Slider::new(&mut a.camera_shake, 0.0..=1.0).text("Camera shake"));
-                    ui.add(egui::Slider::new(&mut a.field_of_view_degrees, 50.0..=95.0).text("Field of view"));
+                    ui.add(egui::Slider::new(&mut a.field_of_view_degrees, 60.0..=120.0).text("Field of view"));
                     ui.add(egui::Slider::new(&mut a.camera_follow_stiffness, 1.0..=20.0).text("Follow stiffness"));
-                    ui.add(egui::Slider::new(&mut a.steering_sensitivity, 0.25..=2.0).text("Strafe sensitivity"));
-                    ui.checkbox(&mut a.invert_steering, "Invert strafe");
+                    ui.add(egui::Slider::new(&mut a.steering_sensitivity, 0.25..=2.0).text("Steering sensitivity"));
+                    ui.checkbox(&mut a.invert_steering, "Invert steering");
                     ui.checkbox(&mut a.invert_camera_y, "Invert camera Y");
                     ui.checkbox(&mut a.fixed_horizon, "Fixed-horizon comfort mode");
                     ui.checkbox(&mut a.boost_enabled, "Enable boost");
@@ -821,8 +774,8 @@ impl LawnOrbitApp {
                             Action::RecenterCamera, Action::Pause,
                         ] {
                             ui.label(match action {
-                                Action::SteerLeft => "StrafeLeft".to_owned(),
-                                Action::SteerRight => "StrafeRight".to_owned(),
+                                Action::SteerLeft => "TurnLeft".to_owned(),
+                                Action::SteerRight => "TurnRight".to_owned(),
                                 _ => format!("{action:?}"),
                             });
                             let label = if self.input.rebind_action == Some(action) {

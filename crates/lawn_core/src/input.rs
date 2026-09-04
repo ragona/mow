@@ -13,6 +13,7 @@ pub enum Action {
     Boost,
     /// Retained only so profiles from the toggle-mower build still deserialize.
     /// The shipping vehicle now mows continuously.
+    #[serde(alias = "ToggleFisheye")]
     ToggleMower,
     LookBehind,
     Recover,
@@ -189,5 +190,16 @@ impl InputSnapshot {
         self.camera_orbit[0] = self.camera_orbit[0].clamp(-1.0, 1.0);
         self.camera_orbit[1] = self.camera_orbit[1].clamp(-1.0, 1.0);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_fisheye_action_deserializes_to_the_existing_tombstone() {
+        let action: Action = ron::from_str("ToggleFisheye").unwrap();
+        assert_eq!(action, Action::ToggleMower);
     }
 }

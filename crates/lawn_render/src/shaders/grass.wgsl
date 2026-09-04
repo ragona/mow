@@ -109,18 +109,21 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let root_direction = normalize(input.root_position);
     let regional_variation = 0.5 + 0.5 * sin(dot(root_direction, vec3<f32>(8.7, 11.3, 6.1)) * 2.6);
     let individual_variation = hash01(seed * 1597334677u);
-    let uncut_height = mix(0.52, 0.84, individual_variation * 0.68 + regional_variation * 0.32);
+    let height_scale = max(frame.options.w, 0.1);
+    let uncut_height = mix(0.52, 0.84, individual_variation * 0.68 + regional_variation * 0.32) * height_scale;
     let blade_height = mix(uncut_height, 0.085, cut);
     let tip = input.local_position.y;
     let camera_distance = distance(frame.camera_time.xyz, input.root_position);
     let distant_width = mix(1.0, 1.42, smoothstep(20.0, 58.0, camera_distance));
-    let horizontal = (rotated_tangent * input.local_position.x + rotated_bitangent * input.local_position.z) * distant_width;
+    let tall_width = mix(1.0, sqrt(height_scale), 0.55);
+    let horizontal = (rotated_tangent * input.local_position.x + rotated_bitangent * input.local_position.z) * distant_width * tall_width;
     let wind_phase = dot(normalize(input.root_position), vec3<f32>(13.1, 9.7, 17.3)) * 5.0 + frame.camera_time.w * 1.25;
-    let wind = (rotated_tangent * sin(wind_phase) + rotated_bitangent * cos(wind_phase * 0.73)) * 0.055;
+    let wind = (rotated_tangent * sin(wind_phase) + rotated_bitangent * cos(wind_phase * 0.73)) * (0.055 * sqrt(height_scale));
     let comb = decode_oct(vec2<f32>(state.yz) / 255.0 * 2.0 - vec2<f32>(1.0));
     let comb_tangent = normalize(comb - surface_normal * dot(comb, surface_normal) + rotated_tangent * 0.0001);
     let interaction_offset = interaction[interaction_index(input.root_position)].xyz;
-    let bend = (wind * (1.0 - cut) + comb_tangent * cut * 0.13 + interaction_offset) * tip * tip;
+    let interaction_scale = mix(1.0, height_scale, 0.35);
+    let bend = (wind * (1.0 - cut) + comb_tangent * cut * 0.13 + interaction_offset * interaction_scale) * tip * tip;
     let world_position = input.root_position + surface_normal * (tip * blade_height) + horizontal + bend;
 
     var output: VertexOutput;

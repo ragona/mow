@@ -164,7 +164,7 @@ impl GrassInteraction {
             stiffness: 24.0,
             damping: 8.5,
             planet_radius: self.planet_radius,
-            maximum_displacement: 0.42,
+            maximum_displacement: 0.65,
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         {

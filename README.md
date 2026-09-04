@@ -1,10 +1,12 @@
 # Lawn Orbit
 
 Lawn Orbit is a complete tiny-planet hover-mowing game built directly in Rust,
-`wgpu`, WGSL, Rapier, Kira, winit, and egui. It implements
+`wgpu`, WGSL, Rapier, winit, and egui. It implements
 [`spec/game.md`](spec/game.md): deterministic fuzzy spherical worlds, seam-safe
 authoritative mowing, arcade hover driving, Standard jobs, Free Mow, a first-play
 tutorial, local records, accessibility settings, and keyboard/gamepad input.
+The shipping planets are 15-meter-radius lawn globes covered in exaggeratedly
+tall geometric grass and viewed from an undistorted top-down camera.
 
 No reusable game engine is used. Gameplay simulation is headless and independent
 of the renderer, which keeps world generation, mowing, scoring, and vehicle rules
@@ -24,20 +26,20 @@ hexadecimal/decimal/phrase seed, or create a random Standard or Free Mow planet.
 Profiles and seed-specific records are saved atomically in the operating system's
 per-user application-data directory.
 
-On Linux, the platform libraries required by winit/gilrs/audio must be installed;
-package names vary by distribution and commonly include Wayland or X11, udev, and
-ALSA development packages.
+On Linux, the platform libraries required by winit and gilrs must be installed;
+package names vary by distribution and commonly include Wayland or X11 and udev
+development packages.
 
 ## Default controls
 
 | Action | Keyboard and mouse | Gamepad |
 | --- | --- | --- |
 | Accelerate / brake-reverse | W / S or Up / Down | Right / left trigger |
-| Strafe with gentle auto-yaw | A / D or Left / Right | Left stick |
+| Steer | A / D or Left / Right | Left stick |
 | Boost | Space | South button |
 | Look behind | Q | North button |
 | Recover | Hold R | Hold East button |
-| Orbit camera | I/J/K/L or right-drag | Right stick |
+| Rotate / zoom top-down camera | I/J/K/L or right-drag | Right stick |
 | Recenter camera | C | Right-stick click |
 | Pause | Escape | Start |
 | Submit completed job | Enter | South button in the prompt |
@@ -45,10 +47,9 @@ ALSA development packages.
 
 Driving bindings can be remapped in Settings and analog trigger values are preserved.
 The mower deck is always active whenever it is grounded.
-The settings screen also
-contains independent music/effects volumes, strafe sensitivity/inversion, camera shake,
-camera auto-follow, motion reduction, boost disable, grass density, render scale,
-MSAA, fullscreen, sound captions, and a high-contrast coverage overlay.
+The settings screen also contains steering sensitivity/inversion, camera shake,
+camera auto-follow, field of view, motion reduction, boost disable, grass density,
+render scale, MSAA, fullscreen, and a high-contrast coverage overlay.
 
 ## Workspace layout
 
@@ -56,7 +57,7 @@ MSAA, fullscreen, sound captions, and a high-contrast coverage overlay.
 | --- | --- |
 | `lawn_core` | Versioned generation, cube-sphere math, validation, fixed-step simulation, Rapier vehicle, camera, mowing state, jobs, scoring, flow, and profiles |
 | `lawn_render` | `wgpu` terrain/vehicle/grass rendering, interaction compute field, shadows, clipping particles, HDR composite, culling, dirty texture uploads, and diagnostics |
-| `lawn_orbit` | Desktop lifecycle, menus/HUD/results, input and rumble, procedural Kira audio, and atomic persistence |
+| `lawn_orbit` | Desktop lifecycle, menus/HUD/results, input and rumble, and atomic persistence |
 | `lawn_tools` | Headless seed inspection, generation timing, and deterministic validation batches |
 
 Runtime tuning lives in [`config/game.ron`](config/game.ron). The external file is

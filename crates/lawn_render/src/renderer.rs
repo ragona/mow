@@ -701,7 +701,9 @@ impl Renderer {
                 continue;
             }
             let angle = camera_direction.dot(patch.center).clamp(-1.0, 1.0).acos();
-            if angle > horizon_angle + patch.angular_radius + 0.08 {
+            // Tall blades can remain visible after their roots pass behind the
+            // geometric terrain horizon, so retain a generous silhouette band.
+            if angle > horizon_angle + patch.angular_radius + 0.14 {
                 continue;
             }
             let patch_position = patch.center * run.planet.config.base_radius;
@@ -799,7 +801,7 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState) -> FrameUniformGpu {
             quality_density(renderer.quality),
             INTERACTION_RESOLUTION as f32,
             if renderer.high_contrast { 1.0 } else { 0.0 },
-            0.0,
+            run.planet.config.grass_height_scale,
         ],
         locator: [
             locator.x,

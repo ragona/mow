@@ -108,15 +108,16 @@ mod tests {
 
     #[test]
     fn strict_three_star_rules_are_separate_and_visible() {
+        let config = JobConfig::default();
         let results = Results::evaluate(
             GeneratorVersion(1),
             WorldSeed(1),
             RunMetrics {
-                elapsed_seconds: 700.0,
+                elapsed_seconds: config.three_star_seconds - 1.0,
                 coverage: 0.997,
                 ..RunMetrics::default()
             },
-            &JobConfig::default(),
+            &config,
         );
         assert_eq!(results.stars, 3);
     }

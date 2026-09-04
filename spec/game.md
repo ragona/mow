@@ -9,7 +9,7 @@
 **Primary input:** Gamepad; keyboard supported  
 **Implementation language:** Rust  
 **Rendering API:** `wgpu` with WGSL shaders  
-**Target session length:** 10–20 minutes per planet  
+**Target session length:** 2–8 minutes per planet  
 
 ---
 
@@ -39,7 +39,7 @@ Drive a hover mower around a fuzzy, pocket-sized planet, carving clean paths thr
 ### Primary goals
 
 1. Make the tiny planet convincingly fuzzy through visible grass geometry, especially along the horizon.
-2. Make mowing immediately satisfying by physically shortening that geometry with strong visual, audio, and controller feedback.
+2. Make mowing immediately satisfying by physically shortening that geometry with strong visual and controller feedback.
 3. Generate deterministic planets whose mountains create distinct but always viable mowing routes.
 4. Make spherical traversal feel natural within the first 30 seconds.
 5. Let players choose between relaxed completion and mastery through speed, precision, and route planning.
@@ -114,7 +114,7 @@ The player is never forced to stop at the completion threshold. They may continu
 
 ### 6.1 Planet envelope
 
-Planets have a base radius of approximately **30 meters**, giving them a nominal surface circumference of about **188 meters**. At ordinary top speed, a clean equatorial lap takes roughly **15–20 seconds**.
+Planets have a base radius of approximately **15 meters**, giving them a nominal surface circumference of about **94 meters**. At ordinary top speed, a clean equatorial lap takes roughly **8 seconds**. The mower is intentionally large relative to the globe so speed makes the curvature dramatic.
 
 Each generated planet should contain:
 
@@ -164,10 +164,10 @@ Mountain generation must produce:
 - clear grass-to-rock transitions;
 - some grass-covered lower shoulders that remain drivable;
 - steep upper faces that naturally repel or stop the hover car;
-- clearance of at least three mower widths through intended passes; and
+- clearance of at least two mower widths through intended passes; and
 - no complete ring of impassable rock around the planet.
 
-Nominal rolling terrain may vary by approximately 1–2 meters from the base radius. Mountain peaks may extend approximately 5–9 meters above it. These are initial tuning ranges.
+Nominal rolling terrain may vary by approximately 0.5–0.8 meters from the base radius. Mountain peaks may extend approximately 3–5.5 meters above it. These are initial tuning ranges.
 
 ### 6.4 Playability validation
 
@@ -217,14 +217,14 @@ Handling is arcade-like:
 
 - strong acceleration at low speed;
 - a moderate, readable top speed;
-- speed-sensitive steering;
+- speed-sensitive turning with a tight low-speed radius;
 - mild lateral slip that allows controlled drifting;
 - automatic stabilization after jumps or collisions;
 - no manual gears;
 - reverse speed lower than forward speed; and
 - forgiving collision response with minimal pinballing.
 
-The car may momentarily leave the surface over bumps. A soft attraction force returns it to the planet, nose-first tumbling is strongly damped, and the mower does not cut while it is too far above the lawn.
+The car may momentarily unload over bumps, but signed hover-pad suspension and strong radial attraction keep it glued to the lawn at boost speed. Nose-first tumbling is strongly damped, and the mower does not cut while it is too far above the lawn.
 
 ### 7.3 Recommended baseline tuning
 
@@ -232,16 +232,17 @@ These values are starting points and should be exposed as data rather than compi
 
 | Parameter | Baseline |
 | --- | ---: |
-| Planet base radius | 30 m |
+| Planet base radius | 15 m |
 | Hover height | 0.8 m |
 | Car length | 2.4 m |
 | Mower cut width | 2.2 m |
 | Maximum forward speed | 12 m/s |
 | Maximum reverse speed | 4 m/s |
-| Time to 90% top speed | 2.2 s |
-| Full-speed turn radius | 8 m |
-| Low-speed turn radius | 2.5 m |
-| Boost maximum speed | 17 m/s |
+| Time to 90% top speed | 0.9 s |
+| Full-speed turn radius | 6 m |
+| Low-speed turn radius | 2 m |
+| Steering strength | 1.0 |
+| Boost maximum speed | 28 m/s |
 | Recovery hold time | 1.0 s |
 
 ### 7.4 Boost
@@ -264,11 +265,10 @@ Recovery adds a small time penalty in rated modes but never removes progress.
 
 | Action | Default input |
 | --- | --- |
-| Steer | Left stick |
+| Strafe with gentle auto-yaw | Left stick |
 | Accelerate | Right trigger |
 | Brake / reverse | Left trigger |
 | Boost | South face button |
-| Toggle mower | West face button |
 | Look behind | North face button |
 | Recover vehicle | Hold East face button |
 | Camera orbit | Right stick |
@@ -279,11 +279,10 @@ Recovery adds a small time penalty in rated modes but never removes progress.
 
 | Action | Default input |
 | --- | --- |
-| Steer | A / D or Left / Right |
+| Strafe with gentle auto-yaw | A / D or Left / Right |
 | Accelerate | W or Up |
 | Brake / reverse | S or Down |
 | Boost | Space |
-| Toggle mower | E |
 | Look behind | Q |
 | Recover vehicle | Hold R |
 | Camera orbit | Mouse movement while held, or alternate keys |
@@ -294,7 +293,7 @@ All gameplay controls must be remappable. Analog trigger input should be preserv
 
 ### 8.3 Mower behavior
 
-The mower begins enabled in standard jobs. Toggling it off is useful for crossing already-cut areas, traversing exposed rock, or lining up a new pass. Its current state must be unmistakable through deck animation, sound, particles, and a small HUD indicator.
+The mower is always enabled and cuts whenever its deck is close enough to mowable terrain. Deck animation, particles, and controller feedback communicate when it is actively contacting tall grass or harmlessly crossing rock.
 
 ---
 
@@ -314,7 +313,7 @@ Exposed rock and other non-grass surfaces are represented separately and do not 
 
 ### 9.2 Cutting footprint
 
-While the mower is active, powered, close enough to the ground, and moving below its cut-speed limit, the game projects a rectangular or capsule-shaped cutting footprint from the deck onto the planet surface. Every touched mowable sample advances toward the cut state.
+While the mower is close enough to the ground, the game projects a rectangular or capsule-shaped cutting footprint from the deck onto the planet surface. Every touched mowable sample advances toward the cut state, including at full boost speed.
 
 The cutting footprint must be sampled continuously between physics frames so fast movement cannot leave dotted gaps. A practical rule is to stamp the mask at intervals no greater than one quarter of the deck width along the traveled path.
 
@@ -344,7 +343,7 @@ The field should retain at least:
 | Tangent comb direction | Direction surviving blades lean after the mower passes |
 | Recent-cut time | Brief clipping, settling, and color-response animation |
 
-Store comb direction as a world-space tangent vector, using a compact encoding such as octahedral encoding, or explicitly transform face-local directions at cube boundaries. The field needs enough effective resolution that a 2.2-meter mower deck spans at least 6–8 samples. For a 30-meter-radius sphere, a **512×512 field per cube face** is an appropriate upper-quality target; a lower resolution may be used during prototyping. Sampling and stamping across cube-face boundaries must be seamless.
+Store comb direction as a world-space tangent vector, using a compact encoding such as octahedral encoding, or explicitly transform face-local directions at cube boundaries. The field needs enough effective resolution that a 2.2-meter mower deck spans at least 6–8 samples. For a 15-meter-radius sphere, a **512×512 field per cube face** provides ample upper-quality headroom; a lower resolution may be used during prototyping. Sampling and stamping across cube-face boundaries must be seamless.
 
 ### 9.5 Coverage accounting
 
@@ -354,7 +353,7 @@ Display coverage rounded down to one decimal place so the HUD never announces co
 
 ### 9.6 Rock interaction
 
-Exposed rock cannot be mowed and does not contribute to coverage. The mower should audibly disengage or harmlessly spark if its footprint crosses rock, while the vehicle body responds to mountain collisions normally.
+Exposed rock cannot be mowed and does not contribute to coverage. The mower should harmlessly spark if its footprint crosses rock, while the vehicle body responds to mountain collisions normally.
 
 Rated modes record substantial rock collisions, but glancing contact should not stop the run or destroy the vehicle. Collision feedback should be clear without turning the game punitive.
 
@@ -403,7 +402,7 @@ Post-MVP challenges may include:
 - complete using cockpit camera;
 - complete without contacting exposed rock;
 - cut a continuous spiral; and
-- finish with exactly one mower activation.
+- complete without using recovery.
 
 ---
 
@@ -411,7 +410,7 @@ Post-MVP challenges may include:
 
 ### 11.1 Standard camera
 
-The default camera is a spring-damped third-person chase camera positioned above and behind the vehicle. It uses the car's local surface normal as its up reference, transitions smoothly as the car crosses the planet, and frames enough of the horizon to make the world's curvature obvious.
+The current camera is a fully top-down local-radial view positioned directly above the vehicle. It looks straight into the planet, uses the travel direction as screen-up, and uses an undistorted 90-degree perspective projection. Horizontal camera input rotates screen heading while vertical input adjusts height without tilting the view.
 
 The camera should favor the vehicle's velocity direction over its nose during a drift. It must not snap at geographic poles because the planet has no gameplay-facing longitude frame.
 
@@ -449,7 +448,7 @@ Keep the HUD small and readable. It contains:
 
 - lawn coverage percentage;
 - elapsed time in rated jobs;
-- mower on/off status;
+- active cutting feedback;
 - boost meter;
 - substantial-collision count; and
 - contextual prompts during the tutorial.
@@ -531,6 +530,8 @@ The grass should exhibit:
 - localized bending from hover wash and the mower; and
 - short geometric stubble after mowing.
 
+The current exaggerated presentation scales uncut blades to approximately 1.2–1.9 meters tall while retaining roughly 8.5-centimeter stubble, making every cut path dramatically legible from the top-down camera.
+
 Variation should occur in patches as well as per blade. Fully independent random color and motion will resemble visual noise rather than vegetation.
 
 ### 14.3 Mowing appearance
@@ -554,23 +555,7 @@ The hover car communicates forces through:
 
 ## 15. Audio Direction
 
-Audio should make mowing pleasant enough to sustain an entire session.
-
-Required layers:
-
-- a smooth electric hover motor whose pitch follows speed;
-- a distinct mower motor loop;
-- textured cutting audio proportional to the amount of newly cut grass;
-- soft clipping impacts;
-- boost charge and discharge;
-- collision sounds scaled by severity;
-- rock scrape and mower-over-rock reaction;
-- completion flourish; and
-- subtle ambient wind, insects, and planet-specific details.
-
-The cutting sound should diminish over already-cut ground. This is important feedback that the mower is no longer making progress.
-
-Music should be light and sparse. It may add layers as coverage milestones are reached, but it must not overpower mowing sounds.
+Audio is intentionally omitted from the current prototype. Gameplay feedback is visual and, when available, reinforced by controller rumble. A future sound pass should begin from playtested recordings rather than retaining placeholder synthesis.
 
 ---
 
@@ -579,8 +564,6 @@ Music should be light and sparse. It may add layers as coverage milestones are r
 Required options:
 
 - full input remapping;
-- independent volume controls;
-- subtitles or visual equivalents for gameplay-relevant sounds;
 - camera shake slider;
 - field-of-view adjustment;
 - steering sensitivity and inversion;
@@ -642,11 +625,11 @@ An active run may be saved on clean exit, but mid-run persistence is not require
 
 ### 18.1 Architecture decision
 
-The game will use a purpose-built Rust runtime directly on `wgpu`. This is a game-specific micro-engine, not a reusable general engine. The project owns the frame loop, renderer, spherical terrain, mowing model, grass simulation, hover controller, and game flow while reusing focused libraries for operating-system integration, collision solving, audio, math, serialization, and development tooling.
+The game will use a purpose-built Rust runtime directly on `wgpu`. This is a game-specific micro-engine, not a reusable general engine. The project owns the frame loop, renderer, spherical terrain, mowing model, grass simulation, hover controller, and game flow while reusing focused libraries for operating-system integration, collision solving, math, serialization, and development tooling.
 
 The project must not begin from Unity, Unreal, Godot, full Bevy, or another general-purpose engine. It must also not implement separate Vulkan, Metal, and Direct3D backends. `wgpu` is the graphics abstraction boundary.
 
-This hybrid boundary exists to maximize control over the unusual systems without spending the project on window creation, controller databases, audio mixing, collision detection, or graphics portability.
+This hybrid boundary exists to maximize control over the unusual systems without spending the project on window creation, controller databases, collision detection, or graphics portability.
 
 ### 18.2 Foundation libraries
 
@@ -658,7 +641,6 @@ This hybrid boundary exists to maximize control over the unusual systems without
 | Gamepads | `gilrs` | Unified controls, hot-plugging, mappings, and rumble |
 | Math | `glam` | Vectors, matrices, quaternions, and transforms |
 | Collision and rigid bodies | `rapier3d` | Static terrain collision, one dynamic vehicle, queries, contact impulses, and CCD |
-| Audio | `kira` | Layered motor, mower, impacts, ambience, music, and spatial playback |
 | Development UI | `egui` with `egui_wgpu` | Runtime tuning, seed tools, render inspection, and profiling overlays |
 | Data | `serde` with RON or JSON | Tunable configuration, profile data, seeds, and diagnostic captures |
 | Diagnostics | `tracing` plus GPU timestamp queries | Structured logs, CPU spans, and GPU pass timing |
@@ -723,7 +705,7 @@ Each simulation tick should:
 5. project drive, braking, and lateral grip forces into the tangent plane;
 6. cap or asymptotically limit speed; and
 7. use shape casts or CCD to prevent high-speed tunneling into mountain collision;
-8. collect substantial contact impulses for scoring, audio, and rumble; and
+8. collect substantial contact impulses for scoring and rumble; and
 9. update mower sampling from the deck's swept path.
 
 Use a simple convex hull or small compound collider for the vehicle and a lower-frequency static triangle mesh for the generated planet. Do not use Rapier's character controller: its translation-oriented abstraction cannot supply the rotational dynamics required here.
@@ -778,7 +760,7 @@ struct GrassRootGpu {
 }
 ```
 
-This 16-byte representation allows approximately two million roots to occupy about 32 MiB. Patch-relative quantization is allowed if measurement shows a useful bandwidth or memory improvement, but a more complex representation is not required initially.
+This 16-byte representation allows approximately 400,000 roots to occupy about 6.4 MiB on the shipping-size planet. Patch-relative quantization is allowed if measurement shows a useful bandwidth or memory improvement, but a more complex representation is not required initially.
 
 Construct the tangent frame locally without geographic coordinates. One robust method selects the Cartesian axis least aligned with the surface normal, crosses it with the normal to produce the first tangent, and derives the second tangent by another cross product. Apply the root's random rotation within that frame.
 
@@ -788,7 +770,7 @@ Grass roots, terrain patches, mowing cells, and clipping particles are GPU-orien
 
 ### 18.9 Grass culling and level of detail
 
-The small planet makes genuine geometry practical because a near-surface camera sees only a spherical cap. On a 30-meter-radius planet, a camera approximately 5–8 meters above the surface sees roughly 800–1,200 square meters of terrain, or about 7–11% of the full sphere.
+The small planet makes genuine geometry practical because a near-surface camera sees only a spherical cap. On a 15-meter-radius planet, a camera approximately 5–8 meters above the surface sees roughly 470–750 square meters of terrain, or about 17–27% of the full sphere.
 
 Cull grass at the patch level against the camera frustum and geometric horizon. Submit visible patches through batched instancing or GPU-generated indirect draws; do not issue one draw call per tuft.
 
@@ -867,7 +849,7 @@ Use a compact forward renderer built around one dominant directional light. The 
 3. opaque terrain, mountains, and vehicle;
 4. opaque geometric grass;
 5. clipping particles and other transparent effects;
-6. tone mapping and minimal post-processing; and
+6. tone mapping and world upscaling; and
 7. user interface.
 
 Individual grass blades do not cast shadows in the baseline or low-quality paths. Grass receives terrain and mountain shadows, while root darkening, directional blade normals, and inexpensive transmission provide local depth. A short-range grass shadow option may be tested for higher quality but cannot become necessary for the intended appearance.
@@ -955,8 +937,7 @@ Instrument named CPU spans and GPU passes from the first visual prototype. Recor
 | `Renderer` | `wgpu` ownership, resources, explicit passes, instanced grass, culling, LOD, lighting, effects, and presentation |
 | `ObjectiveSystem` | Completion rules and optional job objectives |
 | `ScoreSystem` | Time, coverage, collisions, efficiency, recoveries, ratings, and per-seed records |
-| `CameraRig` | Chase camera, local-up tracking, obstruction, and comfort options |
-| `AudioDirector` | `kira` playback, layered vehicle and cutting audio, environment, impacts, and music state |
+| `CameraRig` | Top-down camera, local-up tracking, rotation, zoom, and comfort options |
 | `SaveProfile` | Settings, bindings, tutorial flags, unlocks, and records |
 | `RunRecorder` | Optional compact mowing-stamp history for result playback |
 | `DevTools` | `egui` tuning, seed inspection, debug views, timing graphs, and diagnostic capture |
@@ -969,7 +950,7 @@ Avoid fragmenting the prototype into many tiny crates. Begin with:
 
 | Crate | Contents |
 | --- | --- |
-| `lawn_orbit` | Binary, platform loop, input, game flow, audio, and composition root |
+| `lawn_orbit` | Binary, platform loop, input, game flow, and composition root |
 | `lawn_core` | Seeded generation, planet data, mowing, scoring, vehicle state, and physics integration |
 | `lawn_render` | `wgpu`, WGSL shaders, GPU resources, grass interaction, frame encoding, and debug rendering |
 | `lawn_tools` | Optional generator fuzzing, asset conversion, captures, and standalone benchmarks |
@@ -1056,7 +1037,7 @@ The MVP is complete when all of the following are true:
 
 - Rust application using `winit`, `wgpu`, and WGSL
 - Adapter capability inspection and baseline render path
-- Static 30-meter-radius sphere
+- Static 15-meter-radius sphere
 - Deterministic per-patch grass roots
 - Opaque instanced tuft geometry
 - Patch and horizon culling
@@ -1113,7 +1094,6 @@ The MVP is complete when all of the following are true:
 
 - Final grass density, lighting, wind, clipping, and LOD tuning
 - Final vehicle animation
-- Layered `kira` audio
 - Camera polish
 - Tutorial prompts
 - Accessibility options

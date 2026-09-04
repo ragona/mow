@@ -24,30 +24,36 @@ pub struct GeneratorConfig {
     pub spawn_clearance: f32,
     pub spawn_max_slope_degrees: f32,
     pub grass_roots_per_square_meter: f32,
+    pub grass_height_scale: f32,
     pub maximum_generation_attempts: u32,
+    pub ideal_time_min_seconds: f32,
+    pub ideal_time_max_seconds: f32,
 }
 
 impl Default for GeneratorConfig {
     fn default() -> Self {
         Self {
-            base_radius: 30.0,
+            base_radius: 15.0,
             terrain_resolution: 64,
             mowing_resolution: 512,
             patch_cells: 8,
-            rolling_amplitude: 1.4,
+            rolling_amplitude: 0.65,
             mountain_count_min: 3,
             mountain_count_max: 7,
-            mountain_height_min: 5.0,
-            mountain_height_max: 9.0,
+            mountain_height_min: 3.0,
+            mountain_height_max: 5.5,
             mowable_ratio_min: 0.85,
             mowable_ratio_max: 0.95,
             required_reachable_ratio: 0.98,
             mountain_separation_radians: 0.58,
-            pass_clearance: 6.6,
-            spawn_clearance: 5.0,
+            pass_clearance: 4.4,
+            spawn_clearance: 3.5,
             spawn_max_slope_degrees: 9.0,
             grass_roots_per_square_meter: 160.0,
+            grass_height_scale: 2.25,
             maximum_generation_attempts: 8,
+            ideal_time_min_seconds: 90.0,
+            ideal_time_max_seconds: 480.0,
         }
     }
 }
@@ -78,9 +84,7 @@ pub struct VehicleTuning {
     pub acceleration_time_90_percent: f32,
     pub full_speed_turn_radius: f32,
     pub low_speed_turn_radius: f32,
-    pub strafe_speed: f32,
-    pub strafe_response: f32,
-    pub steering_yaw_fraction: f32,
+    pub steering_strength: f32,
     pub boost_max_speed: f32,
     pub boost_acceleration_multiplier: f32,
     pub boost_capacity_seconds: f32,
@@ -102,12 +106,10 @@ impl Default for VehicleTuning {
             mower_length: 0.8,
             max_forward_speed: 12.0,
             max_reverse_speed: 4.0,
-            acceleration_time_90_percent: 2.2,
+            acceleration_time_90_percent: 0.9,
             full_speed_turn_radius: 6.0,
             low_speed_turn_radius: 2.0,
-            strafe_speed: 10.0,
-            strafe_response: 12.0,
-            steering_yaw_fraction: 0.28,
+            steering_strength: 1.0,
             boost_max_speed: 28.0,
             boost_acceleration_multiplier: 3.0,
             boost_capacity_seconds: 1.5,
@@ -138,9 +140,9 @@ impl Default for JobConfig {
         Self {
             completion_coverage: 0.98,
             locator_coverage: 0.95,
-            two_star_seconds: 18.0 * 60.0,
+            two_star_seconds: 5.0 * 60.0,
             two_star_max_collisions: 2,
-            three_star_seconds: 13.0 * 60.0,
+            three_star_seconds: 3.0 * 60.0,
             three_star_coverage: 0.995,
             recovery_time_penalty: 3.0,
         }
@@ -174,8 +176,14 @@ mod tests {
     fn shipping_tuning_is_valid_and_matches_documented_defaults() {
         let config = GameConfig::shipping().unwrap();
         assert_eq!(config, GameConfig::default());
+        assert_eq!(config.generator.base_radius, 15.0);
         assert_eq!(config.generator.mowing_resolution, 512);
+        assert_eq!(config.generator.grass_height_scale, 2.25);
         assert_eq!(config.vehicle.mower_width, 2.2);
+        assert_eq!(config.vehicle.acceleration_time_90_percent, 0.9);
+        assert_eq!(config.vehicle.steering_strength, 1.0);
+        assert_eq!(config.vehicle.boost_max_speed, 28.0);
+        assert_eq!(config.vehicle.surface_glue_acceleration, 42.0);
         assert_eq!(config.job.completion_coverage, 0.98);
     }
 }

@@ -1,5 +1,4 @@
 mod app;
-mod audio;
 mod input_adapter;
 mod profile_store;
 

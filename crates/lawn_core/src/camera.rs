@@ -1,8 +1,11 @@
-//! Local-up chase camera without geographic poles.
+//! Local-radial top-down camera without geographic poles.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::{planet::Planet, profile::AccessibilitySettings, vehicle::VehicleTransform};
+
+const TOP_DOWN_HEIGHT: f32 = 9.5;
+const TOP_DOWN_ZOOM_RANGE: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraState {
@@ -24,9 +27,9 @@ impl CameraRig {
     #[must_use]
     pub fn new(vehicle: VehicleTransform, settings: &AccessibilitySettings) -> Self {
         let state = CameraState {
-            position: vehicle.position - vehicle.forward * 7.0 + vehicle.up * 4.2,
-            target: vehicle.position + vehicle.forward * 2.0,
-            up: vehicle.up,
+            position: vehicle.position + vehicle.up * TOP_DOWN_HEIGHT,
+            target: vehicle.position,
+            up: vehicle.forward,
             field_of_view_degrees: settings.field_of_view_degrees,
         };
         Self {
@@ -39,7 +42,7 @@ impl CameraRig {
 
     pub fn update(
         &mut self,
-        planet: &Planet,
+        _planet: &Planet,
         vehicle: VehicleTransform,
         velocity: Vec3,
         orbit: [f32; 2],
@@ -68,44 +71,35 @@ impl CameraRig {
         let favored_forward = velocity_forward.map_or(vehicle.forward, |direction| {
             vehicle.forward.lerp(direction, 0.55).normalize()
         });
-        let side = favored_forward.cross(local_up).normalize();
-        let behind_sign = if look_behind { 1.0 } else { -1.0 };
-        let desired = vehicle.position
-            + favored_forward * (7.4 * behind_sign + self.orbit_yaw.sin() * 4.0)
-            + side * (self.orbit_yaw.sin() * 5.0)
-            + local_up * (4.1 + self.orbit_pitch * 3.0);
-        let target = vehicle.position + favored_forward * if look_behind { -2.0 } else { 2.0 };
-
-        // Resolve terrain obstruction by sampling the desired boom and selecting
-        // the furthest unobstructed point toward the vehicle.
-        let mut unobstructed = desired;
-        for index in (1..=12).rev() {
-            let t = index as f32 / 12.0;
-            let point = target.lerp(desired, t);
-            let direction = point.normalize();
-            let terrain = planet.terrain_cell(direction);
-            if point.length() >= terrain.radius + 0.35 {
-                unobstructed = point;
-                break;
-            }
-        }
+        let fixed_heading = Vec3::Y - local_up * Vec3::Y.dot(local_up);
+        let base_screen_up = if settings.fixed_horizon {
+            fixed_heading.try_normalize().unwrap_or(favored_forward)
+        } else {
+            favored_forward
+        };
+        let heading_rotation = self.orbit_yaw
+            + if look_behind {
+                std::f32::consts::PI
+            } else {
+                0.0
+            };
+        let mut screen_up = Quat::from_axis_angle(local_up, heading_rotation)
+            .mul_vec3(base_screen_up)
+            .normalize();
         let speed_shake = (velocity.length() / 17.0).clamp(0.0, 1.0);
-        let shake_amplitude = settings.camera_shake * speed_shake * 0.055;
-        unobstructed += side * (self.elapsed_seconds * 31.0).sin() * shake_amplitude
-            + local_up * (self.elapsed_seconds * 43.0).cos() * shake_amplitude * 0.55;
+        let shake_angle =
+            settings.camera_shake * speed_shake * (self.elapsed_seconds * 31.0).sin() * 0.008;
+        screen_up = Quat::from_axis_angle(local_up, shake_angle).mul_vec3(screen_up);
+
+        let height = (TOP_DOWN_HEIGHT + self.orbit_pitch * TOP_DOWN_ZOOM_RANGE).max(5.5);
+        self.state.position = vehicle.position + local_up * height;
+        self.state.target = vehicle.position;
         let stiffness = settings.camera_follow_stiffness;
         let follow = 1.0 - (-stiffness * dt).exp();
-        self.state.position = self.state.position.lerp(unobstructed, follow);
-        self.state.target = self.state.target.lerp(target, follow);
-        let desired_up = if settings.fixed_horizon {
-            // Use a projected global reference where stable, gracefully falling
-            // back to local up near its singularity.
-            let projected = Vec3::Y - favored_forward * Vec3::Y.dot(favored_forward);
-            projected.try_normalize().unwrap_or(local_up)
-        } else {
-            local_up
-        };
-        self.state.up = self.state.up.lerp(desired_up, follow).normalize();
+        let smoothed_up = self.state.up.lerp(screen_up, follow);
+        self.state.up = (smoothed_up - local_up * smoothed_up.dot(local_up))
+            .try_normalize()
+            .unwrap_or(screen_up);
         self.state.field_of_view_degrees = settings.field_of_view_degrees;
     }
 }
@@ -114,6 +108,36 @@ impl CameraRig {
 mod tests {
     use super::*;
     use crate::{GeneratorConfig, PlanetGenerator, WorldSeed, planet::CURRENT_GENERATOR_VERSION};
+
+    #[test]
+    fn default_camera_is_exactly_top_down() {
+        let vehicle = VehicleTransform {
+            position: Vec3::Y * 15.8,
+            rotation: glam::Quat::IDENTITY,
+            forward: Vec3::Z,
+            up: Vec3::Y,
+        };
+        let camera = CameraRig::new(vehicle, &AccessibilitySettings::default());
+        let position_offset = camera.state.position - vehicle.position;
+        let view_direction = (camera.state.target - camera.state.position).normalize();
+
+        assert!((position_offset.dot(vehicle.up) - TOP_DOWN_HEIGHT).abs() < 1.0e-5);
+        assert!((position_offset - vehicle.up * TOP_DOWN_HEIGHT).length() < 1.0e-5);
+        assert!(view_direction.dot(-vehicle.up) > 0.999_99);
+        assert!(camera.state.up.dot(vehicle.up).abs() < 1.0e-5);
+        assert!(camera.state.up.dot(vehicle.forward) > 0.999_99);
+
+        let nominal_planet_radius = 15.0_f32;
+        let angular_diameter = 2.0
+            * (nominal_planet_radius / camera.state.position.length())
+                .asin()
+                .to_degrees();
+        let vertical_fill = angular_diameter / camera.state.field_of_view_degrees;
+        assert!(
+            (0.7..1.0).contains(&vertical_fill),
+            "planet should mostly fill without cropping the view; angular fill was {vertical_fill:.3}"
+        );
+    }
 
     #[test]
     fn camera_remains_finite_across_arbitrary_coordinate_poles() {

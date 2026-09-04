@@ -5,12 +5,12 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    input::ControlMap,
+    input::{Action, ControlMap},
     planet::{GeneratorVersion, WorldSeed},
     score::Results,
 };
 
-pub const PROFILE_VERSION: u32 = 1;
+pub const PROFILE_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QualityPreset {
@@ -39,7 +39,7 @@ impl Default for AccessibilitySettings {
     fn default() -> Self {
         Self {
             camera_shake: 0.35,
-            field_of_view_degrees: 68.0,
+            field_of_view_degrees: 90.0,
             camera_follow_stiffness: 9.0,
             fixed_horizon: false,
             steering_sensitivity: 1.0,
@@ -55,29 +55,8 @@ impl Default for AccessibilitySettings {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AudioSettings {
-    pub master: f32,
-    pub music: f32,
-    pub effects: f32,
-    pub ambience: f32,
-}
-
-impl Default for AudioSettings {
-    fn default() -> Self {
-        Self {
-            master: 0.8,
-            music: 0.55,
-            effects: 0.85,
-            ambience: 0.65,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Settings {
     pub accessibility: AccessibilitySettings,
-    pub audio: AudioSettings,
     pub controls: ControlMap,
     pub quality: QualityPreset,
     pub render_scale: f32,
@@ -89,7 +68,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             accessibility: AccessibilitySettings::default(),
-            audio: AudioSettings::default(),
             controls: ControlMap::default(),
             quality: QualityPreset::Standard,
             render_scale: 1.0,
@@ -185,10 +163,22 @@ impl Profile {
     }
 
     pub fn sanitize(&mut self) {
-        self.version = PROFILE_VERSION;
+        let previous_version = self.version;
         let a = &mut self.settings.accessibility;
+        // Versions 1 through 3 used lens-specific defaults. Move those exact
+        // defaults to the undistorted top-down camera while preserving custom FOVs.
+        if previous_version < 4
+            && ((a.field_of_view_degrees - 68.0).abs() < f32::EPSILON
+                || (a.field_of_view_degrees - 110.0).abs() < f32::EPSILON)
+        {
+            a.field_of_view_degrees = 90.0;
+        }
+        // ToggleMower also accepts the short-lived ToggleFisheye action as a
+        // deserialize alias. Neither action exists in current gameplay.
+        self.settings.controls.bindings.remove(&Action::ToggleMower);
+        self.version = PROFILE_VERSION;
         a.camera_shake = a.camera_shake.clamp(0.0, 1.0);
-        a.field_of_view_degrees = a.field_of_view_degrees.clamp(50.0, 95.0);
+        a.field_of_view_degrees = a.field_of_view_degrees.clamp(60.0, 120.0);
         a.camera_follow_stiffness = a.camera_follow_stiffness.clamp(1.0, 20.0);
         a.steering_sensitivity = a.steering_sensitivity.clamp(0.25, 2.0);
         self.settings.render_scale = self.settings.render_scale.clamp(0.5, 1.0);
@@ -196,14 +186,6 @@ impl Profile {
             1 | 2 | 4 => self.settings.msaa_samples,
             _ => 4,
         };
-        for volume in [
-            &mut self.settings.audio.master,
-            &mut self.settings.audio.music,
-            &mut self.settings.audio.effects,
-            &mut self.settings.audio.ambience,
-        ] {
-            *volume = volume.clamp(0.0, 1.0);
-        }
     }
 }
 
@@ -263,5 +245,74 @@ mod tests {
         migrated.sanitize();
         assert_eq!(migrated.version, PROFILE_VERSION);
         assert_eq!(migrated.settings.msaa_samples, 4);
+        assert_eq!(migrated.settings.accessibility.field_of_view_degrees, 90.0);
+    }
+
+    #[test]
+    fn legacy_camera_defaults_migrate_without_overwriting_custom_fov() {
+        let mut old_default = Profile {
+            version: 1,
+            ..Profile::default()
+        };
+        old_default.settings.accessibility.field_of_view_degrees = 68.0;
+        old_default.sanitize();
+        assert_eq!(
+            old_default.settings.accessibility.field_of_view_degrees,
+            90.0
+        );
+
+        let mut wide_lens_default = Profile {
+            version: 2,
+            ..Profile::default()
+        };
+        wide_lens_default
+            .settings
+            .accessibility
+            .field_of_view_degrees = 110.0;
+        wide_lens_default.sanitize();
+        assert_eq!(
+            wide_lens_default
+                .settings
+                .accessibility
+                .field_of_view_degrees,
+            90.0
+        );
+
+        let mut custom = Profile {
+            version: 1,
+            ..Profile::default()
+        };
+        custom.settings.accessibility.field_of_view_degrees = 82.0;
+        custom.sanitize();
+        assert_eq!(custom.settings.accessibility.field_of_view_degrees, 82.0);
+    }
+
+    #[test]
+    fn short_lived_fisheye_binding_is_removed_during_profile_migration() {
+        let legacy = r#"(
+            version: 3,
+            settings: (
+                accessibility: (field_of_view_degrees: 110.0),
+                controls: (bindings: {ToggleFisheye: [Key("KeyF")]}),
+            ),
+        )"#;
+        let mut profile: Profile = ron::from_str(legacy).unwrap();
+        assert!(
+            profile
+                .settings
+                .controls
+                .bindings
+                .contains_key(&Action::ToggleMower)
+        );
+        profile.sanitize();
+        assert_eq!(profile.version, PROFILE_VERSION);
+        assert_eq!(profile.settings.accessibility.field_of_view_degrees, 90.0);
+        assert!(
+            !profile
+                .settings
+                .controls
+                .bindings
+                .contains_key(&Action::ToggleMower)
+        );
     }
 }

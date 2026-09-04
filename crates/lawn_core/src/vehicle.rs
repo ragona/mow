@@ -95,6 +95,9 @@ pub struct HoverVehicle {
     /// body's lag makes steering input accumulate immediately instead of
     /// presenting Rapier with a target only one simulation tick ahead.
     steering_forward: Vec3,
+    /// Controller-side velocity envelopes. Keeping these independent of the
+    /// rigid body's current speed prevents two serial acceleration filters.
+    commanded_forward_speed: f32,
     physics: PhysicsWorld,
 }
 
@@ -106,6 +109,7 @@ impl HoverVehicle {
         Self {
             previous_transform: state.transform,
             steering_forward: state.transform.forward,
+            commanded_forward_speed: 0.0,
             state,
             physics,
         }
@@ -133,7 +137,7 @@ impl HoverVehicle {
         self.previous_transform = self.state.transform;
         let old_deck = self.deck_position(tuning);
         // The deck is an always-on part of driving now. Preserve the state bit
-        // for renderer/audio snapshots while making it an invariant each tick.
+        // for renderer snapshots while making it an invariant each tick.
         self.state.mower_enabled = true;
         self.state.collision_cooldown = (self.state.collision_cooldown - dt).max(0.0);
 
@@ -182,24 +186,19 @@ impl HoverVehicle {
         self.steering_forward = (self.steering_forward - up * self.steering_forward.dot(up))
             .try_normalize()
             .unwrap_or(body_forward);
-        let right = self.steering_forward.cross(up).normalize();
 
         let tangent_velocity = self.state.linear_velocity - up * self.state.linear_velocity.dot(up);
         let forward_speed = tangent_velocity.dot(self.steering_forward);
-        let side_speed = tangent_velocity.dot(right);
         let normalized_speed = (forward_speed.abs() / tuning.max_forward_speed).clamp(0.0, 1.0);
         let turn_radius = tuning.low_speed_turn_radius
             + (tuning.full_speed_turn_radius - tuning.low_speed_turn_radius) * normalized_speed;
         let reference_speed = forward_speed.abs().max(3.0);
-        let yaw_rate = input.steer * reference_speed / turn_radius * tuning.steering_yaw_fraction;
+        let yaw_rate = input.steer * reference_speed / turn_radius * tuning.steering_strength;
         let travel_sign = if forward_speed < -0.2 { -1.0 } else { 1.0 };
         self.steering_forward = Quat::from_axis_angle(up, -yaw_rate * travel_sign * dt)
             .mul_vec3(self.steering_forward)
             .normalize();
-        let right = self.steering_forward.cross(up).normalize();
-
-        let movement_requested =
-            input.accelerate > 0.05 || input.brake_reverse > 0.05 || input.steer.abs() > 0.05;
+        let movement_requested = input.accelerate > 0.05 || input.brake_reverse > 0.05;
         let boost_requested = boost_allowed && input.boost_held && movement_requested;
         self.state.boost_active = boost_requested && self.state.boost_charge > 0.0;
         if self.state.boost_active {
@@ -230,16 +229,9 @@ impl HoverVehicle {
             } else {
                 1.0
             };
-        let new_forward_speed = forward_speed
-            + (desired_speed - forward_speed) * (1.0 - (-acceleration_rate * dt).exp());
-        // Steering is primarily lateral hover thrust. A small yaw fraction keeps
-        // the deck readable while the chassis can translate dramatically across
-        // its own facing direction.
-        let strafe_boost = if self.state.boost_active { 1.8 } else { 1.0 };
-        let desired_side_speed = input.steer * tuning.strafe_speed * strafe_boost;
-        let lateral_response = 1.0 - (-tuning.strafe_response * dt).exp();
-        let new_side_speed = side_speed + (desired_side_speed - side_speed) * lateral_response;
-        let desired_velocity = self.steering_forward * new_forward_speed + right * new_side_speed;
+        self.commanded_forward_speed += (desired_speed - self.commanded_forward_speed)
+            * (1.0 - (-acceleration_rate * dt).exp());
+        let desired_velocity = self.steering_forward * self.commanded_forward_speed;
         let physics = self.physics.step(
             VehiclePhysicsInput {
                 desired_velocity,
@@ -293,7 +285,11 @@ impl HoverVehicle {
             } else {
                 0.0
             };
-        let reverse_cut_multiplier = if new_forward_speed < -0.1 { 0.7 } else { 1.0 };
+        let reverse_cut_multiplier = if self.commanded_forward_speed < -0.1 {
+            0.7
+        } else {
+            1.0
+        };
         VehicleTickResult {
             traveled_distance,
             collision_impulse,
@@ -309,6 +305,7 @@ impl HoverVehicle {
         self.state.transform = make_transform(safe.position, self.state.transform.forward, safe.up);
         self.previous_transform = self.state.transform;
         self.steering_forward = self.state.transform.forward;
+        self.commanded_forward_speed = 0.0;
         self.state.linear_velocity = Vec3::ZERO;
         self.physics.teleport(self.state.transform, Vec3::ZERO);
         self.state.recovery_hold = 0.0;
@@ -416,17 +413,17 @@ mod tests {
     }
 
     #[test]
-    fn steering_is_dominantly_lateral() {
+    fn steering_rotates_the_chassis_and_tracks_forward_velocity() {
         let planet = planet();
         let tuning = VehicleTuning::default();
         let mut vehicle = HoverVehicle::new(&planet, &tuning);
         let initial = vehicle.state.transform;
-        let initial_right = initial.forward.cross(initial.up).normalize();
         for _ in 0..120 {
             vehicle.tick(
                 &planet,
                 &tuning,
                 InputSnapshot {
+                    accelerate: 1.0,
                     steer: 1.0,
                     ..InputSnapshot::default()
                 },
@@ -434,30 +431,30 @@ mod tests {
                 1.0 / 120.0,
             );
         }
-        let lateral_distance =
-            (vehicle.state.transform.position - initial.position).dot(initial_right);
         let heading_change = initial
             .forward
             .dot(vehicle.state.transform.forward)
             .clamp(-1.0, 1.0)
             .acos();
         assert!(
-            lateral_distance > 3.0,
-            "one second of full strafe moved only {lateral_distance} meters sideways"
+            heading_change > 0.8,
+            "one second of full steering only rotated the chassis by {heading_change} radians"
         );
-        assert!(
-            heading_change < 0.65,
-            "strafe rotated the chassis by {heading_change} radians"
-        );
-        let lateral_velocity = vehicle.state.linear_velocity.dot(initial_right).abs();
+        let local_right = vehicle
+            .state
+            .transform
+            .forward
+            .cross(vehicle.state.transform.up)
+            .normalize();
+        let lateral_velocity = vehicle.state.linear_velocity.dot(local_right).abs();
         let forward_velocity = vehicle
             .state
             .linear_velocity
             .dot(vehicle.state.transform.forward)
             .abs();
         assert!(
-            lateral_velocity > forward_velocity * 2.0,
-            "strafe velocity {lateral_velocity} was not dominant over forward velocity {forward_velocity}"
+            forward_velocity > lateral_velocity * 1.5,
+            "turning should retain forward motion, but forward velocity was {forward_velocity} versus {lateral_velocity} lateral"
         );
     }
 
@@ -502,6 +499,38 @@ mod tests {
             boosted_peak > 18.0,
             "boost peaked at only {boosted_peak} m/s (final {}, normal peak {normal_peak})",
             boosted.state.speed()
+        );
+    }
+
+    #[test]
+    fn forward_launch_reaches_cruising_speed_within_one_second() {
+        let planet = planet();
+        let tuning = VehicleTuning::default();
+        let mut vehicle = HoverVehicle::new(&planet, &tuning);
+        let mut peak_speed = 0.0_f32;
+        let mut traveled = 0.0_f32;
+        for _ in 0..120 {
+            let result = vehicle.tick(
+                &planet,
+                &tuning,
+                InputSnapshot {
+                    accelerate: 1.0,
+                    ..InputSnapshot::default()
+                },
+                true,
+                1.0 / 120.0,
+            );
+            peak_speed = peak_speed.max(vehicle.state.speed());
+            traveled += result.traveled_distance;
+        }
+        let forward_speed = vehicle
+            .state
+            .linear_velocity
+            .dot(vehicle.state.transform.forward);
+        assert!(
+            forward_speed > tuning.max_forward_speed * 0.7,
+            "forward launch only reached {forward_speed} m/s after one second (peak speed {peak_speed}, final speed {}, distance {traveled})",
+            vehicle.state.speed()
         );
     }
 

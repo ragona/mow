@@ -74,6 +74,7 @@ impl fmt::Debug for PhysicsWorld {
             .field("terrain_collider", &self.terrain_collider)
             .field("pad_target_distance", &self.pad_target_distance)
             .field("surface_glue_acceleration", &self.surface_glue_acceleration)
+            .field("surface_glue_damping", &self.surface_glue_damping)
             .finish()
     }
 }
@@ -467,8 +468,7 @@ mod tests {
             maximum_altitude = maximum_altitude.max(altitude);
         }
         let final_direction = output.position.normalize();
-        let final_altitude =
-            output.position.length() - planet.surface_radius(final_direction);
+        let final_altitude = output.position.length() - planet.surface_radius(final_direction);
         assert!(
             maximum_altitude < 3.0,
             "25 m/s outward launch reached {maximum_altitude} meters"
