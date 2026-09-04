@@ -12,7 +12,7 @@ use lawn_core::{
     GameConfig, PlanetGenerator, WorldSeed,
     config::GeneratorConfig,
     flow::GameState,
-    input::{Action, InputSnapshot},
+    input::Action,
     planet::TUTORIAL_SEED,
     profile::{Profile, QualityPreset, RecordKey},
     run::{GameMode, RunState, TutorialStage},
@@ -24,7 +24,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
     event::WindowEvent,
-    event_loop::ActiveEventLoop,
+    event_loop::{ActiveEventLoop, ControlFlow},
     window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
 
@@ -174,9 +174,11 @@ pub struct LawnOrbitApp {
     clock: FixedStepClock,
     last_frame: Instant,
     input: InputAdapter,
-    pending_input: InputSnapshot,
     profile: Profile,
     profile_store: ProfileStore,
+    profile_write_enabled: bool,
+    occluded: bool,
+    surface_retry_at: Option<Instant>,
     results: Option<Results>,
     pending_generation: Option<PendingGeneration>,
     preview_recipe: Option<WorldRecipe>,
@@ -194,20 +196,39 @@ pub struct LawnOrbitApp {
 
 impl LawnOrbitApp {
     pub fn new() -> Result<Self> {
-        let profile_store = ProfileStore::discover();
-        let profile = profile_store.load().unwrap_or_else(|error| {
-            tracing::warn!(%error, "profile could not be loaded; defaults will be used");
-            Profile::default()
-        });
         let game_config = GameConfig::shipping().context("shipping gameplay config is invalid")?;
-        Self::with_config(profile_store, profile, game_config)
+        Self::load_with_config(ProfileStore::discover(), game_config)
+    }
+
+    fn load_with_config(profile_store: ProfileStore, game_config: GameConfig) -> Result<Self> {
+        let (profile, load_error) = match profile_store.load() {
+            Ok(profile) => (profile, None),
+            Err(error) => {
+                tracing::warn!(%error, "profile could not be loaded; original file will be preserved");
+                (
+                    Profile::default(),
+                    Some(format!(
+                        "Profile could not be loaded: {error}. The original file is preserved; changes will not be saved this session."
+                    )),
+                )
+            }
+        };
+        let mut app = Self::with_config(profile_store, profile, game_config)?;
+        app.profile_write_enabled = load_error.is_none();
+        app.status_message = load_error;
+        Ok(app)
     }
 
     fn with_config(
         profile_store: ProfileStore,
-        profile: Profile,
+        mut profile: Profile,
         game_config: GameConfig,
     ) -> Result<Self> {
+        game_config
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .context("gameplay config is invalid")?;
+        profile.sanitize();
         let planet = PlanetGenerator::new(
             lawn_core::planet::CURRENT_GENERATOR_VERSION,
             game_config.generator.clone(),
@@ -237,9 +258,11 @@ impl LawnOrbitApp {
             clock: FixedStepClock::default(),
             last_frame: Instant::now(),
             input: InputAdapter::default(),
-            pending_input: InputSnapshot::default(),
             profile,
             profile_store,
+            profile_write_enabled: true,
+            occluded: false,
+            surface_retry_at: None,
             results: None,
             pending_generation: None,
             preview_recipe: None,
@@ -312,49 +335,33 @@ impl LawnOrbitApp {
         if self.state != GameState::Playing {
             return;
         }
+        if self.input.take_pause_pressed() {
+            self.pause();
+            return;
+        }
         if self
             .survey_started
             .is_some_and(|started| started.elapsed() < Duration::from_secs(4))
         {
+            self.input.clear_transient();
             self.animate_planet_camera(0.12);
             return;
         }
         self.survey_started = None;
         self.run.clear_frame_events();
-        let current = self.input.snapshot(
-            &self.profile.settings.controls,
-            &self.profile.settings.accessibility,
-        );
-        self.pending_input.steer = current.steer;
-        self.pending_input.accelerate = current.accelerate;
-        self.pending_input.brake_reverse = current.brake_reverse;
-        self.pending_input.camera_orbit = current.camera_orbit;
-        self.pending_input.boost_held = current.boost_held;
-        self.pending_input.look_behind = current.look_behind;
-        self.pending_input.recover_held = current.recover_held;
-        self.pending_input.recenter_pressed |= current.recenter_pressed;
-        self.pending_input.pause_pressed |= current.pause_pressed;
-        self.pending_input.submit_pressed |= current.submit_pressed;
-        if self.pending_input.pause_pressed {
-            self.pending_input.pause_pressed = false;
-            self.state = GameState::Paused;
-            self.run.paused = true;
-            return;
-        }
-        let input = &mut self.pending_input;
+        let input = &mut self.input;
         let run = &mut self.run;
+        let controls = &self.profile.settings.controls;
         let accessibility = &self.profile.settings.accessibility;
         let mut submit = false;
-        let steps = self.clock.advance(elapsed, || {
-            let snapshot = *input;
+        // Sample when a fixed tick actually consumes input. This preserves
+        // mouse movement on faster display frames and consumes it only once
+        // when a slower display frame executes multiple simulation ticks.
+        self.clock.advance(elapsed, || {
+            let snapshot = input.snapshot(controls, accessibility);
             run.tick(snapshot, accessibility);
             submit |= snapshot.submit_pressed;
-            input.recenter_pressed = false;
-            input.submit_pressed = false;
         });
-        if steps > 0 {
-            input.camera_orbit = [0.0; 2];
-        }
         if self.run.tutorial_enabled
             && self.run.tutorial_stage == TutorialStage::Complete
             && !self.profile.tutorial_completed
@@ -367,6 +374,15 @@ impl LawnOrbitApp {
             self.finish_run();
         }
         self.input.update_feedback(&self.run);
+    }
+
+    fn pause(&mut self) {
+        if self.state == GameState::Playing {
+            self.state = GameState::Paused;
+            self.run.paused = true;
+        }
+        self.clock = FixedStepClock::default();
+        self.input.clear();
     }
 
     fn finish_run(&mut self) {
@@ -540,8 +556,11 @@ impl LawnOrbitApp {
         self.preview_queued_at = None;
         self.survey_started = Some(Instant::now());
         self.clock = FixedStepClock::default();
-        self.pending_input = InputSnapshot::default();
+        self.input.clear_transient();
         self.last_frame = Instant::now();
+        if !self.input.is_focused() {
+            self.pause();
+        }
         self.save_profile();
     }
 
@@ -1029,6 +1048,9 @@ impl LawnOrbitApp {
             .default_width(600.0)
             .show(context, |ui| {
                 egui::ScrollArea::vertical().max_height(610.0).show(ui, |ui| {
+                    if !self.profile_write_enabled {
+                        ui.colored_label(Color32::LIGHT_RED, "Changes apply for this session only: the existing profile could not be loaded.");
+                    }
                     ui.heading("Camera & controls");
                     let a = &mut self.profile.settings.accessibility;
                     ui.add(egui::Slider::new(&mut a.camera_shake, 0.0..=1.0).text("Camera shake"));
@@ -1118,26 +1140,23 @@ impl LawnOrbitApp {
         let Some(action) = self.confirmation else {
             return;
         };
-        egui::Window::new("Discard current mowing?")
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .collapsible(false)
-            .resizable(false)
-            .show(context, |ui| {
-                ui.label("Current mowing progress will be lost.");
-                ui.horizontal(|ui| {
-                    if ui.button("Keep mowing").clicked() {
-                        self.confirmation = None;
-                    }
-                    if ui.button("Discard progress").clicked() {
-                        commands.push(match action {
-                            ConfirmAction::Restart => UiCommand::Restart,
-                            ConfirmAction::ReturnToEditor => UiCommand::ReturnToEditor,
-                            ConfirmAction::RandomPlanet => UiCommand::Random,
-                        });
-                        self.confirmation = None;
-                    }
-                });
+        egui::Modal::new(egui::Id::new("discard-current-mowing")).show(context, |ui| {
+            ui.heading("Discard current mowing?");
+            ui.label("Current mowing progress will be lost.");
+            ui.horizontal(|ui| {
+                if ui.button("Keep mowing").clicked() {
+                    self.confirmation = None;
+                }
+                if ui.button("Discard progress").clicked() {
+                    commands.push(match action {
+                        ConfirmAction::Restart => UiCommand::Restart,
+                        ConfirmAction::ReturnToEditor => UiCommand::ReturnToEditor,
+                        ConfirmAction::RandomPlanet => UiCommand::Random,
+                    });
+                    self.confirmation = None;
+                }
             });
+        });
     }
 
     fn draw_diagnostics(&self, context: &egui::Context) {
@@ -1230,6 +1249,8 @@ impl LawnOrbitApp {
                 UiCommand::Back => {
                     if self.settings_open {
                         self.settings_open = false;
+                        self.input.rebind_action = None;
+                        self.input.clear_transient();
                         self.state = self.settings_return_state;
                     } else {
                         self.state = GameState::Title;
@@ -1244,12 +1265,14 @@ impl LawnOrbitApp {
                 UiCommand::Resume => {
                     self.state = GameState::Playing;
                     self.run.paused = false;
+                    self.clock = FixedStepClock::default();
+                    self.input.clear_transient();
+                    self.confirmation = None;
                     self.last_frame = Instant::now();
                 }
                 UiCommand::Restart => {
                     self.run.restart(&self.profile.settings.accessibility);
-                    self.state = GameState::Playing;
-                    self.survey_started = Some(Instant::now());
+                    self.enter_sandbox();
                 }
                 UiCommand::ReturnToEditor => {
                     self.state = GameState::WorldEditor;
@@ -1294,6 +1317,21 @@ impl LawnOrbitApp {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let _span = tracing::debug_span!("display_frame").entered();
+        if self.occluded
+            || self.window.as_ref().is_some_and(|window| {
+                let size = window.inner_size();
+                size.width == 0 || size.height == 0
+            })
+        {
+            return;
+        }
+        if self
+            .surface_retry_at
+            .is_some_and(|deadline| deadline > Instant::now())
+        {
+            return;
+        }
+        self.surface_retry_at = None;
         self.poll_generation();
         if self.state == GameState::Playing {
             // East is recovery during play, not a menu-cancel action.
@@ -1302,7 +1340,9 @@ impl LawnOrbitApp {
             let pause_or_back = self.input.take_pause_pressed();
             let cancel = self.input.take_menu_cancel();
             if pause_or_back || cancel {
-                let command = if self.settings_open {
+                let command = if self.confirmation.take().is_some() {
+                    None
+                } else if self.settings_open {
                     Some(UiCommand::Back)
                 } else {
                     match self.state {
@@ -1331,7 +1371,11 @@ impl LawnOrbitApp {
         };
         let mut egui_state = self.egui_state.take().expect("egui state initialized");
         let mut raw_input = egui_state.take_egui_input(&window);
-        self.input.append_egui_gamepad_events(&mut raw_input);
+        if matches!(self.state, GameState::Playing | GameState::Loading) && !self.settings_open {
+            self.input.discard_menu_events();
+        } else {
+            self.input.append_egui_gamepad_events(&mut raw_input);
+        }
         let context = egui_state.egui_ctx().clone();
         let mut ui_commands = Vec::new();
         let full_output = context.run_ui(raw_input, |root_ui| {
@@ -1371,8 +1415,17 @@ impl LawnOrbitApp {
                 egui_renderer.update_texture(renderer.device(), renderer.queue(), *id, delta);
             }
         }
-        let mut frame = match renderer.begin_frame(&mut self.run, self.clock.interpolation_alpha())
-        {
+        let acquired = renderer.begin_frame(&mut self.run, self.clock.interpolation_alpha());
+        if acquired.is_err() {
+            for id in &full_output.textures_delta.free {
+                self.egui_renderer
+                    .as_mut()
+                    .expect("egui renderer initialized")
+                    .free_texture(id);
+            }
+            self.surface_retry_at = Some(Instant::now() + Duration::from_millis(100));
+        }
+        let mut frame = match acquired {
             Ok(frame) => frame,
             Err(FrameAcquireError::Outdated | FrameAcquireError::Lost) => {
                 renderer.resize(renderer.size());
@@ -1430,9 +1483,13 @@ impl LawnOrbitApp {
     }
 
     fn save_profile(&mut self) {
+        if !self.profile_write_enabled {
+            return;
+        }
         self.profile.sanitize();
         if let Err(error) = self.profile_store.save(&self.profile) {
             tracing::warn!(%error, path = %self.profile_store.path().display(), "profile save failed");
+            self.status_message = Some(format!("Changes could not be saved: {error}"));
         }
     }
 }
@@ -1455,11 +1512,24 @@ impl ApplicationHandler for LawnOrbitApp {
         if window.id() != window_id {
             return;
         }
-        let consumed = self
-            .egui_state
-            .as_mut()
-            .is_some_and(|state| state.on_window_event(window, &event).consumed);
-        if !consumed || self.input.rebind_action.is_some() {
+        let rebinding = self.input.rebind_action.is_some();
+        let consumed = !(rebinding
+            && matches!(&event, WindowEvent::KeyboardInput { event, .. }
+            if event.state == winit::event::ElementState::Pressed))
+            && self
+                .egui_state
+                .as_mut()
+                .is_some_and(|state| state.on_window_event(window, &event).consumed);
+        let release_or_focus = matches!(&event,
+            WindowEvent::KeyboardInput { event, .. } if event.state == winit::event::ElementState::Released
+        ) || matches!(
+            &event,
+            WindowEvent::MouseInput {
+                state: winit::event::ElementState::Released,
+                ..
+            } | WindowEvent::Focused(_)
+        );
+        if !consumed || rebinding || release_or_focus {
             self.input
                 .handle_window_event(&event, &mut self.profile.settings.controls);
         }
@@ -1468,7 +1538,21 @@ impl ApplicationHandler for LawnOrbitApp {
                 self.save_profile();
                 event_loop.exit();
             }
+            WindowEvent::Focused(false) => self.pause(),
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                if occluded {
+                    self.pause();
+                } else {
+                    self.last_frame = Instant::now();
+                    self.surface_retry_at = None;
+                }
+            }
             WindowEvent::Resized(size) => {
+                self.surface_retry_at = None;
+                if size.width == 0 || size.height == 0 {
+                    self.pause();
+                }
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size);
                 }
@@ -1480,7 +1564,9 @@ impl ApplicationHandler for LawnOrbitApp {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::KeyboardInput { event, .. }
-                if event.state == winit::event::ElementState::Pressed
+                if !event.repeat
+                    && !rebinding
+                    && event.state == winit::event::ElementState::Pressed
                     && event.physical_key
                         == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F3) =>
             {
@@ -1490,19 +1576,30 @@ impl ApplicationHandler for LawnOrbitApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window) = &self.window else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        let size = window.inner_size();
+        if self.occluded || size.width == 0 || size.height == 0 {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        if let Some(deadline) = self.surface_retry_at
+            && deadline > Instant::now()
+        {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            return;
+        }
         self.input
             .poll_gamepads(&mut self.profile.settings.controls);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        event_loop.set_control_flow(ControlFlow::Poll);
+        window.request_redraw();
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        self.run.paused = true;
-        if self.state == GameState::Playing {
-            self.state = GameState::Paused;
-        }
+        self.pause();
         self.save_profile();
     }
 }
@@ -1537,6 +1634,7 @@ mod tests {
     use super::*;
     use lawn_core::{
         config::{JobConfig, VehicleTuning},
+        input::InputSnapshot,
         planet::{CURRENT_GENERATOR_VERSION, SurfaceMaterial},
         profile::AccessibilitySettings,
     };
@@ -1572,6 +1670,142 @@ mod tests {
         sender.send(result).unwrap();
         pending.receiver = receiver;
         app.poll_generation();
+    }
+
+    fn drag_camera(app: &mut LawnOrbitApp) {
+        use winit::{
+            dpi::PhysicalPosition,
+            event::{DeviceId, ElementState, MouseButton},
+        };
+        for event in [
+            WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+            },
+            WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(0.0, 0.0),
+            },
+            WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(25.0, 10.0),
+            },
+        ] {
+            app.input
+                .handle_window_event(&event, &mut app.profile.settings.controls);
+        }
+    }
+
+    #[test]
+    fn mouse_input_is_consumed_once_independent_of_display_tick_batching() {
+        let mut split = preview_app();
+        let mut batched = preview_app();
+        for app in [&mut split, &mut batched] {
+            app.state = GameState::Playing;
+            app.run.paused = false;
+            drag_camera(app);
+        }
+        split.update_simulation(Duration::from_millis(5));
+        assert_eq!(split.run.simulation_seconds, 0.0);
+        split.update_simulation(Duration::from_millis(5));
+        batched.update_simulation(Duration::from_millis(10));
+        assert_eq!(split.run.camera.state, batched.run.camera.state);
+
+        drag_camera(&mut split);
+        drag_camera(&mut batched);
+        split.update_simulation(Duration::from_millis(10));
+        split.update_simulation(Duration::from_millis(10));
+        batched.update_simulation(Duration::from_millis(20));
+        assert_eq!(split.run.camera.state, batched.run.camera.state);
+    }
+
+    #[test]
+    fn focus_pause_stops_simulation_and_discards_queued_input() {
+        let mut app = preview_app();
+        app.state = GameState::Playing;
+        app.run.paused = false;
+        drag_camera(&mut app);
+        app.update_simulation(Duration::from_millis(5));
+        app.pause();
+        app.update_simulation(Duration::from_secs(1));
+        assert_eq!(app.state, GameState::Paused);
+        assert!(app.run.paused);
+        assert_eq!(app.run.simulation_seconds, 0.0);
+        assert_eq!(app.clock.interpolation_alpha(), 0.0);
+        assert_eq!(
+            app.input.snapshot(
+                &app.profile.settings.controls,
+                &app.profile.settings.accessibility
+            ),
+            InputSnapshot::default()
+        );
+    }
+
+    #[test]
+    fn background_generation_does_not_resume_an_unfocused_game() {
+        let mut app = preview_app();
+        app.start_generation(WorldSeed(42));
+        app.input.handle_window_event(
+            &WindowEvent::Focused(false),
+            &mut app.profile.settings.controls,
+        );
+        app.pause();
+        finish_preview(&mut app);
+        assert_eq!(app.state, GameState::Paused);
+        assert!(app.run.paused);
+        app.update_simulation(Duration::from_secs(1));
+        assert_eq!(app.run.simulation_seconds, 0.0);
+        std::fs::remove_file(app.profile_store.path()).unwrap();
+    }
+
+    #[test]
+    fn invalid_simulation_config_is_rejected_before_startup() {
+        let mut config = GameConfig {
+            generator: GeneratorConfig::test_quality(),
+            ..GameConfig::default()
+        };
+        config.vehicle.mower_width = 0.0;
+        assert!(
+            LawnOrbitApp::with_config(
+                ProfileStore::temporary("bad-config"),
+                Profile::default(),
+                config
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unreadable_profiles_are_preserved_when_defaults_are_used() {
+        for source in [
+            "invalid profile".to_owned(),
+            ron::to_string(&Profile {
+                version: lawn_core::profile::PROFILE_VERSION + 1,
+                ..Profile::default()
+            })
+            .unwrap(),
+        ] {
+            let store = ProfileStore::temporary("preserve-profile");
+            std::fs::write(store.path(), &source).unwrap();
+            let mut app = LawnOrbitApp::load_with_config(
+                store,
+                GameConfig {
+                    generator: GeneratorConfig::test_quality(),
+                    ..GameConfig::default()
+                },
+            )
+            .unwrap();
+            assert!(!app.profile_write_enabled);
+            assert!(app.status_message.is_some());
+            app.profile.tutorial_completed = true;
+            app.save_profile();
+            assert_eq!(
+                std::fs::read_to_string(app.profile_store.path()).unwrap(),
+                source
+            );
+            std::fs::remove_file(app.profile_store.path()).unwrap();
+        }
     }
 
     #[test]
@@ -1791,6 +2025,58 @@ mod tests {
         assert_eq!(edited.mountain_height_max, baseline.mountain_height_max);
         assert!((edited.mowable_ratio_min - baseline.mowable_ratio_min).abs() < 1.0e-6);
         assert!((edited.mowable_ratio_max - baseline.mowable_ratio_max).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn editor_slider_endpoints_generate_valid_worlds() {
+        let baseline = GeneratorConfig::test_quality();
+        for radius in [12.0, 22.0] {
+            for rockiness in [0.0, 1.0, 24.0] {
+                for peaks in [2, 9] {
+                    for height in [2.0, 7.0] {
+                        for rolling in [0.0, 1.2] {
+                            let settings = WorldEditorSettings {
+                                planet_radius: radius,
+                                rock_coverage_percent: rockiness,
+                                peak_clusters: peaks,
+                                peak_height: height,
+                                rolling_amplitude: rolling,
+                            };
+                            let generator = PlanetGenerator::new(
+                                CURRENT_GENERATOR_VERSION,
+                                settings.generator_config(&baseline),
+                            );
+                            for seed in [0, 1, 42] {
+                                generator
+                                    .generate_with_roots(WorldSeed(seed), false)
+                                    .unwrap_or_else(|error| {
+                                        panic!("{settings:?}, seed {seed}: {error}")
+                                    });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Exercise actual root allocation at shipping density, including the
+        // largest fully grassy world, rather than only metadata generation.
+        for rockiness in [0.0, 24.0] {
+            let settings = WorldEditorSettings {
+                planet_radius: 22.0,
+                rock_coverage_percent: rockiness,
+                peak_clusters: 9,
+                peak_height: 7.0,
+                rolling_amplitude: 1.2,
+            };
+            let shipping = GameConfig::shipping().unwrap().generator;
+            let planet = PlanetGenerator::new(
+                CURRENT_GENERATOR_VERSION,
+                settings.generator_config(&shipping),
+            )
+            .generate(WorldSeed(42))
+            .unwrap();
+            assert!(!planet.grass_roots.is_empty());
+        }
     }
 
     #[test]

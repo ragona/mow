@@ -180,19 +180,73 @@ impl Profile {
         // ToggleMower also accepts the short-lived ToggleFisheye action as a
         // deserialize alias. Neither action exists in current gameplay.
         self.settings.controls.bindings.remove(&Action::ToggleMower);
+        // Older profiles can predate newly added actions. Preserve explicit
+        // remaps and empty (unbound) lists while filling absent actions.
+        for (action, bindings) in ControlMap::default().bindings {
+            self.settings
+                .controls
+                .bindings
+                .entry(action)
+                .or_insert(bindings);
+        }
         self.version = PROFILE_VERSION;
-        a.camera_shake = a.camera_shake.clamp(0.0, 1.0);
-        a.camera_tilt_degrees = a.camera_tilt_degrees.clamp(0.0, 18.0);
-        a.field_of_view_degrees = a.field_of_view_degrees.clamp(60.0, 120.0);
-        a.camera_follow_stiffness = a.camera_follow_stiffness.clamp(1.0, 20.0);
-        a.steering_sensitivity = a.steering_sensitivity.clamp(0.25, 2.0);
+        let defaults = AccessibilitySettings::default();
+        a.camera_shake = finite_clamp(a.camera_shake, 0.0, 1.0, defaults.camera_shake);
+        a.camera_tilt_degrees = finite_clamp(
+            a.camera_tilt_degrees,
+            0.0,
+            18.0,
+            defaults.camera_tilt_degrees,
+        );
+        a.field_of_view_degrees = finite_clamp(
+            a.field_of_view_degrees,
+            60.0,
+            120.0,
+            defaults.field_of_view_degrees,
+        );
+        a.camera_follow_stiffness = finite_clamp(
+            a.camera_follow_stiffness,
+            1.0,
+            20.0,
+            defaults.camera_follow_stiffness,
+        );
+        a.steering_sensitivity = finite_clamp(
+            a.steering_sensitivity,
+            0.25,
+            2.0,
+            defaults.steering_sensitivity,
+        );
         self.settings.grass_height_multiplier =
-            self.settings.grass_height_multiplier.clamp(0.4, 1.6);
-        self.settings.render_scale = self.settings.render_scale.clamp(0.5, 1.0);
+            finite_clamp(self.settings.grass_height_multiplier, 0.4, 1.6, 1.0);
+        self.settings.render_scale = finite_clamp(self.settings.render_scale, 0.5, 1.0, 1.0);
         self.settings.msaa_samples = match self.settings.msaa_samples {
             1 | 2 | 4 => self.settings.msaa_samples,
             _ => 4,
         };
+        let mut seen = BTreeSet::new();
+        self.recent_seeds
+            .retain(|key| seen.insert((key.version.0, key.seed.0)));
+        self.recent_seeds.truncate(20);
+        for record in self.records.values_mut() {
+            record.best_rating = record.best_rating.min(3);
+            record.best_time_seconds = record
+                .best_time_seconds
+                .filter(|value| value.is_finite() && *value >= 0.0);
+            record.highest_coverage = if record.highest_coverage.is_finite() {
+                record.highest_coverage.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            record.best_efficiency = finite_clamp(record.best_efficiency, 0.0, 1.0, 0.0);
+        }
+    }
+}
+
+fn finite_clamp(value: f32, min: f32, max: f32, default: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        default
     }
 }
 
@@ -200,6 +254,64 @@ impl Profile {
 mod tests {
     use super::*;
     use crate::score::RunMetrics;
+
+    #[test]
+    fn nonfinite_settings_and_invalid_records_are_repaired() {
+        let mut profile = Profile::default();
+        let a = &mut profile.settings.accessibility;
+        a.camera_shake = f32::NAN;
+        a.camera_tilt_degrees = f32::INFINITY;
+        a.field_of_view_degrees = f32::NEG_INFINITY;
+        a.camera_follow_stiffness = f32::NAN;
+        a.steering_sensitivity = f32::NAN;
+        profile.settings.grass_height_multiplier = f32::NAN;
+        profile.settings.render_scale = f32::NAN;
+        let key = RecordKey {
+            version: GeneratorVersion(1),
+            seed: WorldSeed(7),
+        };
+        profile.recent_seeds = VecDeque::from([key; 30]);
+        profile.records.insert(
+            key,
+            SeedRecord {
+                best_rating: 255,
+                best_time_seconds: Some(-5.0),
+                highest_coverage: f64::NAN,
+                best_efficiency: f32::INFINITY,
+            },
+        );
+        profile.sanitize();
+        assert_eq!(profile.settings, Settings::default());
+        assert_eq!(profile.recent_seeds, VecDeque::from([key]));
+        assert_eq!(
+            profile.records[&key],
+            SeedRecord {
+                best_rating: 3,
+                ..SeedRecord::default()
+            }
+        );
+    }
+
+    #[test]
+    fn migration_adds_missing_actions_without_replacing_explicit_bindings() {
+        let mut profile = Profile::default();
+        profile.settings.controls.bindings.clear();
+        profile
+            .settings
+            .controls
+            .bindings
+            .insert(Action::Boost, Vec::new());
+        profile.sanitize();
+        assert!(profile.settings.controls.bindings[&Action::Boost].is_empty());
+        assert_eq!(
+            profile.settings.controls.bindings[&Action::Accelerate],
+            ControlMap::default().bindings[&Action::Accelerate]
+        );
+        assert_eq!(
+            profile.settings.controls.bindings[&Action::CameraUp],
+            ControlMap::default().bindings[&Action::CameraUp]
+        );
+    }
 
     #[test]
     fn records_are_seed_specific_and_improve_monotonically() {
