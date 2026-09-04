@@ -101,6 +101,8 @@ struct PlanetResources {
     grass_roots: wgpu::Buffer,
     mowing_texture: wgpu::Texture,
     mowing_view: wgpu::TextureView,
+    world_radius: f32,
+    light_view_proj: Mat4,
 }
 
 #[derive(Debug)]
@@ -154,6 +156,8 @@ pub struct Renderer {
     vehicle_vertices: wgpu::Buffer,
     vehicle_indices: wgpu::Buffer,
     vehicle_index_count: u32,
+    vehicle_mesh_vertices: Vec<MeshVertex>,
+    vehicle_mesh_indices: Vec<u32>,
     vehicle_presentation: VehiclePresentation,
     started: Instant,
     quality: QualityPreset,
@@ -204,11 +208,13 @@ impl Renderer {
         // Rendering never depends on optional features. Timestamp queries are
         // enabled only as a diagnostics side channel when an adapter exposes them.
         let diagnostic_features = adapter_features & wgpu::Features::TIMESTAMP_QUERY;
+        let required_features = diagnostic_features
+            | (adapter_features & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Lawn Orbit device"),
-                required_features: diagnostic_features,
-                required_limits: wgpu::Limits::default(),
+                required_features,
+                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
@@ -233,10 +239,19 @@ impl Renderer {
             view_formats: vec![],
         };
         surface.configure(&device, &surface_config);
-        let msaa_samples = match msaa_samples {
-            1 | 2 | 4 => msaa_samples,
-            _ => 4,
+        let format_flags = |format: wgpu::TextureFormat| {
+            if required_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+            {
+                adapter.get_texture_format_features(format).flags
+            } else {
+                format.guaranteed_format_features(required_features).flags
+            }
         };
+        let msaa_samples = supported_msaa_samples(
+            msaa_samples,
+            format_flags(WORLD_FORMAT),
+            format_flags(DEPTH_FORMAT),
+        );
         let render_scale = render_scale.clamp(0.5, 1.0);
         let targets = create_targets(&device, &surface_config, msaa_samples, render_scale);
         let shadow = create_shadow(&device);
@@ -349,6 +364,8 @@ impl Renderer {
             vehicle_vertices,
             vehicle_indices,
             vehicle_index_count: 0,
+            vehicle_mesh_vertices: Vec::with_capacity(1_024),
+            vehicle_mesh_indices: Vec::with_capacity(4_096),
             vehicle_presentation: VehiclePresentation::new(
                 run.vehicle.state.transform,
                 run.vehicle.state.linear_velocity,
@@ -463,7 +480,7 @@ impl Renderer {
             .last_visual_frame
             .elapsed()
             .as_secs_f32()
-            .clamp(1.0 / 240.0, 1.0 / 30.0);
+            .clamp(0.0, 1.0 / 30.0);
         self.last_visual_frame = Instant::now();
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output)
@@ -477,6 +494,13 @@ impl Renderer {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // Pausing resets the fixed-step accumulator. Its zero remainder must
+        // not rewind presentation to the previous physics snapshot.
+        let interpolation_alpha = if run.paused || !run.active {
+            1.0
+        } else {
+            interpolation_alpha
+        };
         let deck_transform = run.vehicle.interpolated_transform(interpolation_alpha);
         let visual_seconds =
             (run.simulation_seconds - FIXED_DT + interpolation_alpha * FIXED_DT).max(0.0);
@@ -486,7 +510,9 @@ impl Renderer {
             visual_seconds,
             visual_dt,
         );
-        let (vehicle_vertices, vehicle_indices) = mesh::build_vehicle(
+        mesh::build_vehicle(
+            &mut self.vehicle_mesh_vertices,
+            &mut self.vehicle_mesh_indices,
             chassis_transform,
             deck_transform,
             run.vehicle.state.mower_enabled,
@@ -495,26 +521,28 @@ impl Renderer {
         self.queue.write_buffer(
             &self.vehicle_vertices,
             0,
-            bytemuck::cast_slice(&vehicle_vertices),
+            bytemuck::cast_slice(&self.vehicle_mesh_vertices),
         );
-        self.queue.write_buffer(
-            &self.vehicle_indices,
-            0,
-            bytemuck::cast_slice(&vehicle_indices),
-        );
-        self.vehicle_index_count = vehicle_indices.len() as u32;
+        // Topology does not depend on the pose, animation, or mower state.
+        // Upload indices once; subsequent frames only update vertex attributes.
+        if self.vehicle_index_count == 0 {
+            self.queue.write_buffer(
+                &self.vehicle_indices,
+                0,
+                bytemuck::cast_slice(&self.vehicle_mesh_indices),
+            );
+            self.vehicle_index_count = self.vehicle_mesh_indices.len() as u32;
+        }
         self.particles
             .update(&self.queue, run, self.reduced_particles);
         let dirty_tiles = run.mowing.take_dirty_tiles();
-        // Vehicle mesh (2), interaction sources (1), optional particle staging
-        // (1), plus dirty-key/result vectors and one cell vector per dirty tile.
-        let transient_allocations = 3
-            + u32::from(self.particles.len() > 0)
-            + if dirty_tiles.is_empty() {
-                0
-            } else {
-                2 + dirty_tiles.len() as u32
-            };
+        // Dirty keys retain their allocation; staging uses one update vector
+        // plus a packed-cell vector for each dirty tile.
+        let transient_allocations = if dirty_tiles.is_empty() {
+            0
+        } else {
+            1 + dirty_tiles.len() as u32
+        };
         for tile in &dirty_tiles {
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -672,7 +700,11 @@ impl Renderer {
                     b: 0.0,
                     a: 0.0,
                 }),
-                store: wgpu::StoreOp::Store,
+                store: if resolve_target.is_some() {
+                    wgpu::StoreOp::Discard
+                } else {
+                    wgpu::StoreOp::Store
+                },
             },
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -682,7 +714,7 @@ impl Renderer {
                 view: &self.targets.depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
+                    store: wgpu::StoreOp::Discard,
                 }),
                 stencil_ops: None,
             }),
@@ -719,9 +751,13 @@ impl Renderer {
         let camera_position = camera.position;
         let camera_direction = camera_position.normalize();
         let camera_radius = camera_position.length();
-        let horizon_angle = (run.planet.config.base_radius / camera_radius)
-            .clamp(0.0, 1.0)
-            .acos();
+        // A base-radius horizon incorrectly hides elevated grass and roots in
+        // terrain depressions. Use an inner occluder and the outer blade bound.
+        let inner_radius = (run.planet.config.base_radius
+            - 1.06 * run.planet.config.rolling_amplitude)
+            * (3.0 / run.planet.terrain.resolution() as f32).cos();
+        let horizon_angle =
+            grass_horizon_angle(inner_radius, self.planet.world_radius, camera_radius);
         let camera_forward = (camera.target - camera_position).normalize();
         let base_density = quality_density(self.quality);
         let mut visible_patches = 0;
@@ -731,9 +767,7 @@ impl Renderer {
                 continue;
             }
             let angle = camera_direction.dot(patch.center).clamp(-1.0, 1.0).acos();
-            // Tall blades can remain visible after their roots pass behind the
-            // geometric terrain horizon, so retain a generous silhouette band.
-            if angle > horizon_angle + patch.angular_radius + 0.14 {
+            if angle > horizon_angle + patch.angular_radius {
                 continue;
             }
             let patch_position = patch.center * run.planet.config.base_radius;
@@ -804,18 +838,15 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
         camera.field_of_view_degrees.to_radians(),
         aspect * (1.0 - renderer.scene_left_inset),
         0.08,
-        180.0,
+        (camera.position.length() + renderer.planet.world_radius).max(180.0),
     );
     let scene_placement = Mat4::from_translation(Vec3::new(renderer.scene_left_inset, 0.0, 0.0))
         * Mat4::from_scale(Vec3::new(1.0 - renderer.scene_left_inset, 1.0, 1.0));
     let light_direction = Vec3::new(-0.42, -0.81, -0.38).normalize();
-    let light_position = -light_direction * 75.0;
-    let light_view = Mat4::look_at_rh(light_position, Vec3::ZERO, Vec3::Y);
-    let light_projection = Mat4::orthographic_rh(-42.0, 42.0, -42.0, 42.0, 1.0, 150.0);
     let locator = run.locator_direction().unwrap_or(Vec3::ZERO);
     FrameUniformGpu {
         view_proj: (scene_placement * projection * view).to_cols_array_2d(),
-        light_view_proj: (light_projection * light_view).to_cols_array_2d(),
+        light_view_proj: renderer.planet.light_view_proj.to_cols_array_2d(),
         camera_time: [
             camera.position.x,
             camera.position.y,
@@ -843,6 +874,41 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
     }
 }
 
+fn grass_horizon_angle(inner_radius: f32, outer_radius: f32, camera_radius: f32) -> f32 {
+    if camera_radius <= inner_radius || inner_radius <= 0.0 {
+        return std::f32::consts::PI;
+    }
+    (inner_radius / camera_radius).clamp(0.0, 1.0).acos()
+        + (inner_radius / outer_radius).clamp(0.0, 1.0).acos()
+}
+
+fn supported_msaa_samples(
+    requested: u32,
+    color: wgpu::TextureFormatFeatureFlags,
+    depth: wgpu::TextureFormatFeatureFlags,
+) -> u32 {
+    let requested = match requested {
+        1 | 2 | 4 => requested,
+        _ => 4,
+    };
+    [4, 2, 1]
+        .into_iter()
+        .find(|&samples| {
+            samples <= requested
+                && color.sample_count_supported(samples)
+                && depth.sample_count_supported(samples)
+                && (samples == 1
+                    || color.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE))
+        })
+        .unwrap_or(1)
+}
+
+fn shadow_view_projection(radius: f32) -> Mat4 {
+    let light_direction = Vec3::new(-0.42, -0.81, -0.38).normalize();
+    let view = Mat4::look_at_rh(-light_direction * (radius * 2.0), Vec3::ZERO, Vec3::Y);
+    Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.1, radius * 4.0) * view
+}
+
 fn quality_density(quality: QualityPreset) -> f32 {
     match quality {
         QualityPreset::Low => 0.5,
@@ -861,6 +927,12 @@ fn create_planet_resources(
     run: &RunState,
 ) -> PlanetResources {
     let (terrain_vertices, terrain_indices) = mesh::build_terrain(&run.planet);
+    // Include the hover vehicle and tallest blades beyond the terrain shell.
+    let world_radius = terrain_vertices
+        .iter()
+        .map(|vertex| Vec3::from_array(vertex.position).length())
+        .fold(run.planet.config.base_radius, f32::max)
+        + (run.planet.config.grass_height_scale * 1.6).max(4.0);
     let terrain_vertex_buffer = create_init_buffer(
         device,
         "terrain vertices",
@@ -940,6 +1012,8 @@ fn create_planet_resources(
         grass_roots,
         mowing_texture,
         mowing_view,
+        world_radius,
+        light_view_proj: shadow_view_projection(world_radius),
     }
 }
 
@@ -1152,7 +1226,7 @@ fn create_pipelines(
             buffers: &[MeshVertex::layout()],
         },
         primitive: wgpu::PrimitiveState {
-            cull_mode: None,
+            cull_mode: Some(wgpu::Face::Back),
             ..wgpu::PrimitiveState::default()
         },
         depth_stencil: depth.clone(),
@@ -1479,3 +1553,6 @@ fn create_init_buffer(
         usage,
     })
 }
+
+#[cfg(test)]
+mod tests;

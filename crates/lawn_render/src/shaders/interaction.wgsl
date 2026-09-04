@@ -51,8 +51,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var source_index = 0u; source_index < params.source_count; source_index += 1u) {
         let source = sources[source_index];
         let delta = point - source.position_radius.xyz;
-        let distance = length(delta);
-        let falloff = smoothstep(source.position_radius.w, 0.0, distance);
+        let radius = source.position_radius.w;
+        let distance_squared = dot(delta, delta);
+        // Almost every cell is outside the small source disks. Avoid square
+        // roots, normalization, and spring forcing for those sources.
+        if (distance_squared >= radius * radius) { continue; }
+        let falloff = 1.0 - smoothstep(0.0, radius, sqrt(distance_squared));
         let radial = normalize(delta - normal * dot(delta, normal) + vec3<f32>(0.00001));
         let directed = source.direction_strength.xyz - normal * dot(source.direction_strength.xyz, normal);
         applied += (radial + directed) * source.direction_strength.w * falloff;

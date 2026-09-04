@@ -104,7 +104,7 @@ pub fn build_terrain(planet: &Planet) -> (Vec<MeshVertex>, Vec<u32>) {
                 let i1 = i0 + 1;
                 let i2 = i0 + stride;
                 let i3 = i2 + 1;
-                indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+                indices.extend_from_slice(&[i0, i1, i2, i1, i3, i2]);
             }
         }
     }
@@ -139,22 +139,24 @@ pub fn build_tuft() -> (Vec<TuftVertex>, Vec<u16>) {
 }
 
 pub fn build_vehicle(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
     chassis_transform: VehicleTransform,
     deck_transform: VehicleTransform,
     mower_enabled: bool,
     elapsed_seconds: f32,
-) -> (Vec<MeshVertex>, Vec<u32>) {
+) {
     const HOVER_PADS: [(f32, f32); 4] =
         [(-0.72, -0.72), (0.72, -0.72), (-0.72, 0.72), (0.72, 0.72)];
 
-    let mut vertices = Vec::with_capacity(720);
-    let mut indices = Vec::with_capacity(1_800);
+    vertices.clear();
+    indices.clear();
 
     // A dark lower skirt makes the orange shell read as a separate, floating
     // chassis instead of one monolithic cube.
     add_chamfered_frustum(
-        &mut vertices,
-        &mut indices,
+        vertices,
+        indices,
         chassis_transform,
         Vec3::new(0.0, -0.08, 0.0),
         Vec2::splat(0.82),
@@ -164,8 +166,8 @@ pub fn build_vehicle(
         4,
     );
     add_chamfered_frustum(
-        &mut vertices,
-        &mut indices,
+        vertices,
+        indices,
         chassis_transform,
         Vec3::new(0.0, 0.18, 0.0),
         Vec2::splat(0.79),
@@ -175,8 +177,8 @@ pub fn build_vehicle(
         2,
     );
     add_chamfered_frustum(
-        &mut vertices,
-        &mut indices,
+        vertices,
+        indices,
         chassis_transform,
         Vec3::new(0.0, 0.5, 0.0),
         Vec2::splat(0.57),
@@ -186,8 +188,8 @@ pub fn build_vehicle(
         3,
     );
     add_cylinder(
-        &mut vertices,
-        &mut indices,
+        vertices,
+        indices,
         chassis_transform,
         Vec3::new(0.0, 0.685, 0.0),
         0.29,
@@ -198,8 +200,8 @@ pub fn build_vehicle(
 
     // The omnidirectional mower deck sits directly beneath the chassis.
     add_cylinder(
-        &mut vertices,
-        &mut indices,
+        vertices,
+        indices,
         deck_transform,
         Vec3::new(
             0.0,
@@ -220,16 +222,16 @@ pub fn build_vehicle(
         // Short outriggers visually connect each independently readable pad to
         // the central chassis without privileging a front direction.
         add_box(
-            &mut vertices,
-            &mut indices,
+            vertices,
+            indices,
             chassis_transform,
             Vec3::new(side * 0.73, -0.13, longitudinal),
             Vec3::new(0.24, 0.065, 0.09),
             4,
         );
         add_cylinder(
-            &mut vertices,
-            &mut indices,
+            vertices,
+            indices,
             chassis_transform,
             Vec3::new(side, -0.22, longitudinal),
             0.31,
@@ -239,8 +241,8 @@ pub fn build_vehicle(
         );
         let pulse = 1.0 + (elapsed_seconds * 5.0 + index as f32 * 1.7).sin() * 0.025;
         add_cylinder(
-            &mut vertices,
-            &mut indices,
+            vertices,
+            indices,
             chassis_transform,
             Vec3::new(side, -0.355, longitudinal),
             0.25 * pulse,
@@ -249,7 +251,6 @@ pub fn build_vehicle(
             5,
         );
     }
-    (vertices, indices)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -279,7 +280,7 @@ fn add_chamfered_frustum(
         for local in [bottom_left, bottom_right, top_left, top_right] {
             push_model_vertex(vertices, transform, local, normal, material);
         }
-        indices.extend_from_slice(&[start, start + 1, start + 2, start + 1, start + 3, start + 2]);
+        indices.extend_from_slice(&[start, start + 2, start + 1, start + 1, start + 2, start + 3]);
     }
     add_ring_cap(
         vertices,
@@ -314,12 +315,15 @@ fn add_cylinder(
 ) {
     debug_assert!(segments >= 3);
     let side_start = vertices.len() as u32;
-    let mut ring = Vec::with_capacity(segments);
-    for index in 0..segments {
+    // All shipping cylinders have at most fourteen sides. Stack storage avoids
+    // ten short-lived ring allocations on every rendered frame.
+    let mut ring = [Vec2::ZERO; 14];
+    let ring = &mut ring[..segments];
+    for (index, point) in ring.iter_mut().enumerate() {
         let angle = index as f32 * std::f32::consts::TAU / segments as f32;
         let radial = Vec3::new(angle.cos(), 0.0, angle.sin());
         let offset = radial * radius;
-        ring.push(Vec2::new(offset.x, offset.z));
+        *point = Vec2::new(offset.x, offset.z);
         push_model_vertex(
             vertices,
             transform,
@@ -341,14 +345,14 @@ fn add_cylinder(
         let top = bottom + 1;
         let next_bottom = side_start + (next * 2) as u32;
         let next_top = next_bottom + 1;
-        indices.extend_from_slice(&[bottom, next_bottom, top, next_bottom, next_top, top]);
+        indices.extend_from_slice(&[bottom, top, next_bottom, next_bottom, top, next_top]);
     }
     add_ring_cap(
         vertices,
         indices,
         transform,
         center + Vec3::Y * half_height,
-        &ring,
+        ring,
         Vec3::Y,
         material,
     );
@@ -357,7 +361,7 @@ fn add_cylinder(
         indices,
         transform,
         center - Vec3::Y * half_height,
-        &ring,
+        ring,
         Vec3::NEG_Y,
         material,
     );
@@ -401,9 +405,9 @@ fn add_ring_cap(
         let current = start + 1 + index as u32;
         let next = start + 1 + ((index + 1) % ring.len()) as u32;
         if normal.y > 0.0 {
-            indices.extend_from_slice(&[start, current, next]);
-        } else {
             indices.extend_from_slice(&[start, next, current]);
+        } else {
+            indices.extend_from_slice(&[start, current, next]);
         }
     }
 }
@@ -502,7 +506,7 @@ fn add_box(
                 variation: 0.5,
             });
         }
-        indices.extend_from_slice(&[start, start + 1, start + 2, start + 1, start + 3, start + 2]);
+        indices.extend_from_slice(&[start, start + 2, start + 1, start + 1, start + 2, start + 3]);
     }
 }
 
@@ -532,7 +536,9 @@ mod tests {
     #[test]
     fn vehicle_mesh_exposes_four_glowing_pads_within_gpu_budget() {
         let transform = identity_transform();
-        let (vertices, indices) = build_vehicle(transform, transform, true, 0.0);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        build_vehicle(&mut vertices, &mut indices, transform, transform, true, 0.0);
         assert!(vertices.len() > 600, "vehicle mesh is unexpectedly simple");
         assert!(
             vertices.len() * std::mem::size_of::<MeshVertex>()
@@ -555,5 +561,59 @@ mod tests {
                 });
         assert_eq!(glowing_pad_quadrants, 0b1111);
         assert!(vertices.iter().any(|vertex| vertex.material == 7));
+    }
+
+    fn assert_outward_triangles(vertices: &[MeshVertex], indices: &[u32]) {
+        for triangle in indices.chunks_exact(3) {
+            let [a, b, c] = triangle.try_into().unwrap();
+            let a = vertices[a as usize];
+            let b = vertices[b as usize];
+            let c = vertices[c as usize];
+            let geometric = (Vec3::from_array(b.position) - Vec3::from_array(a.position))
+                .cross(Vec3::from_array(c.position) - Vec3::from_array(a.position));
+            let normal = Vec3::from_array(a.normal)
+                + Vec3::from_array(b.normal)
+                + Vec3::from_array(c.normal);
+            assert!(
+                geometric.dot(normal) > 0.0,
+                "inward or degenerate triangle: {triangle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn solid_meshes_face_outward_for_backface_culling_and_shadows() {
+        let planet = lawn_core::PlanetGenerator::new(
+            lawn_core::planet::CURRENT_GENERATOR_VERSION,
+            lawn_core::GeneratorConfig::test_quality(),
+        )
+        .generate_with_roots(lawn_core::WorldSeed(21), false)
+        .unwrap();
+        let (terrain, terrain_indices) = build_terrain(&planet);
+        assert_outward_triangles(&terrain, &terrain_indices);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let transform = identity_transform();
+        build_vehicle(&mut vertices, &mut indices, transform, transform, true, 0.0);
+        assert_outward_triangles(&vertices, &indices);
+    }
+
+    #[test]
+    fn vehicle_animation_reuses_storage_and_preserves_topology() {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let initial = identity_transform();
+        build_vehicle(&mut vertices, &mut indices, initial, initial, true, 0.0);
+        let topology = indices.clone();
+        let pointers = (vertices.as_ptr(), indices.as_ptr());
+        let mut animated = initial;
+        animated.position = Vec3::new(4.0, 7.0, -2.0);
+        animated.rotation = Quat::from_rotation_x(0.2);
+        for enabled in [true, false] {
+            build_vehicle(&mut vertices, &mut indices, animated, initial, enabled, 4.5);
+            assert_eq!(indices, topology);
+            assert_eq!((vertices.as_ptr(), indices.as_ptr()), pointers);
+            assert_outward_triangles(&vertices, &indices);
+        }
     }
 }

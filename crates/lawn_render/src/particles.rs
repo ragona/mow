@@ -64,6 +64,7 @@ struct Particle {
 #[derive(Debug)]
 pub struct ClippingParticles {
     particles: Vec<Particle>,
+    instances: Vec<ParticleGpu>,
     instance_buffer: wgpu::Buffer,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -101,6 +102,7 @@ impl ClippingParticles {
         });
         Self {
             particles: Vec::with_capacity(MAX_PARTICLES),
+            instances: Vec::with_capacity(MAX_PARTICLES),
             instance_buffer,
             vertex_buffer,
             index_buffer,
@@ -137,10 +139,9 @@ impl ClippingParticles {
         if self.particles.is_empty() {
             return;
         }
-        let instances: Vec<_> = self
-            .particles
-            .iter()
-            .map(|particle| ParticleGpu {
+        self.instances.clear();
+        self.instances
+            .extend(self.particles.iter().map(|particle| ParticleGpu {
                 position_size: [
                     particle.position.x,
                     particle.position.y,
@@ -153,9 +154,12 @@ impl ClippingParticles {
                     particle.velocity.z,
                     1.0 - particle.age / particle.lifetime,
                 ],
-            })
-            .collect();
-        queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
+            }));
+        queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(&self.instances),
+        );
     }
 
     pub fn clear(&mut self) {
@@ -191,6 +195,9 @@ impl ClippingParticles {
             - transform.up * vehicle.linear_velocity.dot(transform.up))
         .try_normalize()
         .unwrap_or(Vec3::ZERO);
+        let count = count.min(MAX_PARTICLES);
+        let overflow = (self.particles.len() + count).saturating_sub(MAX_PARTICLES);
+        self.particles.drain(..overflow);
         for _ in 0..count {
             self.spawn_counter = self.spawn_counter.wrapping_add(1);
             let a = hash01(self.spawn_counter.wrapping_mul(0x9E37_79B9));
@@ -203,9 +210,6 @@ impl ClippingParticles {
                 + transform.up * (1.2 + c * 2.0)
                 + outward * (1.8 + c * 2.0)
                 - velocity_direction * 0.8;
-            if self.particles.len() == MAX_PARTICLES {
-                self.particles.remove(0);
-            }
             self.particles.push(Particle {
                 position,
                 velocity,

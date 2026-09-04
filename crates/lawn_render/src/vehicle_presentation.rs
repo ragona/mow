@@ -46,7 +46,7 @@ impl VehiclePresentation {
         elapsed_seconds: f32,
         dt: f32,
     ) -> VehicleTransform {
-        let dt = dt.clamp(1.0 / 240.0, 1.0 / 30.0);
+        let dt = dt.clamp(f32::EPSILON, 1.0 / 30.0);
         if self.base_up.dot(target.up) < 0.5 {
             self.reset(target, velocity);
         }
@@ -132,5 +132,22 @@ mod tests {
             visual = presentation.update(target, Vec3::X * 4.0, step as f32 / 120.0, 1.0 / 120.0);
         }
         assert!(visual.up.dot(Vec3::Y) > 0.999_9);
+    }
+
+    #[test]
+    fn attitude_response_tracks_elapsed_time_above_240_fps() {
+        let initial = level_transform();
+        let mut target = initial;
+        target.rotation = Quat::from_rotation_y(0.6);
+        target.forward = target.rotation * initial.forward;
+        let sample = |frequency: u32| {
+            let mut presentation = VehiclePresentation::new(initial, Vec3::ZERO);
+            let mut visual = initial;
+            for _ in 0..frequency / 20 {
+                visual = presentation.update(target, Vec3::ZERO, 0.0, 1.0 / frequency as f32);
+            }
+            visual.forward
+        };
+        assert!(sample(120).dot(sample(960)) > 0.999_9);
     }
 }

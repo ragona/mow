@@ -62,11 +62,11 @@ grass height, render scale, MSAA, fullscreen, and a high-contrast coverage overl
 | `lawn_orbit` | Desktop lifecycle, world editor, menus/HUD, input and rumble, and atomic persistence |
 | `lawn_tools` | Headless seed inspection, generation timing, and deterministic validation batches |
 
-Runtime tuning lives in [`config/game.ron`](config/game.ron). The external file is
-parsed and validated at startup, while tests assert that it matches the documented
-shipping defaults. Rendering degrades by capability and quality preset; the
-baseline path requires no optional GPU feature and uses a storage-buffer grass
-interaction fallback.
+Gameplay tuning lives in [`config/game.ron`](config/game.ron), which is embedded
+at build time and parsed and validated at startup. Rebuild after editing it.
+Tests assert that it matches the documented shipping defaults. Rendering degrades
+by capability and quality preset; the baseline path requires no optional GPU
+feature and uses a storage-buffer grass interaction fallback.
 
 ## Verification
 
@@ -78,15 +78,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release --workspace
 cargo run --release -p lawn_tools -- validate 1000
+# Requires an available GPU; executes every rendering pass and reads pixels back.
+cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
 ```
 
 The test suite exercises deterministic generation (including compact grass-root
 records), arbitrary coordinate poles, cube-face seams and corners, maximum-speed
 mowing sweeps, weighted coverage, hover stability, circumnavigation, recovery,
 fixed-step equivalence at 30/60/120/240 Hz, tutorial flow, scoring, persistence,
-input behavior, and parse/validation of every shipping WGSL module. It runs without
-opening a window or creating a GPU device except for the manual application smoke
-test.
+input behavior, and parse/validation of every shipping WGSL module. The default
+suite runs without opening a window or creating a GPU device. The explicitly
+requested GPU smoke test requires a graphics adapter but no window server.
 
 Useful headless commands:
 
@@ -100,6 +102,10 @@ cargo run --release -p lawn_tools -- validate 1000 500 --quick
 
 # Full shipping planet, including grass roots, as a JSON report.
 cargo run --release -p lawn_tools -- inspect "cozy planet"
+
+# Fixed 30-second gameplay workload, dirty uploads, and remaining-grass locator.
+# Compare timings on the same idle machine; results are not pass/fail thresholds.
+cargo run --release -p lawn_tools --example performance
 ```
 
 `validate` exits unsuccessfully if any seed fails. Its JSON report includes the
@@ -107,3 +113,6 @@ generator version, failure details, generation-attempt histogram, mowable and
 reachable bounds, and median/p95/maximum generation times. F3 in the game exposes
 frame p50/p95, draw visibility, grass/triangle counts, texture uploads, particles,
 CPU encoding time, graphics tier, adapter, seed, and deterministic planet hash.
+
+The latest correctness/performance findings and validation results are recorded
+in [`REVIEW.md`](REVIEW.md).

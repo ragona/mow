@@ -52,7 +52,9 @@ fn sky(uv: vec2<f32>) -> vec3<f32> {
 
 fn composite_color(input: VertexOutput) -> vec3<f32> {
     let world = textureSample(world_texture, world_sampler, input.uv);
-    let hdr = mix(sky(input.uv), world.rgb, world.a);
+    // Transparent clearing, alpha blending, and MSAA resolving leave RGB
+    // premultiplied by coverage. Multiplying it again darkens silhouettes.
+    let hdr = world.rgb + sky(input.uv) * (1.0 - world.a);
     return aces_film(hdr);
 }
 

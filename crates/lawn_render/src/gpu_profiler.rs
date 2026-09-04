@@ -26,6 +26,7 @@ pub(crate) struct GpuPassTimes {
 struct ReadbackSlot {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    frame_id: u64,
 }
 
 #[derive(Debug)]
@@ -36,6 +37,8 @@ pub(crate) struct GpuProfiler {
     next_slot: usize,
     timestamp_period_ns: f32,
     latest: GpuPassTimes,
+    next_frame_id: u64,
+    latest_frame_id: u64,
 }
 
 impl GpuProfiler {
@@ -63,6 +66,7 @@ impl GpuProfiler {
                 mapped_at_creation: false,
             }),
             state: Arc::new(AtomicU8::new(FREE)),
+            frame_id: 0,
         });
         Self {
             query_set,
@@ -71,6 +75,8 @@ impl GpuProfiler {
             next_slot: 0,
             timestamp_period_ns,
             latest: GpuPassTimes::default(),
+            next_frame_id: 1,
+            latest_frame_id: 0,
         }
     }
 
@@ -93,7 +99,9 @@ impl GpuProfiler {
     }
 
     pub fn finish_encoding(&mut self, encoder: &mut wgpu::CommandEncoder, slot_index: usize) {
-        let slot = &self.readbacks[slot_index];
+        let slot = &mut self.readbacks[slot_index];
+        slot.frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
         slot.state.store(PENDING, Ordering::Release);
         encoder.resolve_query_set(&self.query_set, 0..QUERY_COUNT, &self.resolve_buffer, 0);
         encoder.copy_buffer_to_buffer(&self.resolve_buffer, 0, &slot.buffer, 0, QUERY_BYTES);
@@ -121,6 +129,14 @@ impl GpuProfiler {
                     }
                     drop(mapped);
                     slot.buffer.unmap();
+                    // Ring slots complete in frame order, not array-index
+                    // order. A batch spanning wraparound must retain the
+                    // newest sample instead of overwriting it with old data.
+                    if slot.frame_id < self.latest_frame_id {
+                        slot.state.store(FREE, Ordering::Release);
+                        continue;
+                    }
+                    self.latest_frame_id = slot.frame_id;
                     let milliseconds = |pass: usize| {
                         ticks[pass * 2 + 1].wrapping_sub(ticks[pass * 2]) as f32
                             * self.timestamp_period_ns

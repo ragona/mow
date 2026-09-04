@@ -16,6 +16,7 @@ wgpu.workspace = true
 winit.workspace = true
 
 [dev-dependencies]
+pollster.workspace = true
 naga = { version = "29.0.0", features = ["wgsl-in"] }
 
 [lints]

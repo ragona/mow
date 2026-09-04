@@ -1440,6 +1440,7 @@ dependencies = [
  "glam 0.30.10",
  "lawn_core",
  "naga",
+ "pollster",
  "thiserror 2.0.20",
  "tracing",
  "wgpu",
