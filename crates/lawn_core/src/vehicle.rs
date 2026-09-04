@@ -90,6 +90,7 @@ pub struct VehicleTickResult {
 pub struct HoverVehicle {
     pub state: VehicleState,
     previous_transform: VehicleTransform,
+    previous_linear_velocity: Vec3,
     physics: PhysicsWorld,
 }
 
@@ -100,6 +101,7 @@ impl HoverVehicle {
         let physics = PhysicsWorld::new(planet, planet.spawn, tuning);
         Self {
             previous_transform: state.transform,
+            previous_linear_velocity: state.linear_velocity,
             state,
             physics,
         }
@@ -116,6 +118,12 @@ impl HoverVehicle {
             .interpolated(self.state.transform, alpha)
     }
 
+    #[must_use]
+    pub fn interpolated_velocity(&self, alpha: f32) -> Vec3 {
+        self.previous_linear_velocity
+            .lerp(self.state.linear_velocity, alpha.clamp(0.0, 1.0))
+    }
+
     pub fn tick(
         &mut self,
         planet: &Planet,
@@ -126,6 +134,7 @@ impl HoverVehicle {
         dt: f32,
     ) -> VehicleTickResult {
         self.previous_transform = self.state.transform;
+        self.previous_linear_velocity = self.state.linear_velocity;
         let old_deck = self.deck_position(tuning);
         // The deck is an always-on part of driving now. Preserve the state bit
         // for renderer snapshots while making it an invariant each tick.
@@ -287,6 +296,7 @@ impl HoverVehicle {
         self.state.transform = make_transform(safe.position, self.state.transform.forward, safe.up);
         self.previous_transform = self.state.transform;
         self.state.linear_velocity = Vec3::ZERO;
+        self.previous_linear_velocity = Vec3::ZERO;
         self.physics.teleport(self.state.transform, Vec3::ZERO);
         self.state.recovery_hold = 0.0;
         self.state.stuck_seconds = 0.0;

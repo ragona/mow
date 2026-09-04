@@ -3,7 +3,9 @@ use std::{sync::Arc, time::Instant};
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use lawn_core::{cube_map::CubeFace, profile::QualityPreset, run::RunState};
+use lawn_core::{
+    FIXED_DT, camera::CameraState, cube_map::CubeFace, profile::QualityPreset, run::RunState,
+};
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -12,6 +14,7 @@ use crate::{
     interaction::{GrassInteraction, INTERACTION_RESOLUTION},
     mesh::{self, MeshVertex, TuftVertex},
     particles::ClippingParticles,
+    vehicle_presentation::VehiclePresentation,
 };
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -150,6 +153,7 @@ pub struct Renderer {
     vehicle_vertices: wgpu::Buffer,
     vehicle_indices: wgpu::Buffer,
     vehicle_index_count: u32,
+    vehicle_presentation: VehiclePresentation,
     started: Instant,
     quality: QualityPreset,
     high_contrast: bool,
@@ -341,6 +345,10 @@ impl Renderer {
             vehicle_vertices,
             vehicle_indices,
             vehicle_index_count: 0,
+            vehicle_presentation: VehiclePresentation::new(
+                run.vehicle.state.transform,
+                run.vehicle.state.linear_velocity,
+            ),
             started: Instant::now(),
             quality,
             high_contrast,
@@ -413,6 +421,10 @@ impl Renderer {
         self.planet = create_planet_resources(&self.device, &self.queue, run);
         self.interaction = GrassInteraction::new(&self.device, run.planet.config.base_radius);
         self.particles.clear();
+        self.vehicle_presentation.reset(
+            run.vehicle.state.transform,
+            run.vehicle.state.linear_velocity,
+        );
         self.grass_bind_groups = create_grass_bind_groups(
             &self.device,
             &self.grass_layout,
@@ -452,11 +464,20 @@ impl Renderer {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let transform = run.vehicle.interpolated_transform(interpolation_alpha);
+        let deck_transform = run.vehicle.interpolated_transform(interpolation_alpha);
+        let visual_seconds =
+            (run.simulation_seconds - FIXED_DT + interpolation_alpha * FIXED_DT).max(0.0);
+        let chassis_transform = self.vehicle_presentation.update(
+            deck_transform,
+            run.vehicle.interpolated_velocity(interpolation_alpha),
+            visual_seconds,
+            visual_dt,
+        );
         let (vehicle_vertices, vehicle_indices) = mesh::build_vehicle(
-            transform,
+            chassis_transform,
+            deck_transform,
             run.vehicle.state.mower_enabled,
-            run.simulation_seconds,
+            visual_seconds,
         );
         self.queue.write_buffer(
             &self.vehicle_vertices,
@@ -506,7 +527,8 @@ impl Renderer {
                 },
             );
         }
-        let frame_uniform = make_frame_uniform(self, run);
+        let camera = run.camera.interpolated_state(interpolation_alpha);
+        let frame_uniform = make_frame_uniform(self, run, camera);
         self.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&frame_uniform));
         let mut encoder = self
@@ -535,7 +557,8 @@ impl Renderer {
             }),
         );
         self.encode_shadow(&mut encoder, query_set);
-        let (visible_patches, visible_tufts) = self.encode_world(&mut encoder, run, query_set);
+        let (visible_patches, visible_tufts) =
+            self.encode_world(&mut encoder, run, camera, query_set);
         self.encode_composite(&mut encoder, &view, query_set);
         if let (Some(slot), Some(profiler)) = (gpu_profile_slot, self.gpu_profiler.as_mut()) {
             profiler.finish_encoding(&mut encoder, slot);
@@ -615,6 +638,7 @@ impl Renderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         run: &RunState,
+        camera: CameraState,
         query_set: Option<&wgpu::QuerySet>,
     ) -> (u32, u32) {
         let (color_view, resolve_target) = self
@@ -679,13 +703,13 @@ impl Renderer {
         pass.set_vertex_buffer(0, self.tuft_vertices.slice(..));
         pass.set_vertex_buffer(1, self.planet.grass_roots.slice(..));
         pass.set_index_buffer(self.tuft_indices.slice(..), wgpu::IndexFormat::Uint16);
-        let camera_position = run.camera.state.position;
+        let camera_position = camera.position;
         let camera_direction = camera_position.normalize();
         let camera_radius = camera_position.length();
         let horizon_angle = (run.planet.config.base_radius / camera_radius)
             .clamp(0.0, 1.0)
             .acos();
-        let camera_forward = (run.camera.state.target - camera_position).normalize();
+        let camera_forward = (camera.target - camera_position).normalize();
         let base_density = quality_density(self.quality);
         let mut visible_patches = 0;
         let mut visible_tufts = 0;
@@ -760,8 +784,7 @@ impl Renderer {
     }
 }
 
-fn make_frame_uniform(renderer: &Renderer, run: &RunState) -> FrameUniformGpu {
-    let camera = run.camera.state;
+fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) -> FrameUniformGpu {
     let aspect = renderer.surface_config.width as f32 / renderer.surface_config.height as f32;
     let view = Mat4::look_at_rh(camera.position, camera.target, camera.up);
     let projection = Mat4::perspective_rh(

@@ -139,7 +139,8 @@ pub fn build_tuft() -> (Vec<TuftVertex>, Vec<u16>) {
 }
 
 pub fn build_vehicle(
-    transform: VehicleTransform,
+    chassis_transform: VehicleTransform,
+    deck_transform: VehicleTransform,
     mower_enabled: bool,
     elapsed_seconds: f32,
 ) -> (Vec<MeshVertex>, Vec<u32>) {
@@ -154,7 +155,7 @@ pub fn build_vehicle(
     add_chamfered_frustum(
         &mut vertices,
         &mut indices,
-        transform,
+        chassis_transform,
         Vec3::new(0.0, -0.08, 0.0),
         Vec2::splat(0.82),
         Vec2::splat(0.74),
@@ -165,7 +166,7 @@ pub fn build_vehicle(
     add_chamfered_frustum(
         &mut vertices,
         &mut indices,
-        transform,
+        chassis_transform,
         Vec3::new(0.0, 0.18, 0.0),
         Vec2::splat(0.79),
         Vec2::splat(0.65),
@@ -176,7 +177,7 @@ pub fn build_vehicle(
     add_chamfered_frustum(
         &mut vertices,
         &mut indices,
-        transform,
+        chassis_transform,
         Vec3::new(0.0, 0.5, 0.0),
         Vec2::splat(0.57),
         Vec2::splat(0.42),
@@ -187,7 +188,7 @@ pub fn build_vehicle(
     add_cylinder(
         &mut vertices,
         &mut indices,
-        transform,
+        chassis_transform,
         Vec3::new(0.0, 0.685, 0.0),
         0.29,
         0.035,
@@ -199,15 +200,14 @@ pub fn build_vehicle(
     add_cylinder(
         &mut vertices,
         &mut indices,
-        transform,
+        deck_transform,
         Vec3::new(
             0.0,
-            -0.315
-                + if mower_enabled {
-                    (elapsed_seconds * 57.0).sin() * 0.018
-                } else {
-                    0.0
-                },
+            -0.5 + if mower_enabled {
+                (elapsed_seconds * 57.0).sin() * 0.018
+            } else {
+                0.0
+            },
             0.0,
         ),
         1.04,
@@ -222,7 +222,7 @@ pub fn build_vehicle(
         add_box(
             &mut vertices,
             &mut indices,
-            transform,
+            chassis_transform,
             Vec3::new(side * 0.73, -0.13, longitudinal),
             Vec3::new(0.24, 0.065, 0.09),
             4,
@@ -230,7 +230,7 @@ pub fn build_vehicle(
         add_cylinder(
             &mut vertices,
             &mut indices,
-            transform,
+            chassis_transform,
             Vec3::new(side, -0.22, longitudinal),
             0.31,
             0.115,
@@ -241,7 +241,7 @@ pub fn build_vehicle(
         add_cylinder(
             &mut vertices,
             &mut indices,
-            transform,
+            chassis_transform,
             Vec3::new(side, -0.355, longitudinal),
             0.25 * pulse,
             0.055,
@@ -531,7 +531,8 @@ mod tests {
 
     #[test]
     fn vehicle_mesh_exposes_four_glowing_pads_within_gpu_budget() {
-        let (vertices, indices) = build_vehicle(identity_transform(), true, 0.0);
+        let transform = identity_transform();
+        let (vertices, indices) = build_vehicle(transform, transform, true, 0.0);
         assert!(vertices.len() > 600, "vehicle mesh is unexpectedly simple");
         assert!(
             vertices.len() * std::mem::size_of::<MeshVertex>()

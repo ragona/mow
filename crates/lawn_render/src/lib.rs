@@ -5,6 +5,7 @@ mod interaction;
 mod mesh;
 mod particles;
 mod renderer;
+mod vehicle_presentation;
 
 pub use renderer::{
     FrameAcquireError, FrameStats, RenderCapabilities, RenderFrame, RenderTier, Renderer,

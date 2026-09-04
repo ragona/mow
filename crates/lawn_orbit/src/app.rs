@@ -334,13 +334,14 @@ impl LawnOrbitApp {
         let angle = self.app_started.elapsed().as_secs_f32() * speed;
         let planet_radius = self.run.planet.config.base_radius;
         let radius = planet_radius * 1.8;
-        self.run.camera.state.position = glam::Vec3::new(
+        let position = glam::Vec3::new(
             angle.cos() * radius,
             planet_radius * 0.72,
             angle.sin() * radius,
         );
-        self.run.camera.state.target = glam::Vec3::ZERO;
-        self.run.camera.state.up = glam::Vec3::Y;
+        self.run
+            .camera
+            .snap_to_pose(position, glam::Vec3::ZERO, glam::Vec3::Y);
     }
 
     fn draw_ui(&mut self, context: &egui::Context) -> Vec<UiCommand> {

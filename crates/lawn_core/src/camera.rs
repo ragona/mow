@@ -7,6 +7,8 @@ use crate::{planet::Planet, profile::AccessibilitySettings, vehicle::VehicleTran
 const CHASE_HEIGHT: f32 = 10.2;
 const CHASE_TARGET_DEPTH: f32 = 2.2;
 const CHASE_ZOOM_RANGE: f32 = 4.0;
+const FOLLOW_DAMPING_RATIO: f32 = 0.72;
+const FOLLOW_TELEPORT_DISTANCE: f32 = CHASE_HEIGHT * 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraState {
@@ -19,6 +21,9 @@ pub struct CameraState {
 #[derive(Clone, Debug)]
 pub struct CameraRig {
     pub state: CameraState,
+    previous_state: CameraState,
+    position_velocity: Vec3,
+    target_velocity: Vec3,
     orbit_yaw: f32,
     orbit_pitch: f32,
     elapsed_seconds: f32,
@@ -41,10 +46,46 @@ impl CameraRig {
         };
         Self {
             state,
+            previous_state: state,
+            position_velocity: Vec3::ZERO,
+            target_velocity: Vec3::ZERO,
             orbit_yaw: 0.0,
             orbit_pitch: 0.0,
             elapsed_seconds: 0.0,
         }
+    }
+
+    /// Returns a camera pose on the same render timeline as the interpolated
+    /// vehicle, avoiding fixed-tick judder between the two presentation layers.
+    #[must_use]
+    pub fn interpolated_state(&self, alpha: f32) -> CameraState {
+        let alpha = alpha.clamp(0.0, 1.0);
+        CameraState {
+            position: self
+                .previous_state
+                .position
+                .lerp(self.state.position, alpha),
+            target: self.previous_state.target.lerp(self.state.target, alpha),
+            up: self
+                .previous_state
+                .up
+                .lerp(self.state.up, alpha)
+                .normalize_or(self.state.up),
+            field_of_view_degrees: self.previous_state.field_of_view_degrees
+                + (self.state.field_of_view_degrees - self.previous_state.field_of_view_degrees)
+                    * alpha,
+        }
+    }
+
+    /// Immediately establishes a non-gameplay camera, such as the title-screen
+    /// planet orbit, without leaving spring energy behind for the next frame.
+    pub fn snap_to_pose(&mut self, position: Vec3, target: Vec3, up: Vec3) {
+        self.state.position = position;
+        self.state.target = target;
+        self.state.up = up.normalize_or(Vec3::Y);
+        self.previous_state = self.state;
+        self.position_velocity = Vec3::ZERO;
+        self.target_velocity = Vec3::ZERO;
     }
 
     pub fn update(
@@ -58,6 +99,7 @@ impl CameraRig {
         settings: &AccessibilitySettings,
         dt: f32,
     ) {
+        self.previous_state = self.state;
         self.elapsed_seconds += dt;
         if recenter {
             self.orbit_yaw = 0.0;
@@ -95,11 +137,32 @@ impl CameraRig {
         screen_up = Quat::from_axis_angle(local_up, shake_angle).mul_vec3(screen_up);
 
         let height = (CHASE_HEIGHT + self.orbit_pitch * CHASE_ZOOM_RANGE).max(5.5);
-        let (position, target) =
+        let (desired_position, desired_target) =
             chase_pose(vehicle, screen_up, height, settings.camera_tilt_degrees);
-        self.state.position = position;
-        self.state.target = target;
         let stiffness = settings.camera_follow_stiffness;
+        if self.state.position.distance(desired_position) > FOLLOW_TELEPORT_DISTANCE {
+            self.state.position = desired_position;
+            self.state.target = desired_target;
+            self.position_velocity = Vec3::ZERO;
+            self.target_velocity = Vec3::ZERO;
+        } else {
+            spring_follow(
+                &mut self.state.position,
+                &mut self.position_velocity,
+                desired_position,
+                stiffness,
+                FOLLOW_DAMPING_RATIO,
+                dt,
+            );
+            spring_follow(
+                &mut self.state.target,
+                &mut self.target_velocity,
+                desired_target,
+                stiffness,
+                FOLLOW_DAMPING_RATIO,
+                dt,
+            );
+        }
         let follow = 1.0 - (-stiffness * dt).exp();
         let smoothed_up = self.state.up.lerp(screen_up, follow);
         self.state.up = (smoothed_up - local_up * smoothed_up.dot(local_up))
@@ -107,6 +170,21 @@ impl CameraRig {
             .unwrap_or(screen_up);
         self.state.field_of_view_degrees = settings.field_of_view_degrees;
     }
+}
+
+fn spring_follow(
+    value: &mut Vec3,
+    velocity: &mut Vec3,
+    target: Vec3,
+    angular_frequency: f32,
+    damping_ratio: f32,
+    dt: f32,
+) {
+    let frequency = angular_frequency.max(0.01);
+    let acceleration =
+        (target - *value) * frequency * frequency - *velocity * (2.0 * damping_ratio * frequency);
+    *velocity += acceleration * dt;
+    *value += *velocity * dt;
 }
 
 fn chase_pose(
@@ -250,5 +328,60 @@ mod tests {
         );
         assert!(slow.state.position.distance(fast.state.position) < 1.0e-6);
         assert!(slow.state.up.distance(fast.state.up) < 1.0e-6);
+    }
+
+    #[test]
+    fn follow_spring_lags_then_settles_on_a_moving_vehicle() {
+        let planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(WorldSeed(91), false)
+                .unwrap();
+        let settings = AccessibilitySettings::default();
+        let mut vehicle = VehicleTransform {
+            position: planet.spawn.position,
+            rotation: glam::Quat::IDENTITY,
+            forward: planet.spawn.forward,
+            up: planet.spawn.up,
+        };
+        let mut camera = CameraRig::new(vehicle, &settings);
+        let initial_position = camera.state.position;
+        vehicle.position += vehicle.forward * 2.0;
+        let desired_position = chase_pose(
+            vehicle,
+            vehicle.forward,
+            CHASE_HEIGHT,
+            settings.camera_tilt_degrees,
+        )
+        .0;
+
+        camera.update(
+            &planet,
+            vehicle,
+            vehicle.forward * 8.0,
+            [0.0; 2],
+            false,
+            false,
+            &settings,
+            1.0 / 120.0,
+        );
+        assert!(camera.state.position.distance(initial_position) > 0.0);
+        assert!(camera.state.position.distance(desired_position) > 0.5);
+        let interpolated = camera.interpolated_state(0.5);
+        assert!(interpolated.position.distance(initial_position) > 0.0);
+        assert!(interpolated.position.distance(camera.state.position) > 0.0);
+
+        for _ in 0..240 {
+            camera.update(
+                &planet,
+                vehicle,
+                Vec3::ZERO,
+                [0.0; 2],
+                false,
+                false,
+                &settings,
+                1.0 / 120.0,
+            );
+        }
+        assert!(camera.state.position.distance(desired_position) < 0.01);
     }
 }

@@ -209,7 +209,7 @@ The minimum shippable version includes:
 
 The vehicle is a small, rounded-square hover mower with a belly-mounted deck directly beneath its chassis. It should read as a charming utility machine rather than a weaponized racing vehicle. Its largely symmetric silhouette intentionally avoids implying that one travel direction is privileged.
 
-The shippable baseline model uses a compact, layered, chamfered shell with a centered canopy and four exposed corner hover pods connected by short dark outriggers. Each pod has a sturdy upper housing and a bright cyan lower emitter. The emitters may pulse subtly, but all four pads must remain individually legible from the standard camera. A recessed circular deck beneath the body communicates the centered cutting footprint without competing with the hover-pad silhouette.
+The shippable baseline model uses a compact, layered, chamfered shell with a centered canopy and four exposed corner hover pods connected by short dark outriggers. Each pod has a sturdy upper housing and a bright cyan lower emitter. The emitters may pulse subtly, but all four pads must remain individually legible from the standard camera. A recessed circular deck stays close to the lawn while the chassis floats visibly above it, communicating both the centered cutting footprint and the hover gap without competing with the pad silhouette.
 
 ### 7.2 Movement model
 
@@ -227,7 +227,7 @@ Handling is arcade-like:
 - no manual gears;
 - forgiving collision response with minimal pinballing.
 
-The car may momentarily unload over bumps, but signed hover-pad suspension and strong radial attraction keep it glued to the lawn at boost speed. Nose-first tumbling is strongly damped, and the mower does not cut while it is too far above the lawn.
+The car may momentarily unload over bumps, but signed hover-pad suspension and strong radial attraction keep it glued to the lawn at boost speed. Nose-first tumbling is strongly damped, and the mower does not cut while it is too far above the lawn. A render-only presentation rig filters small physics corrections and lets the chassis lean into acceleration, overshoot slightly while braking, and breathe vertically above the authoritative deck. This motion must not alter collision, cutting, steering, or scoring.
 
 ### 7.3 Recommended baseline tuning
 
@@ -408,7 +408,7 @@ Post-MVP challenges may include:
 
 ### 11.1 Standard camera
 
-The standard camera is a mostly top-down local-radial chase view. Its default angle is tipped approximately 12 degrees from vertical and shifted slightly behind the mower, revealing the vehicle's depth without losing the whole-globe composition. It aims a short distance beneath the mower so the planet remains comfortably framed in the undistorted 90-degree perspective projection. Horizontal camera input temporarily rotates screen heading while vertical input adjusts height without changing the chosen tilt.
+The standard camera is a mostly top-down local-radial chase view. Its default angle is tipped approximately 12 degrees from vertical and shifted slightly behind the mower, revealing the vehicle's depth without losing the whole-globe composition. It aims a short distance beneath the mower so the planet remains comfortably framed in the undistorted 90-degree perspective projection. Horizontal camera input temporarily rotates screen heading while vertical input adjusts height without changing the chosen tilt. Position and aim use a lightly under-damped follow spring, allowing the mower to move briefly within the frame before the camera catches up. Camera and vehicle poses are interpolated on the same render timeline so elasticity reads as intentional motion rather than fixed-tick judder.
 
 The camera must not rotate to follow velocity: strafing and reversing leave the chassis facing screen-up. It must not snap at geographic poles because the planet has no gameplay-facing longitude frame.
 
