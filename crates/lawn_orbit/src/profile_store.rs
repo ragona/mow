@@ -10,6 +10,20 @@ pub struct ProfileStore {
 }
 
 impl ProfileStore {
+    #[cfg(test)]
+    pub(crate) fn temporary(name: &str) -> Self {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "lawn-orbit-{name}-{}-{nonce}.ron",
+                std::process::id()
+            )),
+        }
+    }
+
     #[must_use]
     pub fn discover() -> Self {
         let path = ProjectDirs::from("games", "OpenAI", "Lawn Orbit").map_or_else(

@@ -319,10 +319,15 @@ impl PlanetGenerator {
         }
 
         let mut class_rng = stage_rng(self.version, seed, attempt, 2);
-        let target_rock_ratio = class_rng.random_range(
-            (1.0 - self.config.mowable_ratio_max + 0.01)
-                ..(1.0 - self.config.mowable_ratio_min - 0.01),
-        );
+        let rock_min = 1.0 - self.config.mowable_ratio_max;
+        let rock_max = 1.0 - self.config.mowable_ratio_min;
+        // Retain the existing seeded distribution for normal worlds. Narrow
+        // ranges (including exactly zero rock) must not produce an empty RNG range.
+        let target_rock_ratio = if rock_max - rock_min > 0.02 {
+            class_rng.random_range((rock_min + 0.01)..(rock_max - 0.01))
+        } else {
+            (rock_min + rock_max) * 0.5
+        };
         classify_rock(&mut terrain, target_rock_ratio);
         remove_tiny_grass_islands(&mut terrain, self.config.required_reachable_ratio);
 

@@ -13,7 +13,7 @@ use lawn_core::{
     config::GeneratorConfig,
     flow::GameState,
     input::{Action, InputSnapshot},
-    planet::{Planet, TUTORIAL_SEED},
+    planet::TUTORIAL_SEED,
     profile::{Profile, QualityPreset, RecordKey},
     run::{GameMode, RunState, TutorialStage},
     score::Results,
@@ -54,8 +54,25 @@ enum UiCommand {
     ToggleFavorite(WorldSeed),
 }
 
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
+const EDITOR_SCENE_INSET: f32 = 356.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerationPurpose {
+    Preview,
+    Play,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WorldRecipe {
+    settings: WorldEditorSettings,
+    seed: WorldSeed,
+}
+
 struct PendingGeneration {
-    receiver: mpsc::Receiver<Result<Planet, String>>,
+    recipe: WorldRecipe,
+    purpose: GenerationPurpose,
+    receiver: mpsc::Receiver<Result<RunState, String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,9 +114,21 @@ impl WorldEditorSettings {
             * (5.0 / f32::from(peak_clusters)).sqrt())
         .clamp(0.4, 0.75);
 
-        let rock_coverage = (self.rock_coverage_percent / 100.0).clamp(0.08, 0.24);
-        config.mowable_ratio_min = (1.0 - rock_coverage - 0.05).clamp(0.68, 0.9);
-        config.mowable_ratio_max = (1.0 - rock_coverage + 0.05).clamp(0.76, 0.97);
+        let rock_coverage = (self.rock_coverage_percent / 100.0).clamp(0.0, 0.24);
+        if rock_coverage == 0.0 {
+            config.mountain_count_min = 0;
+            config.mountain_count_max = 0;
+            config.mowable_ratio_min = 1.0;
+            config.mowable_ratio_max = 1.0;
+        } else {
+            let tolerance = (rock_coverage * 0.5).min(0.05);
+            config.mowable_ratio_min = 1.0 - rock_coverage - tolerance;
+            config.mowable_ratio_max = 1.0 - rock_coverage + tolerance;
+            // Small rock amounts also taper the outcroppings into the lawn.
+            let peak_scale = (rock_coverage / 0.08).min(1.0);
+            config.mountain_height_min *= peak_scale;
+            config.mountain_height_max *= peak_scale;
+        }
 
         let radius_scale = config.base_radius / baseline.base_radius.max(1.0);
         config.pass_clearance = (baseline.pass_clearance * radius_scale).clamp(3.4, 6.2);
@@ -113,7 +142,7 @@ impl WorldEditorSettings {
     fn meadow() -> Self {
         Self {
             planet_radius: 14.0,
-            rock_coverage_percent: 8.0,
+            rock_coverage_percent: 0.0,
             peak_clusters: 3,
             peak_height: 2.8,
             rolling_amplitude: 0.3,
@@ -150,6 +179,9 @@ pub struct LawnOrbitApp {
     profile_store: ProfileStore,
     results: Option<Results>,
     pending_generation: Option<PendingGeneration>,
+    preview_recipe: Option<WorldRecipe>,
+    preview_attempt: Option<WorldRecipe>,
+    preview_queued_at: Option<Instant>,
     seed_text: String,
     confirmation: Option<ConfirmAction>,
     last_stats: FrameStats,
@@ -168,6 +200,14 @@ impl LawnOrbitApp {
             Profile::default()
         });
         let game_config = GameConfig::shipping().context("shipping gameplay config is invalid")?;
+        Self::with_config(profile_store, profile, game_config)
+    }
+
+    fn with_config(
+        profile_store: ProfileStore,
+        profile: Profile,
+        game_config: GameConfig,
+    ) -> Result<Self> {
         let planet = PlanetGenerator::new(
             lawn_core::planet::CURRENT_GENERATOR_VERSION,
             game_config.generator.clone(),
@@ -202,6 +242,9 @@ impl LawnOrbitApp {
             profile_store,
             results: None,
             pending_generation: None,
+            preview_recipe: None,
+            preview_attempt: None,
+            preview_queued_at: None,
             seed_text: TUTORIAL_SEED.to_string(),
             confirmation: None,
             last_stats: FrameStats::default(),
@@ -344,57 +387,162 @@ impl LawnOrbitApp {
         let Some(pending) = &self.pending_generation else {
             return;
         };
-        let Ok(result) = pending.receiver.try_recv() else {
-            return;
+        let result = match pending.receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(
+                "The planet worker stopped before finishing. Try another setting or seed.".into(),
+            ),
         };
+        let recipe = pending.recipe;
+        let purpose = pending.purpose;
         self.pending_generation = None;
+        // Leaving the editor must never let a late preview replace a live run
+        // or navigate back into the editor on completion.
+        if purpose == GenerationPurpose::Preview && self.state != GameState::WorldEditor {
+            return;
+        }
         match result {
-            Ok(planet) => {
-                self.profile
-                    .record_seed(planet.generator_version, planet.world_seed);
-                self.seed_text = planet.world_seed.to_string();
-                self.run = RunState::new(
-                    planet,
-                    GameMode::FreeMow,
-                    self.game_config.vehicle.clone(),
-                    self.game_config.job.clone(),
-                    &self.profile.settings.accessibility,
-                    !self.profile.tutorial_completed,
-                );
+            Ok(run) => {
+                self.run = run;
                 if let Some(renderer) = &mut self.renderer {
                     renderer.upload_planet(&self.run);
                 }
                 self.results = None;
-                self.state = GameState::Playing;
-                self.survey_started = Some(Instant::now());
                 self.clock = FixedStepClock::default();
-                self.last_frame = Instant::now();
-                self.save_profile();
+                self.status_message = None;
+                if purpose == GenerationPurpose::Play {
+                    self.enter_sandbox();
+                } else {
+                    self.run.paused = true;
+                    self.preview_recipe = Some(recipe);
+                    self.survey_started = None;
+                }
             }
             Err(error) => {
-                self.status_message = Some(format!("Planet generation failed: {error}"));
+                if purpose == GenerationPurpose::Play || self.editor_recipe() == Some(recipe) {
+                    self.status_message = Some(format!("Planet generation failed: {error}"));
+                }
                 self.state = GameState::WorldEditor;
             }
         }
     }
 
+    fn editor_recipe(&self) -> Option<WorldRecipe> {
+        self.seed_text.parse().ok().map(|seed| WorldRecipe {
+            settings: self.world_editor,
+            seed,
+        })
+    }
+
+    fn update_editor_preview(&mut self) {
+        if self.state != GameState::WorldEditor || self.settings_open {
+            self.preview_queued_at = None;
+            return;
+        }
+        let Some(recipe) = self.editor_recipe() else {
+            self.preview_queued_at = None;
+            return;
+        };
+        if self.preview_recipe == Some(recipe) {
+            self.preview_queued_at = None;
+            return;
+        }
+        // Coalesce slider events into one latest request. A running worker is
+        // allowed to finish, so continuous dragging still shows intermediate
+        // worlds instead of indefinitely postponing every preview.
+        let queued_at = self.preview_queued_at.get_or_insert_with(Instant::now);
+        if self.pending_generation.is_some()
+            || self.preview_attempt == Some(recipe)
+            || queued_at.elapsed() < PREVIEW_INTERVAL
+        {
+            return;
+        }
+        self.preview_queued_at = None;
+        self.preview_attempt = Some(recipe);
+        self.spawn_generation(recipe, GenerationPurpose::Preview);
+    }
+
     fn start_generation(&mut self, seed: WorldSeed) {
-        let config = self
-            .world_editor
+        let recipe = WorldRecipe {
+            settings: self.world_editor,
+            seed,
+        };
+        if self.preview_recipe == Some(recipe) && self.pending_generation.is_none() {
+            // The visible world already has full grass, mowing, and collision
+            // data. Enter that exact world without another generation or upload.
+            self.enter_sandbox();
+            return;
+        }
+        self.spawn_generation(recipe, GenerationPurpose::Play);
+        self.state = if self.pending_generation.is_some() {
+            GameState::Loading
+        } else {
+            GameState::WorldEditor
+        };
+    }
+
+    fn spawn_generation(&mut self, recipe: WorldRecipe, purpose: GenerationPurpose) {
+        let config = recipe
+            .settings
             .generator_config(&self.game_config.generator);
         let generator = PlanetGenerator::new(lawn_core::planet::CURRENT_GENERATOR_VERSION, config);
+        let vehicle = self.game_config.vehicle.clone();
+        let job = self.game_config.job.clone();
+        let accessibility = self.profile.settings.accessibility.clone();
         let (sender, receiver) = mpsc::channel();
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("planet-generator".into())
             .spawn(move || {
-                let _span = tracing::info_span!("planet_generation", seed = %seed).entered();
-                let result = generator.generate(seed).map_err(|error| error.to_string());
+                let started = Instant::now();
+                let result = generator
+                    .generate(recipe.seed)
+                    .map(|planet| {
+                        RunState::new(
+                            planet,
+                            GameMode::FreeMow,
+                            vehicle,
+                            job,
+                            &accessibility,
+                            false,
+                        )
+                    })
+                    .map_err(|error| error.to_string());
+                tracing::debug!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "planet prepared"
+                );
                 let _ = sender.send(result);
-            })
-            .expect("planet generation worker should start");
-        self.pending_generation = Some(PendingGeneration { receiver });
-        self.state = GameState::Loading;
+            });
+        if let Err(error) = worker {
+            self.status_message = Some(format!("Could not start planet generation: {error}"));
+            return;
+        }
+        self.pending_generation = Some(PendingGeneration {
+            recipe,
+            purpose,
+            receiver,
+        });
         self.status_message = None;
+    }
+
+    fn enter_sandbox(&mut self) {
+        self.profile.record_seed(
+            self.run.planet.generator_version,
+            self.run.planet.world_seed,
+        );
+        self.seed_text = self.run.planet.world_seed.to_string();
+        self.run.paused = false;
+        self.run.tutorial_enabled = !self.profile.tutorial_completed;
+        self.state = GameState::Playing;
+        self.preview_recipe = None;
+        self.preview_attempt = None;
+        self.preview_queued_at = None;
+        self.survey_started = Some(Instant::now());
+        self.clock = FixedStepClock::default();
+        self.pending_input = InputSnapshot::default();
+        self.last_frame = Instant::now();
+        self.save_profile();
     }
 
     fn random_seed() -> WorldSeed {
@@ -419,6 +567,21 @@ impl LawnOrbitApp {
             .snap_to_pose(position, glam::Vec3::ZERO, glam::Vec3::Y);
     }
 
+    fn animate_editor_camera(&mut self, context: &egui::Context) {
+        let screen = context.content_rect();
+        let aspect = ((screen.width() - EDITOR_SCENE_INSET) / screen.height()).max(0.25);
+        let vertical_half_fov = self.run.camera.state.field_of_view_degrees.to_radians() * 0.5;
+        let half_fov = vertical_half_fov.min((vertical_half_fov.tan() * aspect).atan());
+        // A fixed envelope fits even the largest craggy planet. Keeping the
+        // distance independent of the sliders makes radius changes visible.
+        let distance = 32.0 / half_fov.sin() * 1.08;
+        let angle = self.app_started.elapsed().as_secs_f32() * 0.08;
+        let direction = glam::Vec3::new(angle.cos(), 0.4, angle.sin()).normalize();
+        self.run
+            .camera
+            .snap_to_pose(direction * distance, glam::Vec3::ZERO, glam::Vec3::Y);
+    }
+
     fn draw_ui(&mut self, context: &egui::Context) -> Vec<UiCommand> {
         let mut commands = Vec::new();
         match self.state {
@@ -430,10 +593,9 @@ impl LawnOrbitApp {
             GameState::Results => self.draw_results(context, &mut commands),
             GameState::Boot => {}
         }
-        if matches!(
-            self.state,
-            GameState::Title | GameState::WorldEditor | GameState::Results
-        ) {
+        if self.state == GameState::WorldEditor {
+            self.animate_editor_camera(context);
+        } else if matches!(self.state, GameState::Title | GameState::Results) {
             self.animate_planet_camera(0.08);
         }
         if self.state == GameState::Loading {
@@ -493,147 +655,156 @@ impl LawnOrbitApp {
     fn draw_world_editor(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
         let classic = WorldEditorSettings::from_generator(&self.game_config.generator);
         egui::Window::new("World Editor")
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .id(egui::Id::new("world-editor"))
+            .fixed_pos([16.0, 16.0])
+            .fixed_size([324.0, context.content_rect().height() - 32.0])
             .collapsible(false)
             .resizable(false)
             .show(context, |ui| {
-                ui.set_min_width(610.0);
-                egui::ScrollArea::vertical()
-                    .max_height(470.0)
-                    .show(ui, |ui| {
+                ui.set_width(310.0);
+                ui.spacing_mut().item_spacing.y = 5.0;
                 ui.heading("Shape a tiny planet");
-                ui.label("Tune the world, choose a seed, then drop straight into the sandbox.");
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Presets").strong());
-                    if ui.button("Meadow").clicked() {
-                        self.world_editor = WorldEditorSettings::meadow();
-                    }
-                    if ui.button("Classic").clicked() {
-                        self.world_editor = classic;
-                    }
-                    if ui.button("Craggy").clicked() {
-                        self.world_editor = WorldEditorSettings::craggy();
-                    }
-                });
-                ui.separator();
-                egui::Grid::new("world-editor-terrain")
-                    .num_columns(3)
-                    .spacing([14.0, 10.0])
+                ui.label("Watch your world change as you adjust it.");
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height((context.content_rect().height() - 270.0).max(160.0))
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.label("Planet size");
+                        ui.horizontal(|ui| {
+                            for (label, preset) in [
+                                ("Meadow", WorldEditorSettings::meadow()),
+                                ("Classic", classic),
+                                ("Craggy", WorldEditorSettings::craggy()),
+                            ] {
+                                if ui
+                                    .selectable_label(self.world_editor == preset, label)
+                                    .clicked()
+                                {
+                                    self.world_editor = preset;
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.spacing_mut().slider_width = 208.0;
+                        ui.label("Planet radius");
                         ui.add(
                             egui::Slider::new(&mut self.world_editor.planet_radius, 12.0..=22.0)
                                 .suffix(" m"),
                         );
-                        ui.small("Radius");
-                        ui.end_row();
-
+                        ui.add_space(6.0);
                         ui.label("Rockiness");
                         ui.add(
                             egui::Slider::new(
                                 &mut self.world_editor.rock_coverage_percent,
-                                8.0..=24.0,
+                                0.0..=24.0,
                             )
+                            .step_by(1.0)
                             .suffix("%"),
                         );
-                        ui.small("Approx. coverage");
-                        ui.end_row();
-
-                        ui.label("Peak clusters");
-                        ui.add(egui::Slider::new(
-                            &mut self.world_editor.peak_clusters,
-                            2..=9,
-                        ));
-                        ui.small("Landmark groups");
-                        ui.end_row();
-
-                        ui.label("Peak size");
-                        ui.add(
-                            egui::Slider::new(&mut self.world_editor.peak_height, 2.0..=7.0)
-                                .suffix(" m"),
-                        );
-                        ui.small("Average height");
-                        ui.end_row();
-
+                        ui.small("0% gives you an uninterrupted grassy world.");
+                        ui.add_space(6.0);
+                        ui.add_enabled_ui(self.world_editor.rock_coverage_percent > 0.0, |ui| {
+                            ui.label("Peak clusters");
+                            ui.add(egui::Slider::new(
+                                &mut self.world_editor.peak_clusters,
+                                2..=9,
+                            ));
+                            ui.add_space(6.0);
+                            ui.label("Peak size");
+                            ui.add(
+                                egui::Slider::new(&mut self.world_editor.peak_height, 2.0..=7.0)
+                                    .suffix(" m"),
+                            );
+                        });
+                        ui.add_space(6.0);
                         ui.label("Rolling terrain");
                         ui.add(
-                            egui::Slider::new(
-                                &mut self.world_editor.rolling_amplitude,
-                                0.0..=1.2,
-                            )
-                            .suffix(" m"),
+                            egui::Slider::new(&mut self.world_editor.rolling_amplitude, 0.0..=1.2)
+                                .suffix(" m"),
                         );
-                        ui.small("Lawn undulation");
-                        ui.end_row();
-                    });
-                let circumference = std::f32::consts::TAU * self.world_editor.planet_radius;
-                let grassy_surface = 4.0
-                    * std::f32::consts::PI
-                    * self.world_editor.planet_radius.powi(2)
-                    * (1.0 - self.world_editor.rock_coverage_percent / 100.0);
-                ui.label(format!(
-                    "≈ {circumference:.0} m around · {grassy_surface:.0} m² of grass · unscored sandbox"
-                ));
-                ui.small("World settings are applied when the planet is grown; gameplay handling stays unchanged.");
-                ui.separator();
-                ui.heading("Planet seed");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.seed_text);
-                    if ui.button("New seed").clicked() {
-                        self.seed_text = Self::random_seed().to_string();
-                    }
-                    if ui.button("Copy").clicked() {
-                        context.copy_text(self.seed_text.clone());
-                    }
-                });
-                ui.label("Enter hexadecimal, decimal, or any memorable phrase.");
-                let parsed = self.seed_text.parse::<WorldSeed>();
-                if let Ok(seed) = parsed {
-                    let favorite = self
-                        .profile
-                        .favorite_seeds
-                        .contains(&(lawn_core::planet::CURRENT_GENERATOR_VERSION.0, seed.0));
-                    if ui
-                        .button(if favorite {
-                            "★ Remove favorite"
-                        } else {
-                            "☆ Favorite seed"
-                        })
-                        .clicked()
-                    {
-                        commands.push(UiCommand::ToggleFavorite(seed));
-                    }
-                }
-                let recent: Vec<_> = self.profile.recent_seeds.iter().take(4).copied().collect();
-                if !recent.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Recent:");
-                        for key in recent {
-                            if ui.small_button(key.seed.to_string()).clicked() {
-                                self.seed_text = key.seed.to_string();
+                        ui.separator();
+                        ui.label(RichText::new("Planet seed").strong());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.seed_text).desired_width(290.0),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("New seed").clicked() {
+                                self.seed_text = Self::random_seed().to_string();
+                            }
+                            if ui.button("Copy").clicked() {
+                                context.copy_text(self.seed_text.clone());
+                            }
+                            if let Some(recipe) = self.editor_recipe() {
+                                let favorite = self.profile.favorite_seeds.contains(&(
+                                    lawn_core::planet::CURRENT_GENERATOR_VERSION.0,
+                                    recipe.seed.0,
+                                ));
+                                if ui
+                                    .button(if favorite {
+                                        "★ Saved"
+                                    } else {
+                                        "☆ Favorite"
+                                    })
+                                    .clicked()
+                                {
+                                    commands.push(UiCommand::ToggleFavorite(recipe.seed));
+                                }
+                            }
+                        });
+                        ui.small("A number, hexadecimal seed, or memorable phrase.");
+                        let recent: Vec<_> =
+                            self.profile.recent_seeds.iter().take(4).copied().collect();
+                        if !recent.is_empty() {
+                            ui.label("Recent seeds");
+                            for key in recent {
+                                if ui.small_button(key.seed.to_string()).clicked() {
+                                    self.seed_text = key.seed.to_string();
+                                }
                             }
                         }
                     });
-                }
-                if parsed.is_err() {
-                    ui.colored_label(Color32::LIGHT_RED, "Enter a seed before growing the planet.");
-                }
-                ui.add_space(10.0);
+                ui.separator();
+                let recipe = self.editor_recipe();
+                let ready = recipe.is_some()
+                    && recipe == self.preview_recipe
+                    && self.pending_generation.is_none();
+                ui.horizontal(|ui| {
+                    if ready {
+                        ui.colored_label(Color32::from_rgb(188, 239, 125), "● Live preview");
+                    } else if recipe.is_none() {
+                        ui.colored_label(
+                            Color32::LIGHT_RED,
+                            "Enter a seed to preview your planet.",
+                        );
+                    } else if self.pending_generation.is_none() && self.preview_attempt == recipe {
+                        if ui.button("Retry preview").clicked() {
+                            self.preview_attempt = None;
+                        }
+                    } else {
+                        ui.spinner();
+                        ui.label("Updating planet…");
+                    }
+                });
+                let circumference = std::f32::consts::TAU * self.world_editor.planet_radius;
+                ui.small(format!(
+                    "≈ {circumference:.0} m around · mow at your own pace"
+                ));
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            parsed.is_ok(),
-                            egui::Button::new(RichText::new("Grow Planet").strong()),
+                            ready,
+                            egui::Button::new(RichText::new("Start Mowing").strong())
+                                .min_size(egui::vec2(200.0, 34.0)),
                         )
                         .clicked()
                     {
-                        commands.push(UiCommand::Start(parsed.unwrap()));
+                        commands.push(UiCommand::Start(recipe.unwrap().seed));
                     }
                     if ui.button("Back").clicked() {
                         commands.push(UiCommand::Back);
                     }
                 });
-                    });
             });
     }
 
@@ -1047,7 +1218,11 @@ impl LawnOrbitApp {
     fn process_commands(&mut self, commands: Vec<UiCommand>, event_loop: &ActiveEventLoop) {
         for command in commands {
             match command {
-                UiCommand::OpenEditor => self.state = GameState::WorldEditor,
+                UiCommand::OpenEditor => {
+                    self.state = GameState::WorldEditor;
+                    self.preview_attempt = None;
+                    self.status_message = None;
+                }
                 UiCommand::OpenSettings => {
                     self.settings_return_state = self.state;
                     self.settings_open = true;
@@ -1079,6 +1254,8 @@ impl LawnOrbitApp {
                 UiCommand::ReturnToEditor => {
                     self.state = GameState::WorldEditor;
                     self.run.paused = true;
+                    self.preview_attempt = None;
+                    self.status_message = None;
                 }
                 UiCommand::Submit => self.finish_run(),
                 UiCommand::Retry => {
@@ -1169,12 +1346,18 @@ impl LawnOrbitApp {
         egui_state.handle_platform_output(&window, full_output.platform_output);
         self.egui_state = Some(egui_state);
         self.process_commands(ui_commands, event_loop);
+        self.update_editor_preview();
         let pixels_per_point = context.pixels_per_point();
         let paint_jobs = context.tessellate(full_output.shapes, pixels_per_point);
 
         let Some(renderer) = &mut self.renderer else {
             return;
         };
+        renderer.set_scene_left_inset(if self.state == GameState::WorldEditor {
+            EDITOR_SCENE_INSET / context.content_rect().width()
+        } else {
+            0.0
+        });
         // Texture deltas (especially the first font atlas) are independent of
         // surface acquisition. Upload them before any recoverable early return,
         // or one initial Outdated/Occluded frame would desynchronize egui's
@@ -1352,7 +1535,248 @@ fn format_time(seconds: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lawn_core::planet::CURRENT_GENERATOR_VERSION;
+    use lawn_core::{
+        config::{JobConfig, VehicleTuning},
+        planet::{CURRENT_GENERATOR_VERSION, SurfaceMaterial},
+        profile::AccessibilitySettings,
+    };
+
+    fn preview_app() -> LawnOrbitApp {
+        let mut app = LawnOrbitApp::with_config(
+            ProfileStore::temporary("editor-preview"),
+            Profile::default(),
+            GameConfig {
+                generator: GeneratorConfig::test_quality(),
+                ..GameConfig::default()
+            },
+        )
+        .unwrap();
+        app.state = GameState::WorldEditor;
+        app
+    }
+
+    fn request_preview(app: &mut LawnOrbitApp) {
+        app.preview_queued_at = Instant::now().checked_sub(PREVIEW_INTERVAL);
+        app.update_editor_preview();
+    }
+
+    fn finish_preview(app: &mut LawnOrbitApp) {
+        // Wait for the real worker, then deliver its result through the normal
+        // polling path, without relying on frame timings or sleeps.
+        let pending = app.pending_generation.as_mut().expect("preview requested");
+        let result = pending
+            .receiver
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        sender.send(result).unwrap();
+        pending.receiver = receiver;
+        app.poll_generation();
+    }
+
+    #[test]
+    fn live_preview_coalesces_edits_and_enters_the_displayed_planet() {
+        let mut app = preview_app();
+        request_preview(&mut app);
+        let first = app.pending_generation.as_ref().unwrap().recipe;
+        for seed in 40..50 {
+            app.seed_text = seed.to_string();
+            app.world_editor = WorldEditorSettings::meadow();
+            request_preview(&mut app);
+            assert_eq!(app.pending_generation.as_ref().unwrap().recipe, first);
+        }
+        finish_preview(&mut app);
+        assert_eq!(app.preview_recipe, Some(first));
+        request_preview(&mut app);
+        finish_preview(&mut app);
+        assert_eq!(app.run.planet.world_seed, WorldSeed(49));
+        assert!(app.run.planet.mountains.is_empty());
+        assert_eq!(app.preview_recipe, app.editor_recipe());
+        assert_eq!(app.state, GameState::WorldEditor);
+        assert!(app.run.paused);
+        assert!(!app.run.tutorial_enabled);
+        assert!(app.profile.recent_seeds.is_empty());
+        assert!(!app.profile_store.path().exists());
+
+        let hash = app.run.planet.deterministic_hash;
+        app.start_generation(WorldSeed(49));
+        assert_eq!(app.state, GameState::Playing);
+        assert!(app.pending_generation.is_none());
+        assert_eq!(app.run.planet.deterministic_hash, hash);
+        assert!(!app.run.paused);
+        assert!(app.run.tutorial_enabled);
+        assert!(app.preview_recipe.is_none());
+        assert_eq!(app.profile.recent_seeds.len(), 1);
+
+        // Re-entering the editor prepares a fresh lawn even at the same seed.
+        app.state = GameState::WorldEditor;
+        app.run.simulation_seconds = 12.0;
+        request_preview(&mut app);
+        finish_preview(&mut app);
+        assert_eq!(app.run.simulation_seconds, 0.0);
+        assert_eq!(app.run.planet.deterministic_hash, hash);
+        std::fs::remove_file(app.profile_store.path()).unwrap();
+    }
+
+    #[test]
+    fn leaving_the_editor_ignores_inflight_previews() {
+        let mut app = preview_app();
+        let original = app.run.planet.deterministic_hash;
+        app.world_editor = WorldEditorSettings::meadow();
+        request_preview(&mut app);
+        app.state = GameState::Title;
+        finish_preview(&mut app);
+        assert_eq!(app.state, GameState::Title);
+        assert_eq!(app.run.planet.deterministic_hash, original);
+        assert!(app.preview_recipe.is_none());
+        assert!(!app.profile_store.path().exists());
+    }
+
+    #[test]
+    fn preview_worker_failure_does_not_loop_and_a_changed_seed_recovers() {
+        let mut app = preview_app();
+        let recipe = app.editor_recipe().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        app.preview_attempt = Some(recipe);
+        app.pending_generation = Some(PendingGeneration {
+            recipe,
+            purpose: GenerationPurpose::Preview,
+            receiver,
+        });
+        app.poll_generation();
+        assert!(app.status_message.is_some());
+        request_preview(&mut app);
+        assert!(app.pending_generation.is_none());
+        app.seed_text.clear();
+        request_preview(&mut app);
+        assert!(app.pending_generation.is_none());
+        app.seed_text = "a new world".into();
+        request_preview(&mut app);
+        finish_preview(&mut app);
+        assert!(app.status_message.is_none());
+        assert_eq!(app.preview_recipe, app.editor_recipe());
+    }
+
+    #[test]
+    fn zero_rockiness_removes_all_outcroppings_and_retains_mowable_grass() {
+        let baseline = GeneratorConfig {
+            grass_roots_per_square_meter: 1.0,
+            ..GeneratorConfig::test_quality()
+        };
+        for radius in [12.0, 22.0] {
+            for roll in [0.0, 1.2] {
+                let settings = WorldEditorSettings {
+                    planet_radius: radius,
+                    rolling_amplitude: roll,
+                    ..WorldEditorSettings::meadow()
+                };
+                let generator = PlanetGenerator::new(
+                    CURRENT_GENERATOR_VERSION,
+                    settings.generator_config(&baseline),
+                );
+                for seed in 0..4 {
+                    let planet = generator.generate(WorldSeed(seed)).unwrap();
+                    assert!(planet.mountains.is_empty());
+                    assert!(
+                        planet
+                            .terrain
+                            .iter()
+                            .all(|cell| cell.material == SurfaceMaterial::Grass
+                                && cell.mountain_influence == 0.0)
+                    );
+                    assert_eq!(planet.validation.mowable_ratio, 1.0);
+                    assert_eq!(planet.validation.reachable_ratio, 1.0);
+                    assert!(!planet.grass_roots.is_empty());
+                    assert!(planet.spawn.position.is_finite());
+                    let accessibility = AccessibilitySettings {
+                        boost_enabled: false,
+                        ..AccessibilitySettings::default()
+                    };
+                    let mut run = RunState::new(
+                        planet,
+                        GameMode::FreeMow,
+                        VehicleTuning::default(),
+                        JobConfig::default(),
+                        &accessibility,
+                        true,
+                    );
+                    run.tutorial_stage = TutorialStage::Boost;
+                    run.tick(InputSnapshot::default(), &accessibility);
+                    assert_eq!(run.tutorial_stage, TutorialStage::WaitForLocator);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn editor_layout_keeps_controls_and_play_action_beside_the_planet() {
+        fn play_text_rect(shape: &egui::epaint::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    (text.galley.text() == "Start Mowing").then_some(text.visual_bounding_rect())
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(play_text_rect),
+                _ => None,
+            }
+        }
+        let mut app = preview_app();
+        app.preview_recipe = app.editor_recipe();
+        for seed in 0..4 {
+            app.profile
+                .record_seed(CURRENT_GENERATOR_VERSION, WorldSeed(seed));
+        }
+        for size in [
+            egui::vec2(960.0, 540.0),
+            egui::vec2(1280.0, 720.0),
+            egui::vec2(1920.0, 1080.0),
+        ] {
+            let context = egui::Context::default();
+            configure_egui_style(&context);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for frame in 0..3 {
+                let output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        time: Some(f64::from(frame)),
+                        ..egui::RawInput::default()
+                    },
+                    |ui| {
+                        app.draw_ui(ui.ctx());
+                    },
+                );
+                if frame < 2 {
+                    continue;
+                }
+                let panel = context
+                    .memory(|memory| memory.area_rect(egui::Id::new("world-editor")))
+                    .unwrap();
+                assert!(
+                    panel.right() < EDITOR_SCENE_INSET,
+                    "panel overlaps planet at {size:?}: {panel:?}"
+                );
+                assert!(
+                    screen.contains_rect(panel),
+                    "panel clipped at {size:?}: {panel:?}"
+                );
+                let play_text = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| {
+                        play_text_rect(&shape.shape).map(|rect| (shape.clip_rect, rect))
+                    })
+                    .expect("play action is painted");
+                assert!(
+                    play_text.0.contains_rect(play_text.1),
+                    "play action is clipped at {size:?}: panel {panel:?}, text/clip {play_text:?}"
+                );
+                assert!(
+                    screen.contains_rect(play_text.1),
+                    "play action is offscreen at {size:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn classic_world_editor_values_preserve_shipping_shape() {
@@ -1376,6 +1800,18 @@ mod tests {
             WorldEditorSettings::meadow(),
             WorldEditorSettings::from_generator(&baseline),
             WorldEditorSettings::craggy(),
+            WorldEditorSettings {
+                rock_coverage_percent: 1.0,
+                ..WorldEditorSettings::craggy()
+            },
+            WorldEditorSettings {
+                rock_coverage_percent: 2.0,
+                ..WorldEditorSettings::craggy()
+            },
+            WorldEditorSettings {
+                rock_coverage_percent: 7.0,
+                ..WorldEditorSettings::craggy()
+            },
             WorldEditorSettings {
                 planet_radius: 12.0,
                 rock_coverage_percent: 24.0,

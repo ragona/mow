@@ -23,7 +23,10 @@ cargo run --release -p lawn_orbit
 
 The first launch opens the title screen. Open the world editor to choose a terrain
 preset or tune planet size, rockiness, peak count, peak height, and rolling terrain.
-Enter a hexadecimal, decimal, or phrase seed, then grow the planet and mow freely.
+The planet updates beside the controls as you edit, including when you change its
+seed. Rockiness can be set to 0% for a fully grassy world without outcroppings;
+the Meadow preset starts there. Enter a hexadecimal, decimal, or phrase seed,
+then choose Start Mowing to enter the exact planet shown in the preview.
 Settings plus favorite and recent seeds are saved atomically in the operating
 system's per-user application-data directory.
 

@@ -298,7 +298,11 @@ impl RunState {
             TutorialStage::Boost
                 if self.vehicle.state.boost_active || !accessibility.boost_enabled =>
             {
-                Some(TutorialStage::Rock)
+                Some(if self.planet.validation.mowable_ratio == 1.0 {
+                    TutorialStage::WaitForLocator
+                } else {
+                    TutorialStage::Rock
+                })
             }
             TutorialStage::Rock | TutorialStage::WaitForLocator
                 if self.mowing.coverage() >= self.job_config.locator_coverage =>

@@ -127,6 +127,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
+    scene_left_inset: f32,
     msaa_samples: u32,
     capabilities: RenderCapabilities,
     frame_uniform: wgpu::Buffer,
@@ -321,6 +322,7 @@ impl Renderer {
             queue,
             surface_config,
             size,
+            scene_left_inset: 0.0,
             msaa_samples,
             capabilities,
             frame_uniform,
@@ -420,6 +422,12 @@ impl Renderer {
         self.high_contrast = high_contrast;
         self.reduced_particles = reduced_particles;
         self.grass_height_multiplier = grass_height_multiplier.clamp(0.4, 1.6);
+    }
+
+    /// Reserves a fraction of the window for editor controls, centering the
+    /// perspective scene in the remaining space without stretching the planet.
+    pub fn set_scene_left_inset(&mut self, fraction: f32) {
+        self.scene_left_inset = fraction.clamp(0.0, 0.8);
     }
 
     pub fn upload_planet(&mut self, run: &RunState) {
@@ -794,17 +802,19 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
     let view = Mat4::look_at_rh(camera.position, camera.target, camera.up);
     let projection = Mat4::perspective_rh(
         camera.field_of_view_degrees.to_radians(),
-        aspect,
+        aspect * (1.0 - renderer.scene_left_inset),
         0.08,
         180.0,
     );
+    let scene_placement = Mat4::from_translation(Vec3::new(renderer.scene_left_inset, 0.0, 0.0))
+        * Mat4::from_scale(Vec3::new(1.0 - renderer.scene_left_inset, 1.0, 1.0));
     let light_direction = Vec3::new(-0.42, -0.81, -0.38).normalize();
     let light_position = -light_direction * 75.0;
     let light_view = Mat4::look_at_rh(light_position, Vec3::ZERO, Vec3::Y);
     let light_projection = Mat4::orthographic_rh(-42.0, 42.0, -42.0, 42.0, 1.0, 150.0);
     let locator = run.locator_direction().unwrap_or(Vec3::ZERO);
     FrameUniformGpu {
-        view_proj: (projection * view).to_cols_array_2d(),
+        view_proj: (scene_placement * projection * view).to_cols_array_2d(),
         light_view_proj: (light_projection * light_view).to_cols_array_2d(),
         camera_time: [
             camera.position.x,

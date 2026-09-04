@@ -361,7 +361,9 @@ Rated modes record substantial rock collisions, but glancing contact should not 
 
 The current prototype has one play experience rather than a mode selection: an unscored planet sandbox. Coverage remains visible because it makes mowing progress legible, but there is no required completion threshold, timer, rating, penalty, submission action, or forced results flow. The player may regrow the current lawn, generate a new seed, or return to the world editor at any time.
 
-The world editor is the primary pre-play screen. It exposes friendly, bounded controls for planet radius, approximate rock coverage, peak clusters, peak height, rolling-terrain amplitude, and seed. Meadow, Classic, and Craggy presets provide useful starting points. Edited planets still pass the same connectivity, clearance, and deterministic-generation validation as default planets.
+The world editor is the primary pre-play screen. It exposes friendly, bounded controls for planet radius, approximate rock coverage, peak clusters, peak height, rolling-terrain amplitude, and seed. Meadow, Classic, and Craggy presets provide useful starting points. Rockiness ranges from 0% to 24%; at 0% both outcroppings and rock material disappear, peak controls are disabled, and rolling terrain remains adjustable. Meadow starts at 0% rockiness. Edited planets still pass the same connectivity, clearance, and deterministic-generation validation as default planets.
+
+The planet updates live beside the controls as settings or the seed change. Generation and gameplay preparation run in one background worker, with rapid edits coalesced into the latest requested world. The current preview stays visible while the next is prepared. Previewing does not advance simulation, tutorial progress, or seed history. Start Mowing becomes available once the preview matches the controls and enters that same prepared planet without regenerating it.
 
 ### 10.2 Deferred objectives
 
@@ -420,7 +422,7 @@ A miniature globe map is not required during ordinary play. After 95% coverage, 
 
 ### 12.2 World editor
 
-The world editor replaces mode selection in the current prototype. It presents terrain presets, bounded shape controls, seed entry and history, a concise size/grass summary, and one clear action to grow the planet and enter the sandbox.
+The world editor replaces mode selection in the current prototype. A narrow panel on the left presents terrain presets, bounded shape controls, seed entry and history, preview status, and Start Mowing. Controls scroll on smaller windows while preview status and the play action remain accessible. The rotating planet is centered in the remaining space, with a stable camera distance so changes in planet radius are visible.
 
 ### 12.3 Menus
 
