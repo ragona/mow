@@ -462,6 +462,8 @@ The shipping presentation is a golden-hour toy garden. Warm directional sunlight
 
 Ambient fill increases smoothly in shade, reaching 1.85 times the base ambient on the fully unlit side. Full sunlight retains its original contrast and warm highlights, while grass and rock remain readable around the whole globe.
 
+The visible grass–rock contour comes from a continuous, seam-safe field derived from the authoritative cell classifications. Terrain evaluates a narrow antialiased material threshold within each triangle; the grass fringe tapers to the same contour. Stone uses restrained world-space mineral planes, seams, and grain with distance filtering, rather than interpolated random vertex colors.
+
 Key visual cues:
 
 - exaggerated horizon curvature;
@@ -690,6 +692,8 @@ Generation should be divided into explicit stages with independently derived ran
 
 The full-resolution render mesh and lower-frequency collision mesh derive from the same sampled height data. Upload immutable render patches, collision geometry, and grass-root buffers after generation. Release temporary generation data that is not required for mowing, recovery, or regeneration diagnostics.
 
+The shipping 64-cell terrain is rendered at 128 subdivisions per cube face. Already-dense custom terrain above 128 retains its original resolution. Shared cube-edge and corner vertices are welded, and area-weighted normals come from the actual rendered triangles. This refinement affects presentation only; generation, collision, authoritative mowing, and saved seeds retain their original data.
+
 ### 18.7 Terrain classification and collisions
 
 The generator derives grass and rock from mountain influence, elevation, and local slope. Classification should be morphological rather than noisy at the mower scale: eliminate tiny rock specks, narrow grass slivers, and boundaries the vehicle cannot read at speed.
@@ -719,6 +723,8 @@ struct GrassRootGpu {
 ```
 
 This 16-byte representation allows approximately 400,000 roots to occupy about 6.4 MiB on the shipping-size planet. Patch-relative quantization is allowed if measurement shows a useful bandwidth or memory improvement, but a more complex representation is not required initially.
+
+The immutable generator record remains 16 bytes. During upload the renderer appends one cached float for the grass-fringe weight, making the GPU instance stride 20 bytes. The shared terrain coverage is sampled once per root during preparation; drawing adds no texture fetch. Root order, patch ranges, and stable LOD prefixes are preserved, including roots collapsed on the rock side of the visual contour.
 
 Construct the tangent frame locally without geographic coordinates. One robust method selects the Cartesian axis least aligned with the surface normal, crosses it with the normal to produce the first tangent, and derives the second tangent by another cross product. Apply the root's random rotation within that frame.
 

@@ -12,9 +12,11 @@ use winit::{dpi::PhysicalSize, window::Window};
 use crate::{
     bloom::Bloom,
     gpu_profiler::GpuProfiler,
+    grass_roots::{self, RenderGrassRoot},
     interaction::{GrassInteraction, INTERACTION_RESOLUTION},
     mesh::{self, MeshVertex, TuftVertex},
     particles::ClippingParticles,
+    surface::TerrainSurface,
     vehicle_presentation::VehiclePresentation,
 };
 
@@ -1015,7 +1017,8 @@ fn create_planet_resources(
     queue: &wgpu::Queue,
     run: &RunState,
 ) -> PlanetResources {
-    let (terrain_vertices, terrain_indices) = mesh::build_terrain(&run.planet);
+    let surface = TerrainSurface::new(&run.planet);
+    let (terrain_vertices, terrain_indices) = mesh::build_terrain(&run.planet, &surface);
     // Include the hover vehicle and tallest blades beyond the terrain shell.
     let world_radius = terrain_vertices
         .iter()
@@ -1034,10 +1037,11 @@ fn create_planet_resources(
         bytemuck::cast_slice(&terrain_indices),
         wgpu::BufferUsages::INDEX,
     );
-    let roots: &[u8] = if run.planet.grass_roots.is_empty() {
-        &[0; 16]
+    let prepared_roots = grass_roots::prepare(&run.planet.grass_roots, &surface);
+    let roots: &[u8] = if prepared_roots.is_empty() {
+        &[0; std::mem::size_of::<RenderGrassRoot>()]
     } else {
-        bytemuck::cast_slice(&run.planet.grass_roots)
+        bytemuck::cast_slice(&prepared_roots)
     };
     let grass_roots = create_init_buffer(device, "grass roots", roots, wgpu::BufferUsages::VERTEX);
     let resolution = run.mowing.resolution();
@@ -1339,7 +1343,7 @@ fn create_pipelines(
             module: &grass_shader,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[TuftVertex::layout(), mesh::root_layout()],
+            buffers: &[TuftVertex::layout(), grass_roots::layout()],
         },
         primitive: wgpu::PrimitiveState {
             cull_mode: None,

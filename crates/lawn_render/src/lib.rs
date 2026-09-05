@@ -2,10 +2,12 @@
 
 mod bloom;
 mod gpu_profiler;
+mod grass_roots;
 mod interaction;
 mod mesh;
 mod particles;
 mod renderer;
+mod surface;
 mod vehicle_presentation;
 
 pub use renderer::{

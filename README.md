@@ -13,6 +13,8 @@ shadows, chalky rocks, a rounded coral-and-cream mower, and a painted dusk sky.
 Mowing leaves short brushed stubble and a small fan of tumbling clippings. Soft
 HDR bloom highlights the hover engines on Standard and High quality; Low skips
 the bloom passes. The cream-and-sage interface keeps the planet in view.
+Rock edges use a continuous material contour shared with a short grass fringe,
+and the stone has crisp mineral detail that fades at distance to avoid shimmer.
 
 No reusable game engine is used. Gameplay simulation is headless and independent
 of the renderer, which keeps world generation, mowing, scoring, and vehicle rules
@@ -88,7 +90,7 @@ cargo run --release -p lawn_tools -- validate 1000
 cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
 # Verifies bloom thresholding, blur, HDR color, and resize behavior by readback.
 cargo test -p lawn_render gpu_bloom -- --ignored --nocapture
-# Includes hover-wash stability and interpolation across every cube edge/corner.
+# Includes hover wash, cube-edge interpolation, and the grass/rock material edge.
 cargo test -p lawn_render gpu_ -- --ignored --nocapture
 ```
 

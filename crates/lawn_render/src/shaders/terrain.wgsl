@@ -74,8 +74,55 @@ fn mower_contact(world_position: vec3<f32>) -> f32 {
     return 1.0 - footprint * nearby * frame.mower_position.w * 0.43;
 }
 
+struct StoneSurface {
+    color: vec3<f32>,
+    normal: vec3<f32>,
+};
+
+fn stone_grain(cell: vec3<f32>) -> f32 {
+    let p = fract(cell * vec3<f32>(0.1031, 0.1030, 0.0973));
+    let q = p + vec3<f32>(dot(p, p.yzx + vec3<f32>(33.33)));
+    return fract((q.x + q.y) * q.z);
+}
+
+fn stone_surface(position: vec3<f32>, normal: vec3<f32>, pixel_width: vec3<f32>) -> StoneSurface {
+    // Two broad oblique fields form quiet mineral planes, without projecting
+    // a repeating stripe texture or interpolating random mesh-vertex colors.
+    let axis_a = vec3<f32>(0.47, 0.73, -0.29);
+    let axis_b = vec3<f32>(-0.61, 0.23, 0.51);
+    let phase_a = dot(position, axis_a);
+    let phase_b = dot(position, axis_b) + 1.7;
+    let mineral = sin(phase_a) + sin(phase_b) * 0.42;
+    let mineral_width = dot(pixel_width, abs(axis_a) + abs(axis_b) * 0.42);
+    let edge_width = max(mineral_width * 0.65, 0.008);
+    let plane = smoothstep(-edge_width, edge_width, mineral);
+    var color = mix(vec3<f32>(0.56, 0.535, 0.47), vec3<f32>(0.65, 0.615, 0.54), plane);
+
+    // A sparse pale mineral seam follows only part of the plane boundary.
+    // Fade it once its width falls below a pixel instead of shimmering.
+    let seam = 1.0 - smoothstep(0.022, 0.052, abs(mineral));
+    let seam_visibility = 1.0 - smoothstep(0.035, 0.11, mineral_width);
+    let seam_extent = smoothstep(0.15, 0.55, sin(phase_b));
+    color += vec3<f32>(0.045, 0.042, 0.034) * seam * seam_visibility * seam_extent;
+
+    // Fine grain affects albedo only, never silhouette or specular normals.
+    let grain_visibility = 1.0 - smoothstep(0.35, 0.90, length(pixel_width) * 22.0);
+    let grain = stone_grain(floor(position * 22.0)) - 0.5;
+    color += vec3<f32>(grain * 0.018 * grain_visibility);
+
+    let gradient = axis_a * cos(phase_a) + axis_b * cos(phase_b) * 0.42;
+    let tangent_gradient = gradient - normal * dot(gradient, normal);
+    let detail_visibility = 1.0 - smoothstep(0.3, 0.9, mineral_width);
+    let detail_normal = normalize(normal - tangent_gradient * (0.035 * detail_visibility));
+    return StoneSurface(color, detail_normal);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // Derivatives remain outside material branches and early emissive returns.
+    let pixel_width = fwidth(input.world_position);
+    let coverage_width = max(fwidth(input.variation) * 0.65, 0.0001);
+    var n = normalize(input.normal);
     var base: vec3<f32>;
     var gloss = 0.0;
     var gloss_power = 24.0;
@@ -83,10 +130,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         case 0u: {
             let radial = normalize(input.world_position);
             let region = 0.5 + 0.5 * sin(dot(radial, vec3<f32>(5.2, 7.8, 3.6)));
-            base = mix(vec3<f32>(0.065, 0.22, 0.085), vec3<f32>(0.16, 0.33, 0.09), region * 0.85 + input.variation * 0.15);
+            base = mix(vec3<f32>(0.065, 0.22, 0.085), vec3<f32>(0.16, 0.33, 0.09), region);
+            // Terrain variation carries interpolated rock coverage. A narrow
+            // screen-space threshold makes a crisp continuous material edge.
+            let rock = smoothstep(0.5 - coverage_width, 0.5 + coverage_width, input.variation);
+            if (rock > 0.0) {
+                let stone = stone_surface(input.world_position, n, pixel_width);
+                base = mix(base, stone.color, rock);
+                n = normalize(mix(n, stone.normal, rock));
+                gloss = 0.035 * rock;
+                gloss_power = 12.0;
+            }
         }
         case 1u: {
-            base = mix(vec3<f32>(0.46, 0.43, 0.36), vec3<f32>(0.76, 0.70, 0.58), input.variation);
+            let stone = stone_surface(input.world_position, n, pixel_width);
+            base = stone.color;
+            n = stone.normal;
             gloss = 0.035;
             gloss_power = 12.0;
         }
@@ -113,7 +172,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         case 7u: { return vec4<f32>(0.62, 1.25, 0.20, 1.0); }
         default: { base = vec3<f32>(0.12, 0.20, 0.23); }
     }
-    let n = normalize(input.normal);
     let light = normalize(-frame.light_epoch.xyz);
     let diffuse = max(dot(n, light), 0.0);
     let shadow = shadow_factor(input.shadow_position);

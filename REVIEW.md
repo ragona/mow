@@ -158,3 +158,28 @@ The complete render smoke test still passes at 1×/2×/4× MSAA.
 The release build passed. A final native visual check was unavailable because
 the Mac was locked; the numerical interaction and shader checks above completed
 without a window server.
+
+## Smooth rock boundaries and stone detail
+
+- Replaced nearest-cell, flat triangle material IDs with a shared continuous
+  coverage field. A local one-cell-radius filter rounds stair steps, and a
+  narrow fragment threshold keeps the visible grass/rock color edge crisp.
+- Grass tapers to that same contour and collapses on its rock side, avoiding
+  tall tufts over the exposed stone. Its cached fringe weight adds four bytes
+  to the GPU instance record; generator roots and patch indices stay unchanged.
+- Refined shipping render terrain from 64 to 128 subdivisions, welded cube
+  edges/corners, and derived normals from the rendered triangles. Custom
+  resolutions above 128 retain their original density. This adds 147,456 static
+  terrain triangles at shipping settings without changing collision geometry.
+- Removed interpolated random rock colors in favor of restrained world-space
+  mineral planes, seams, and distance-filtered grain.
+
+Validation: 139 ordinary tests and all five explicit GPU checks passed on Apple
+M2, along with strict workspace clippy and formatting. New checks cover a closed
+terrain mesh, shared seam normals, bounded refinement, continuous material
+coverage, unchanged generated data, and matching grass-fringe coverage. A GPU
+readback verifies that a single triangle contains both materials with a narrow
+antialiased transition. The complete render smoke still passes at 1×/2×/4× MSAA.
+The release build passed, and the final contour was inspected in the live Craggy
+preview and game. That scene showed 16.71 ms median / 17.68 ms p95 frame time on
+this M2 with approximately 325,000 visible tufts; these are local observations.

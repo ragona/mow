@@ -18,6 +18,7 @@ struct VertexInput {
     @location(0) local_position: vec3<f32>,
     @location(1) root_position: vec3<f32>,
     @location(2) packed_normal_seed: u32,
+    @location(3) turf_weight: f32,
 };
 
 struct VertexOutput {
@@ -151,6 +152,13 @@ fn hash01(value: u32) -> f32 {
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    if (input.turf_weight < 0.001) {
+        // Keep stable root/patch indexing while removing blades beyond the
+        // shared rock contour. Every vertex in the tuft collapses offscreen.
+        output.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return output;
+    }
     let packed = input.packed_normal_seed;
     let normal_encoded = vec2<f32>(f32(packed & 0x3ffu), f32((packed >> 10u) & 0x3ffu)) / 1023.0 * 2.0 - vec2<f32>(1.0);
     let surface_normal = decode_oct(normal_encoded);
@@ -173,7 +181,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let individual_variation = hash01(seed * 1597334677u);
     let height_scale = max(frame.options.w, 0.1);
     let sqrt_height_scale = sqrt(height_scale);
-    let uncut_height = mix(0.39, 0.63, individual_variation * 0.50 + regional_variation * 0.50) * height_scale;
+    let uncut_height = mix(0.39, 0.63, individual_variation * 0.50 + regional_variation * 0.50) * height_scale * input.turf_weight;
     // Custom worlds can have extremely short grass. Cutting must never make
     // those blades taller, and their comb bend must shrink with the stubble.
     let stubble_height = min(0.064, uncut_height * 0.22);
@@ -184,7 +192,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let view = camera_delta / max(camera_distance, 0.0001);
     let distant_width = mix(1.0, 1.42, smoothstep(20.0, 58.0, camera_distance));
     let tall_width = mix(1.0, sqrt_height_scale, 0.55);
-    let horizontal = (rotated_tangent * input.local_position.x + rotated_bitangent * input.local_position.z) * distant_width * tall_width;
+    let horizontal = (rotated_tangent * input.local_position.x + rotated_bitangent * input.local_position.z) * distant_width * tall_width * input.turf_weight;
     let wind_phase = dot(root_direction, vec3<f32>(13.1, 9.7, 17.3)) * 5.0 + frame.camera_time.w * 1.25;
     let wind = (rotated_tangent * sin(wind_phase) + rotated_bitangent * cos(wind_phase * 0.73)) * (0.043 * sqrt_height_scale);
     let comb = decode_oct(vec2<f32>(state.yz) / 255.0 * 2.0 - vec2<f32>(1.0));
@@ -213,7 +221,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let bent_height = sqrt(max(upright_height * upright_height - dot(bend, bend), 0.0));
     let world_position = input.root_position + surface_normal * bent_height + horizontal + bend;
 
-    var output: VertexOutput;
     output.clip_position = frame.view_proj * vec4<f32>(world_position, 1.0);
     output.world_position = world_position;
     output.normal = normalize(surface_normal * 0.72 + normalize(horizontal + rotated_tangent * 0.001) * 0.28 - bend * 0.8);
