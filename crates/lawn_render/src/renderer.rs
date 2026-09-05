@@ -16,6 +16,7 @@ use crate::{
     interaction::{GrassInteraction, INTERACTION_RESOLUTION},
     mesh::{self, MeshVertex, TuftVertex},
     particles::ClippingParticles,
+    sky::SkyMap,
     surface::TerrainSurface,
     vehicle_presentation::VehiclePresentation,
 };
@@ -161,6 +162,7 @@ pub struct Renderer {
     composite_bind_group: wgpu::BindGroup,
     composite_uniform: wgpu::Buffer,
     bloom: Bloom,
+    sky: SkyMap,
     targets: RenderTargets,
     shadow: ShadowTarget,
     planet: PlanetResources,
@@ -308,6 +310,7 @@ impl Renderer {
             targets.world_texture.width(),
             targets.world_texture.height(),
         );
+        let sky = SkyMap::new(&device, &queue);
         let composite_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("garden atmosphere and display uniform"),
             size: std::mem::size_of::<CompositeUniformGpu>() as u64,
@@ -321,6 +324,7 @@ impl Renderer {
                 &targets.world_view,
                 bloom.view(),
                 &composite_uniform,
+                sky.view(),
             );
         let (tuft_vertices_data, tuft_indices_data) = mesh::build_tuft();
         let tuft_vertices = create_init_buffer(
@@ -389,6 +393,7 @@ impl Renderer {
             composite_bind_group,
             composite_uniform,
             bloom,
+            sky,
             targets,
             shadow,
             planet,
@@ -469,6 +474,7 @@ impl Renderer {
             &self.targets.world_view,
             self.bloom.view(),
             &self.composite_uniform,
+            self.sky.view(),
         );
     }
 
@@ -1504,6 +1510,7 @@ fn create_composite_resources(
     world_view: &wgpu::TextureView,
     bloom_view: &wgpu::TextureView,
     uniform: &wgpu::Buffer,
+    sky_view: &wgpu::TextureView,
 ) -> (
     wgpu::RenderPipeline,
     wgpu::BindGroupLayout,
@@ -1549,18 +1556,30 @@ fn create_composite_resources(
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("world upscale sampler"),
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         ..wgpu::SamplerDescriptor::default()
     });
-    let bind_group =
-        create_composite_bind_group(device, &layout, &sampler, world_view, bloom_view, uniform);
+    let bind_group = create_composite_bind_group(
+        device, &layout, &sampler, world_view, bloom_view, uniform, sky_view,
+    );
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("tone mapping and upscale shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
@@ -1609,6 +1628,7 @@ fn create_composite_bind_group(
     world_view: &wgpu::TextureView,
     bloom_view: &wgpu::TextureView,
     uniform: &wgpu::Buffer,
+    sky_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("world composite bind group"),
@@ -1629,6 +1649,10 @@ fn create_composite_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(sky_view),
             },
         ],
     })

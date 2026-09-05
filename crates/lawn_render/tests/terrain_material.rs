@@ -31,6 +31,7 @@ fn probe_vertex(@builtin(vertex_index) index: u32) -> VertexOutput {
     output.material = 0u;
     output.variation = uv.x;
     output.shadow_position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+    output.detail = vec4<f32>(0.0);
     return output;
 }
 
@@ -179,8 +180,8 @@ fn probe_vertex(@builtin(vertex_index) index: u32) -> VertexOutput {
                     );
                 } else if x >= 33 {
                     assert!(
-                        color[0] > color[1],
-                        "the same triangle must become stone beyond the contour: x={x}, {color:?}"
+                        color[0].max(color[2]) > color[1],
+                        "the same triangle must become blue-violet meteor rock or copper beyond the contour: x={x}, {color:?}"
                     );
                 }
             }

@@ -8,13 +8,18 @@ unscored mowing sandbox, a first-play tutorial, accessibility settings, and
 keyboard/gamepad input. Planets can range from compact meadows to larger rocky
 worlds and are viewed from an undistorted, mostly top-down chase camera.
 
-The visual style is a golden-hour toy garden: leafy grass, warm sunlight and cool
-shadows, chalky rocks, a rounded coral-and-cream mower, and a painted dusk sky.
+The visual style is a cozy garden growing on a weathered meteor: leafy grass,
+warm sunlight and cool shadows, blue-violet stone, and a coral-and-cream mower.
+Shallow craters, chipped rims, pale fractures, copper inclusions, and mossy
+crevices give the exposed rock character. A textured nebula sky, varied stars,
+and a little companion moon surround the garden as the camera orbits.
 Mowing leaves short brushed stubble and a small fan of tumbling clippings. Soft
 HDR bloom highlights the hover engines on Standard and High quality; Low skips
 the bloom passes. The cream-and-sage interface keeps the planet in view.
 Rock edges use a continuous material contour shared with a short grass fringe,
 and the stone has crisp mineral detail that fades at distance to avoid shimmer.
+Crater relief is prepared with the static render mesh and fades out before the
+lawn; it does not change generated worlds, driving, mowing, or saved seeds.
 
 No reusable game engine is used. Gameplay simulation is headless and independent
 of the renderer, which keeps world generation, mowing, scoring, and vehicle rules
@@ -92,6 +97,10 @@ cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
 cargo test -p lawn_render gpu_bloom -- --ignored --nocapture
 # Includes hover wash, cube-edge interpolation, and the grass/rock material edge.
 cargo test -p lawn_render gpu_ -- --ignored --nocapture
+# Optional repeatable 1024×768 art reference; writes PPMs at each supported MSAA count.
+# LAWN_CAPTURE_VIEW also accepts night, detail, or moon. Captures draw all roots,
+# so their one-frame GPU timings are not representative gameplay benchmarks.
+LAWN_CAPTURE_DIR=/tmp/lawn-art LAWN_CAPTURE_VIEW=day cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
 ```
 
 The test suite exercises deterministic generation (including compact grass-root

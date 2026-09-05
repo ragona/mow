@@ -13,14 +13,16 @@ pub struct MeshVertex {
     pub normal: [f32; 3],
     pub material: u32,
     pub variation: f32,
+    pub detail: [f32; 4],
 }
 
 impl MeshVertex {
-    pub const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Uint32,
-        3 => Float32
+        3 => Float32,
+        4 => Float32x4
     ];
 
     #[must_use]
@@ -52,7 +54,7 @@ impl TuftVertex {
     }
 }
 
-pub const VEHICLE_VERTEX_BUFFER_SIZE: u64 = 32 * 1024;
+pub const VEHICLE_VERTEX_BUFFER_SIZE: u64 = 48 * 1024;
 pub const VEHICLE_INDEX_BUFFER_SIZE: u64 = 16 * 1024;
 
 pub fn build_terrain(planet: &Planet, surface: &TerrainSurface) -> (Vec<MeshVertex>, Vec<u32>) {
@@ -78,11 +80,18 @@ pub fn build_terrain(planet: &Planet, surface: &TerrainSurface) -> (Vec<MeshVert
                 let index = existing.unwrap_or_else(|| {
                     let direction = Vec3::from_array(lattice.map(|value| value as f32)).normalize();
                     let index = vertices.len() as u32;
+                    let coverage = surface.rock_coverage(direction);
+                    let (deformation, detail) = surface.meteor_detail(direction, coverage);
+                    let undeformed = planet.surface_point(direction);
+                    // Valid custom rolling terrain can approach zero radius.
+                    // Keep a positive shell even in an unusually deep valley.
+                    let deformation = deformation.max(-undeformed.length() * 0.20);
                     vertices.push(MeshVertex {
-                        position: planet.surface_point(direction).to_array(),
+                        position: (undeformed + direction * deformation).to_array(),
                         normal: [0.0; 3],
                         material: 0,
-                        variation: surface.rock_coverage(direction),
+                        variation: coverage,
+                        detail,
                     });
                     if boundary {
                         boundary_vertices.insert(lattice, index);
@@ -572,6 +581,7 @@ fn push_model_vertex(
         normal: world_normal.to_array(),
         material,
         variation: 0.5,
+        detail: [0.0; 4],
     });
 }
 
@@ -650,6 +660,7 @@ fn add_box(
                 normal: world_normal.to_array(),
                 material,
                 variation: 0.5,
+                detail: [0.0; 4],
             });
         }
         indices.extend_from_slice(&[start, start + 2, start + 1, start + 1, start + 2, start + 3]);
@@ -684,7 +695,9 @@ mod tests {
         assert!(indices.len() * std::mem::size_of::<u32>() <= VEHICLE_INDEX_BUFFER_SIZE as usize);
         assert!(vertices.iter().all(|vertex| {
             let normal = Vec3::from_array(vertex.normal);
-            normal.is_finite() && (normal.length() - 1.0).abs() < 1.0e-4
+            normal.is_finite()
+                && (normal.length() - 1.0).abs() < 1.0e-4
+                && vertex.detail == [0.0; 4]
         }));
 
         let glowing_pad_quadrants =
@@ -749,7 +762,7 @@ mod tests {
         let resolution = terrain_render_resolution(planet.terrain.resolution()) as usize;
         assert_eq!(vertices.len(), 6 * resolution * resolution + 2);
         assert_eq!(indices.len(), 36 * resolution * resolution);
-        assert_eq!(std::mem::size_of::<MeshVertex>(), 32);
+        assert_eq!(std::mem::size_of::<MeshVertex>(), 48);
 
         let mut positions = std::collections::HashSet::with_capacity(vertices.len());
         for vertex in &vertices {
@@ -762,6 +775,23 @@ mod tests {
             assert_eq!(vertex.material, 0);
             assert!((0.0..=1.0).contains(&vertex.variation));
             assert!((vertex.variation - surface.rock_coverage(direction)).abs() < 1.0e-4);
+            let displacement = position.length() - planet.surface_radius(direction);
+            assert!((-0.3601..=0.0701).contains(&displacement));
+            assert!(
+                vertex
+                    .detail
+                    .into_iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+            );
+            if vertex.variation <= 0.75 {
+                // Reconstructing the direction from rounded positions adds a
+                // little error to the procedural height resample.
+                assert!(
+                    displacement.abs() < 1.0e-4,
+                    "craters moved the grass surface: {displacement}"
+                );
+                assert_eq!(vertex.detail, [0.0; 4]);
+            }
             assert!(
                 positions.insert(vertex.position.map(f32::to_bits)),
                 "unwelded vertex"
@@ -855,7 +885,7 @@ mod tests {
             (6 * shipping_resolution * shipping_resolution + 2) * std::mem::size_of::<MeshVertex>();
         let index_bytes =
             36 * shipping_resolution * shipping_resolution * std::mem::size_of::<u32>();
-        assert!(vertex_bytes + index_bytes < 6 * 1024 * 1024);
+        assert!(vertex_bytes + index_bytes < 7 * 1024 * 1024);
     }
 
     #[test]

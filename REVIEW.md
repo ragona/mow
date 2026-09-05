@@ -183,3 +183,42 @@ antialiased transition. The complete render smoke still passes at 1×/2×/4× MS
 The release build passed, and the final contour was inspected in the live Craggy
 preview and game. That scene showed 16.71 ms median / 17.68 ms p95 frame time on
 this M2 with approximately 325,000 visible tufts; these are local observations.
+
+## Overgrown asteroid art pass
+
+- Replaced chalky stone with matte blue-violet meteor facets, pale fractures,
+  sparse copper inclusions, and moss in crevices near the lawn. Fine features
+  use pixel-footprint filtering; the material adds no texture fetches or loops.
+- Added deterministic shallow impact bowls and chipped raised rims to exposed
+  rock. A conservative spherical lookup limits crater work to nearby candidates
+  during mesh preparation. Relief vanishes before the grass fringe; generated
+  worlds, root identity, collision, mowing, and saves keep their original data.
+- Replaced the screen-space dusk backdrop with a world-anchored nebula and star
+  panorama. The 1024-pixel cube faces contain indigo, violet, teal and warm dust,
+  5,000 varied stars, rare glints, and a cratered companion moon that occludes
+  stars. Linear-light mip generation keeps small stars stable through zoom.
+- The sky bakes once using a bounded set of startup workers, occupies 32 MiB
+  including mipmaps, and needs one filtered lookup for visible sky pixels.
+  Resize and planet edits reuse it. A quiet Apple M2 release bake took 661 ms.
+- Added repeatable sunny, shaded, close-up, and moon reference captures using
+  the actual render passes. Inspection led to sharper stars, deeper matte stone,
+  larger legible craters, and restrained rims rather than blurry pale patches.
+
+The terrain vertex stride grows from 32 to 48 bytes for cached crater masks,
+bringing shipping static terrain buffers to 6.75 MiB without extra triangles.
+The fixed mower vertex allocation grows to 48 KiB to retain its 1,024-vertex
+capacity. Crater placement and sky baking do no per-frame CPU work.
+
+Validation: 145 ordinary workspace tests and all six explicit GPU checks passed
+on Apple M2, along with formatting and strict workspace Clippy. Crater checks
+cover deterministic placement, real bowl/rim geometry, unchanged grass, bounded
+relief, tiny valid worlds, and spatial pruning at cube seams. New sky readbacks
+exercise 182 directions across all cube faces, edges and corners, two camera
+origins, and both gamma and sRGB framebuffer paths (728 comparisons). Existing
+wash, grass interpolation, material-edge, bloom, and 1×/2×/4× MSAA checks pass.
+The release build passed. Native inspection covered the title, live Craggy
+editor, and active mowing with visible clippings. UI-driven scenes showed
+16.6–16.7 ms median frames and 17.7–33.6 ms p95 with roughly 323,000–368,000
+visible tufts on this M2; these are local observations, not an isolated benchmark
+or a guarantee of a locked frame rate. All-roots reference captures deliberately
+skip gameplay culling and should not be used as frame-time benchmarks.

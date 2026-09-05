@@ -458,17 +458,17 @@ Prompts disappear immediately after the corresponding action and do not repeat o
 
 Use a stylized, storybook miniature aesthetic with simplified forms, soft lighting, and strong material separation between tall grass, cut grass, and exposed rock. The sphere should look deliberately tiny rather than like a distant realistic planet.
 
-The shipping presentation is a golden-hour toy garden. Warm directional sunlight meets cool ambient shadows; rock is chalky, mower bodywork is coral enamel and cream, and hover pads have concentrated cyan emission. A dusty blue-to-peach sky, small round companion moon, and a soft camera-correct atmospheric rim frame the globe. Menus and the compact HUD use cream cards, pine text, sage controls, and coral primary actions.
+The shipping presentation is a cozy garden growing on a weathered meteor. Warm directional sunlight meets cool ambient shadows; exposed stone is dusty blue-violet with shallow craters, chipped rims, pale fractures, occasional copper inclusions, and moss in sheltered crevices. Mower bodywork is coral enamel and cream, and hover pads have concentrated cyan emission. A textured indigo, violet, and teal nebula sky with varied stars, a small cratered companion moon, and a soft camera-correct atmospheric rim frame the globe. The sky is anchored in world direction, so orbiting reveals the surrounding cosmos naturally. Menus and the compact HUD use cream cards, pine text, sage controls, and coral primary actions.
 
 Ambient fill increases smoothly in shade, reaching 1.85 times the base ambient on the fully unlit side. Full sunlight retains its original contrast and warm highlights, while grass and rock remain readable around the whole globe.
 
-The visible grass–rock contour comes from a continuous, seam-safe field derived from the authoritative cell classifications. Terrain evaluates a narrow antialiased material threshold within each triangle; the grass fringe tapers to the same contour. Stone uses restrained world-space mineral planes, seams, and grain with distance filtering, rather than interpolated random vertex colors.
+The visible grass–rock contour comes from a continuous, seam-safe field derived from the authoritative cell classifications. Terrain evaluates a narrow antialiased material threshold within each triangle; the grass fringe tapers to the same contour. Stone uses world-space mineral facets, seams, and grain with distance filtering. Shallow crater relief and its material masks are prepared once with the static render mesh and fade out before the lawn, preserving planted grass, collision geometry, and authoritative mowing.
 
 Key visual cues:
 
 - exaggerated horizon curvature;
 - a clean atmospheric rim or soft halo;
-- a sparse sky with a few large celestial objects;
+- a rich but quiet nebula sky with varied stars and a small companion moon;
 - generated mountain silhouettes readable from across the globe;
 - wind movement in uncut grass; and
 - restrained, toy-like proportions.

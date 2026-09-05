@@ -7,6 +7,7 @@ mod interaction;
 mod mesh;
 mod particles;
 mod renderer;
+mod sky;
 mod surface;
 mod vehicle_presentation;
 

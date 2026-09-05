@@ -1,4 +1,6 @@
 use super::*;
+
+mod sky;
 use lawn_core::{
     GameMode, GeneratorConfig, JobConfig, PlanetGenerator, VehicleTuning, WorldSeed,
     input::InputSnapshot, planet::CURRENT_GENERATOR_VERSION, profile::AccessibilitySettings,
@@ -55,6 +57,12 @@ fn grass_horizon_retains_elevated_roots_and_blades() {
 #[ignore = "requires a working wgpu graphics adapter"]
 fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
     pollster::block_on(async {
+        // Optional art references use the same real render passes as the smoke
+        // check, with shipping density and a repeatable camera/planet recipe.
+        let capture_dir = std::env::var_os("LAWN_CAPTURE_DIR").map(std::path::PathBuf::from);
+        let capture_view = std::env::var("LAWN_CAPTURE_VIEW").unwrap_or_else(|_| "day".into());
+        let capture = capture_dir.is_some();
+        let (width, height) = if capture { (1024, 768) } else { (64, 64) };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -91,15 +99,29 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             .contains(wgpu::Features::TIMESTAMP_QUERY)
             .then(|| GpuProfiler::new(&device, queue.get_timestamp_period()));
         let accessibility = AccessibilitySettings::default();
-        let planet = PlanetGenerator::new(
-            CURRENT_GENERATOR_VERSION,
+        let planet_config = if capture {
+            GeneratorConfig {
+                base_radius: 17.0,
+                mountain_count_min: 6,
+                mountain_count_max: 10,
+                mountain_height_min: 4.95,
+                mountain_height_max: 7.45,
+                rolling_amplitude: 1.0,
+                mowable_ratio_min: 0.75,
+                mowable_ratio_max: 0.85,
+                mountain_separation_radians: 0.46,
+                maximum_generation_attempts: 16,
+                ..GeneratorConfig::default()
+            }
+        } else {
             GeneratorConfig {
                 grass_roots_per_square_meter: 2.0,
                 ..GeneratorConfig::test_quality()
-            },
-        )
-        .generate(WorldSeed(21))
-        .unwrap();
+            }
+        };
+        let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, planet_config)
+            .generate(WorldSeed(21))
+            .unwrap();
         assert!(
             !planet.grass_roots.is_empty(),
             "smoke test must exercise grass vertex data"
@@ -168,15 +190,56 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             bytemuck::cast_slice(&tuft_indices),
             wgpu::BufferUsages::INDEX,
         );
-        let camera = Vec3::new(0.0, 25.0, 32.0);
+        let (camera, look_at) = if capture {
+            match capture_view.as_str() {
+                "night" => (Vec3::new(-30.0, -24.0, -34.0), Vec3::ZERO),
+                "moon" => {
+                    let moon = Vec3::new(-0.76, 0.15, -0.63).normalize();
+                    (
+                        (-moon + moon.cross(Vec3::Y) * 0.68).normalize() * 50.0,
+                        Vec3::ZERO,
+                    )
+                }
+                "detail" => {
+                    let mountain = run
+                        .planet
+                        .mountains
+                        .iter()
+                        .max_by(|a, b| {
+                            a.center
+                                .dot(Vec3::new(0.42, 0.81, 0.38))
+                                .total_cmp(&b.center.dot(Vec3::new(0.42, 0.81, 0.38)))
+                        })
+                        .unwrap();
+                    let target = run.planet.surface_point(mountain.center);
+                    (target + mountain.center * 11.0 + Vec3::Y * 2.0, target)
+                }
+                _ => (Vec3::new(0.0, 29.0, 38.0), Vec3::ZERO),
+            }
+        } else {
+            (Vec3::new(0.0, 25.0, 32.0), Vec3::ZERO)
+        };
         let uniform = FrameUniformGpu {
-            view_proj: (Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.08, 180.0)
-                * Mat4::look_at_rh(camera, Vec3::ZERO, Vec3::Y))
+            view_proj: (Mat4::perspective_rh(
+                60.0_f32.to_radians(),
+                width as f32 / height as f32,
+                0.08,
+                180.0,
+            ) * Mat4::look_at_rh(camera, look_at, Vec3::Y))
             .to_cols_array_2d(),
             light_view_proj: resources.light_view_proj.to_cols_array_2d(),
             camera_time: [camera.x, camera.y, camera.z, 1.0],
             light_epoch: [-0.42, -0.81, -0.38, 0.0],
-            options: [1.0, INTERACTION_RESOLUTION as f32, 0.0, 1.0],
+            options: [
+                1.0,
+                INTERACTION_RESOLUTION as f32,
+                0.0,
+                if capture {
+                    run.planet.config.grass_height_scale
+                } else {
+                    1.0
+                },
+            ],
             locator: [0.0; 4],
             mower_position: run.vehicle.state.transform.position.extend(1.0).to_array(),
             mower_forward: run.vehicle.state.transform.forward.extend(0.0).to_array(),
@@ -192,7 +255,7 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                     .extend(run.planet.config.base_radius + 0.6)
                     .to_array(),
                 sun_time: [0.42, 0.81, 0.38, 1.0],
-                display: [1.0, 0.0, 0.65, 0.20],
+                display: [width as f32 / height as f32, 0.0, 0.65, 0.20],
             }),
             wgpu::BufferUsages::UNIFORM,
         );
@@ -217,13 +280,14 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            width: 64,
-            height: 64,
+            width,
+            height,
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
         };
+        let sky = SkyMap::new(&device, &queue);
         for samples in counts {
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let targets = create_targets(&device, &config, samples, 1.0);
@@ -243,12 +307,13 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                 &targets.world_view,
                 bloom.view(),
                 &composite_uniform,
+                sky.view(),
             );
             let output = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("smoke output"),
                 size: wgpu::Extent3d {
-                    width: 64,
-                    height: 64,
+                    width,
+                    height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -261,7 +326,7 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
             let readback = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smoke readback"),
-                size: 64 * 64 * 4,
+                size: u64::from(width) * u64::from(height) * 4,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
@@ -403,13 +468,13 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                     buffer: &readback,
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(256),
-                        rows_per_image: Some(64),
+                        bytes_per_row: Some(width * 4),
+                        rows_per_image: Some(height),
                     },
                 },
                 wgpu::Extent3d {
-                    width: 64,
-                    height: 64,
+                    width,
+                    height,
                     depth_or_array_layers: 1,
                 },
             );
@@ -424,17 +489,36 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             receiver.recv().unwrap().unwrap();
             let pixels = readback.slice(..).get_mapped_range();
-            let center = &pixels[(32 * 64 + 32) * 4..][..4];
-            assert!(
-                center[0] > center[2] || center[1] > center[2],
-                "world center must show terrain, not blue sky: {center:?}"
-            );
+            if !capture {
+                let center = &pixels[((height / 2 * width + width / 2) * 4) as usize..][..4];
+                assert!(
+                    center[0] > center[2] || center[1] > center[2],
+                    "world center must show terrain, not blue sky: {center:?}"
+                );
+            }
             assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+            if let Some(directory) = &capture_dir {
+                use std::io::Write;
+                std::fs::create_dir_all(directory).unwrap();
+                let path = directory.join(format!("asteroid-{capture_view}-{samples}x.ppm"));
+                let mut output = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+                write!(output, "P6\n{width} {height}\n255\n").unwrap();
+                for pixel in pixels.chunks_exact(4) {
+                    output.write_all(&pixel[..3]).unwrap();
+                }
+                output.flush().unwrap();
+                println!("Saved {}", path.display());
+            }
             drop(pixels);
             readback.unmap();
             if let Some(profiler) = profiler.as_mut() {
                 profiler.begin_frame(&device);
                 let times = profiler.latest();
+                if capture {
+                    println!(
+                        "Reference {capture_view}, {samples}x MSAA GPU milliseconds: {times:?}"
+                    );
+                }
                 assert!(
                     [
                         times.interaction,
