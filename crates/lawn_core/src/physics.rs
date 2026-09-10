@@ -61,6 +61,7 @@ pub struct PhysicsWorld {
     pad_target_distance: f32,
     surface_glue_acceleration: f32,
     surface_glue_damping: f32,
+    cruise_speed: f32,
     grounded: bool,
 }
 
@@ -76,6 +77,7 @@ impl fmt::Debug for PhysicsWorld {
             .field("pad_target_distance", &self.pad_target_distance)
             .field("surface_glue_acceleration", &self.surface_glue_acceleration)
             .field("surface_glue_damping", &self.surface_glue_damping)
+            .field("cruise_speed", &self.cruise_speed)
             .field("grounded", &self.grounded)
             .finish()
     }
@@ -132,6 +134,7 @@ impl PhysicsWorld {
             pad_target_distance: (tuning.hover_height - 0.18).max(0.25),
             surface_glue_acceleration: tuning.surface_glue_acceleration,
             surface_glue_damping: tuning.surface_glue_damping,
+            cruise_speed: tuning.max_speed,
             grounded: true,
         };
         result.teleport(transform, Vec3::ZERO);
@@ -171,6 +174,27 @@ impl PhysicsWorld {
             let response = -(-input.drive_response.max(0.0) * dt).exp_m1() / dt;
             let drive_force = (desired_tangent - tangent_velocity) * (mass * response);
             body.add_force(glam_vector(drive_force), true);
+
+            // Supply the extra curve-following acceleration above cruise speed
+            // before suspension stretch has to produce it. Ordinary driving
+            // retains its tuned suspension response. Use the velocity this
+            // tick's servo will reach so boost has no outward head start.
+            // Airborne bodies still use the recovery glue.
+            let supported = pad_samples
+                .iter()
+                .filter(|sample| sample.supports_mowing())
+                .count()
+                >= 2;
+            if supported {
+                let radial_up = position.normalize_or(up);
+                let next_velocity = velocity + drive_force * (dt / mass);
+                let orbital_velocity = next_velocity - radial_up * next_velocity.dot(radial_up);
+                let extra_speed_squared = (orbital_velocity.length_squared()
+                    - self.cruise_speed * self.cruise_speed)
+                    .max(0.0);
+                let curve_acceleration = extra_speed_squared / position.length().max(0.1);
+                body.add_force(glam_vector(-radial_up * mass * curve_acceleration), true);
+            }
 
             // A light radial preload holds normal hover height. When every pad
             // loses the surface, strong damped magnetic attraction takes over
@@ -219,13 +243,15 @@ impl PhysicsWorld {
         }
 
         self.world.step();
-        self.grounded = pad_samples
+        // Cutting uses the resulting pose, so contact must describe that same
+        // pose rather than the pad distances from before integration.
+        let body = &self.world.bodies[self.vehicle_body];
+        let position = vector_to_glam(body.translation());
+        let rotation = rapier_rotation_to_glam(body.rotation());
+        self.grounded = self
+            .hover_pad_samples(position, rotation, up)
             .iter()
-            .filter(|sample| {
-                sample
-                    .hit
-                    .is_some_and(|hit| hit.distance <= sample.target_distance + 0.45)
-            })
+            .filter(|sample| sample.supports_mowing())
             .count()
             >= 2;
         self.output(self.grounded)
@@ -324,6 +350,13 @@ struct PadSample {
     anchor: Vec3,
     target_distance: f32,
     hit: Option<PadHit>,
+}
+
+impl PadSample {
+    fn supports_mowing(&self) -> bool {
+        self.hit
+            .is_some_and(|hit| hit.distance <= self.target_distance + 0.45)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -473,6 +506,36 @@ mod tests {
             FIXED_DT,
         );
         assert!(!output.grounded);
+    }
+
+    #[test]
+    fn ground_contact_updates_when_a_step_leaves_the_cutting_height() {
+        let planet = planet();
+        let tuning = VehicleTuning::default();
+        let mut physics = PhysicsWorld::new(&planet, planet.spawn, &tuning);
+        let mut transform = spawn_transform(planet.spawn);
+        transform.position += transform.up * 0.4;
+        physics.teleport(transform, transform.up * 25.0);
+        let supported_before = physics
+            .hover_pad_samples(transform.position, transform.rotation, transform.up)
+            .iter()
+            .filter(|sample| sample.supports_mowing())
+            .count();
+        assert!(supported_before >= 2);
+        let output = physics.step(
+            VehiclePhysicsInput {
+                desired_velocity: Vec3::ZERO,
+                desired_forward: transform.forward,
+                desired_up: transform.up,
+                drive_response: 15.0,
+            },
+            FIXED_DT,
+        );
+        assert!(output.position.distance(transform.position) > 0.1);
+        assert!(
+            !output.grounded,
+            "cutting must use contact at the resulting pose"
+        );
     }
 
     #[test]

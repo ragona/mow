@@ -258,3 +258,39 @@ settings and reduced motion; the original motion preference was restored and
 the game closed afterward. Shipping validation passed all 1,000 seeds with no
 failures and fully reachable mowable terrain. The final visual checklist
 and measured presentation cost are recorded in VISUAL_POLISH and PERFORMANCE.
+
+## Boost control and reliable cutting
+
+Boost previously raised speed from 12 to 28 m/s with a 3× acceleration response.
+On a small planet, the extra inward force required to follow the curve exceeded
+the hover suspension's reserve. The deck also crossed grass faster than its
+fixed cutting rate could finish it, even with continuous ground contact.
+
+- Shipping boost is now 18 m/s with 1.35× response. Release promptly returns to
+  cruising speed, and normal braking and direction-change tuning are unchanged.
+- Supported travel receives extra inward acceleration for speed above cruise,
+  using the next velocity predicted by the existing drive controller. Suspension
+  handles ordinary motion and local terrain; airborne attraction remains separate.
+- Ground contact is sampled after physics integration, matching the pose used
+  for cutting rather than reporting the previous step's pad distances.
+- Cutter work scales with actual surface travel above cruise, including coasting.
+  The footprint, time-based stationary/cruise behavior and airborne/recovery
+  exclusions remain intact.
+
+In the eight-second small-planet reproduction, the old boost lost ground contact
+for 336–359 of 960 ticks and rose 2.3–2.8 metres above the terrain. The final shipping
+boost remained grounded for every tick across flat/rolling radius-12 and radius-22
+planets, driving forward and sideways; maximum altitude was 0.94 metres. Sustained
+legacy 28 m/s stress cases stayed below 1.33 metres with at most two unsupported
+ticks; those cases are a stress check rather than shipping behavior.
+
+Independent lane samples across cube seams improved from 60% completed at 18 m/s
+and 0% at 28 m/s to 100% at both speeds, without widening the deck. Real boosted
+`RunState` trajectories verify completed trail centres on flat and rolling small
+planets. Additional regressions cover boost release/braking, post-step loss of
+contact, coasting, unchanged normal cuts, airborne/recovery exclusions and exact
+30/60/120/240 FPS simulation equivalence with boost bursts.
+
+Validation: all 175 ordinary workspace tests, strict workspace Clippy, formatting
+and the release build passed. Local reproduction logs are
+`/tmp/lawn-boost-before.txt` and `/tmp/lawn-boost-final-vehicle.txt`.

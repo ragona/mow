@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn boost_produces_a_major_speed_step() {
+    fn boost_is_a_controlled_speed_step_and_releases_quickly() {
         let planet = planet();
         let tuning = VehicleTuning::default();
         let mut normal = HoverVehicle::new(&planet, &tuning);
@@ -531,14 +531,131 @@ mod tests {
             boosted_peak = boosted_peak.max(boosted.state.speed());
         }
         assert!(
-            boosted_peak > normal_peak * 1.8,
-            "peak boost speed {boosted_peak} was not dramatically above normal speed {normal_peak}"
+            boosted_peak > normal_peak * 1.35 && boosted_peak < normal_peak * 1.6,
+            "peak boost speed {boosted_peak} was outside the controlled burst range above {normal_peak}"
         );
         assert!(
-            boosted_peak > 18.0,
+            boosted_peak > tuning.boost_max_speed * 0.93,
             "boost peaked at only {boosted_peak} m/s (final {}, normal peak {normal_peak})",
             boosted.state.speed()
         );
+        for _ in 0..36 {
+            tick(
+                &mut boosted,
+                &planet,
+                &tuning,
+                InputSnapshot {
+                    accelerate: 1.0,
+                    ..InputSnapshot::default()
+                },
+                crate::FIXED_DT,
+            );
+        }
+        assert!(boosted.state.speed() < tuning.max_speed + 0.5);
+        for _ in 0..36 {
+            tick(
+                &mut boosted,
+                &planet,
+                &tuning,
+                InputSnapshot::default(),
+                crate::FIXED_DT,
+            );
+        }
+        assert!(
+            boosted.state.speed() < 1.0,
+            "boost release should brake promptly"
+        );
+    }
+
+    #[test]
+    fn boost_follows_small_and_rolling_planets() {
+        let mut reports = Vec::new();
+        for radius in [12.0, 22.0] {
+            for rolling in [0.0, 1.2] {
+                let config = GeneratorConfig {
+                    base_radius: radius,
+                    rolling_amplitude: rolling,
+                    mountain_count_min: 0,
+                    mountain_count_max: 0,
+                    mowable_ratio_min: 1.0,
+                    mowable_ratio_max: 1.0,
+                    terrain_resolution: 64,
+                    ..GeneratorConfig::test_quality()
+                };
+                let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config)
+                    .generate_with_roots(WorldSeed(123), false)
+                    .unwrap();
+                for sideways in [false, true] {
+                    for stress in [false, true] {
+                        let tuning = if stress {
+                            VehicleTuning {
+                                boost_max_speed: 28.0,
+                                boost_capacity_seconds: 10.0,
+                                ..VehicleTuning::default()
+                            }
+                        } else {
+                            VehicleTuning::default()
+                        };
+                        let mut vehicle = HoverVehicle::new(&planet, &tuning);
+                        let mut airborne_ticks = 0;
+                        let mut max_altitude = 0.0_f32;
+                        let mut peak_speed = 0.0_f32;
+                        let mut minimum_alignment = 1.0_f32;
+                        for step in 0..960 {
+                            tick(
+                                &mut vehicle,
+                                &planet,
+                                &tuning,
+                                InputSnapshot {
+                                    accelerate: if sideways { 0.0 } else { 1.0 },
+                                    steer: if sideways { 1.0 } else { 0.0 },
+                                    boost_held: stress || step % 720 < 180,
+                                    ..InputSnapshot::default()
+                                },
+                                crate::FIXED_DT,
+                            );
+                            let position = vehicle.state.transform.position;
+                            let altitude =
+                                position.length() - planet.surface_radius(position.normalize());
+                            max_altitude = max_altitude.max(altitude);
+                            peak_speed = peak_speed.max(vehicle.state.speed());
+                            airborne_ticks += usize::from(!vehicle.state.grounded);
+                            minimum_alignment = minimum_alignment.min(
+                                vehicle
+                                    .state
+                                    .transform
+                                    .up
+                                    .dot(planet.terrain_cell(position.normalize()).normal),
+                            );
+                        }
+                        eprintln!(
+                            "boost radius={radius} rolling={rolling} sideways={sideways} stress={stress}: airborne={airborne_ticks}/960 max_altitude={max_altitude:.3} peak_speed={peak_speed:.3} alignment={minimum_alignment:.3}"
+                        );
+                        reports.push((
+                            stress,
+                            airborne_ticks,
+                            max_altitude,
+                            vehicle.state.recoveries,
+                        ));
+                        assert!(minimum_alignment > 0.90, "boost lost surface alignment");
+                    }
+                }
+            }
+        }
+        for (stress, airborne, altitude, recoveries) in reports {
+            // Shipping boost must keep cutting throughout. The sustained old
+            // 28 m/s stress case may briefly unload at the sharpest crests,
+            // but must remain near the lawn and recover contact immediately.
+            assert!(
+                airborne <= if stress { 10 } else { 0 },
+                "boost lost ground contact for {airborne} ticks (stress={stress})"
+            );
+            assert!(
+                altitude < if stress { 1.5 } else { 1.05 },
+                "boost floated {altitude} metres above the lawn (stress={stress})"
+            );
+            assert_eq!(recoveries, 0);
+        }
     }
 
     #[test]

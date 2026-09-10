@@ -249,6 +249,12 @@ impl RunState {
         if tick.recovered || !self.vehicle.state.grounded {
             return;
         }
+        // The deck must finish the same lane while boosting or coasting above
+        // cruise speed. Otherwise its shorter residence over each cell leaves
+        // half-height grass despite continuous ground contact. Normalize cutter
+        // work by actual surface travel, while preserving stationary and normal
+        // cutting time and the existing swept footprint.
+        let cutter_seconds = FIXED_DT.max(tick.traveled_distance / self.vehicle_tuning.max_speed);
         let stamp = MowingStamp {
             from: tick.deck_from,
             to: tick.deck_to,
@@ -259,7 +265,7 @@ impl RunState {
                 .try_normalize()
                 .unwrap_or(self.vehicle.state.transform.forward),
             deck_width: self.vehicle_tuning.mower_width,
-            cut_delta: self.vehicle_tuning.cut_rate_per_second * FIXED_DT,
+            cut_delta: self.vehicle_tuning.cut_rate_per_second * cutter_seconds,
             recent_epoch: ((self.simulation_seconds * 30.0) as u32 & 0xff) as u8,
         };
         let result = self.mowing.stamp(stamp);
@@ -491,6 +497,237 @@ mod tests {
         assert!(run.recorder.stamps().is_empty());
     }
 
+    fn flat_mowing_run() -> RunState {
+        let planet = PlanetGenerator::new(
+            CURRENT_GENERATOR_VERSION,
+            GeneratorConfig {
+                mountain_count_min: 0,
+                mountain_count_max: 0,
+                mowable_ratio_min: 1.0,
+                mowable_ratio_max: 1.0,
+                rolling_amplitude: 0.0,
+                mowing_resolution: 256,
+                ..GeneratorConfig::test_quality()
+            },
+        )
+        .generate_with_roots(WorldSeed(21), false)
+        .unwrap();
+        RunState::new(
+            planet,
+            GameMode::FreeMow,
+            VehicleTuning::default(),
+            JobConfig::default(),
+            &AccessibilitySettings::default(),
+            false,
+        )
+    }
+
+    #[test]
+    fn fast_grounded_lanes_finish_at_cruise_quality_across_cube_seams() {
+        use crate::{cube_map::direction_to_cell, mowing::CUT_COVERAGE_THRESHOLD};
+        for (axis_a, axis_b) in [(Vec3::X, Vec3::Y), (Vec3::Y, Vec3::Z), (Vec3::Z, Vec3::X)] {
+            for speed in [12.0, 18.0, 28.0] {
+                // Compensate actual travel even when boost has just been
+                // released, rather than depending on the input/state flag.
+                for boost_active in [false, true] {
+                    let mut run = flat_mowing_run();
+                    let radius = run.planet.config.base_radius;
+                    let mut angle = 0.1_f32;
+                    while angle < 1.3 {
+                        let next = (angle + speed * FIXED_DT / radius).min(1.3);
+                        let from = (axis_a * angle.cos() + axis_b * angle.sin()) * radius;
+                        let to = (axis_a * next.cos() + axis_b * next.sin()) * radius;
+                        run.vehicle.state.grounded = true;
+                        run.vehicle.state.boost_active = boost_active;
+                        run.vehicle.state.linear_velocity = (to - from).normalize() * speed;
+                        run.cut_if_valid(VehicleTickResult {
+                            deck_from: from,
+                            deck_to: to,
+                            traveled_distance: (next - angle) * radius,
+                            ..VehicleTickResult::default()
+                        });
+                        angle = next;
+                    }
+                    // Independent points cover a completed 1.6 m interior lane
+                    // and the shared face boundary at pi/4. End caps are excluded
+                    // because driving away from a cell is needed to finish it.
+                    let side = axis_a.cross(axis_b);
+                    for sample in 0..100 {
+                        let angle = 0.25 + 0.9 * sample as f32 / 99.0;
+                        for offset in [-0.8, -0.4, 0.0, 0.4, 0.8] {
+                            let direction = (axis_a * angle.cos()
+                                + axis_b * angle.sin()
+                                + side * (offset / radius))
+                                .normalize();
+                            let cell = direction_to_cell(direction, run.mowing.resolution());
+                            let cut = run.mowing.cell(cell).cut_amount();
+                            assert!(
+                                cut >= CUT_COVERAGE_THRESHOLD,
+                                "{speed} m/s boost={boost_active}, {cell:?}, offset={offset}: cut={cut}"
+                            );
+                        }
+                        for offset in [-1.5, 1.5] {
+                            let direction = (axis_a * angle.cos()
+                                + axis_b * angle.sin()
+                                + side * (offset / radius))
+                                .normalize();
+                            let cell = direction_to_cell(direction, run.mowing.resolution());
+                            assert_eq!(
+                                run.mowing.cell(cell).cut_amount(),
+                                0,
+                                "fast cutting widened the actual deck footprint"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn actual_boosted_run_leaves_a_complete_grounded_trail() {
+        use crate::{cube_map::direction_to_cell, mowing::CUT_COVERAGE_THRESHOLD};
+        for boost_speed in [18.0, 28.0] {
+            for rolling in [0.0, 1.2] {
+                let planet = PlanetGenerator::new(
+                    CURRENT_GENERATOR_VERSION,
+                    GeneratorConfig {
+                        base_radius: 12.0,
+                        rolling_amplitude: rolling,
+                        mountain_count_min: 0,
+                        mountain_count_max: 0,
+                        mowable_ratio_min: 1.0,
+                        mowable_ratio_max: 1.0,
+                        terrain_resolution: 64,
+                        mowing_resolution: 256,
+                        ..GeneratorConfig::test_quality()
+                    },
+                )
+                .generate_with_roots(WorldSeed(123), false)
+                .unwrap();
+                let tuning = VehicleTuning {
+                    boost_max_speed: boost_speed,
+                    boost_capacity_seconds: 3.0,
+                    ..VehicleTuning::default()
+                };
+                let accessibility = AccessibilitySettings::default();
+                let mut run = RunState::new(
+                    planet,
+                    GameMode::FreeMow,
+                    tuning,
+                    JobConfig::default(),
+                    &accessibility,
+                    false,
+                );
+                let mut trail = Vec::new();
+                let mut peak_speed = 0.0_f32;
+                let mut airborne_ticks = 0;
+                for tick in 0..240 {
+                    run.clear_frame_events();
+                    run.tick(
+                        InputSnapshot {
+                            accelerate: 1.0,
+                            boost_held: true,
+                            ..InputSnapshot::default()
+                        },
+                        &accessibility,
+                    );
+                    airborne_ticks += usize::from(!run.vehicle.state.grounded);
+                    peak_speed = peak_speed.max(run.vehicle.state.speed());
+                    // Sample the actual deck path after startup, and stop well
+                    // behind its final position so residence time has elapsed.
+                    if (30..200).contains(&tick) {
+                        trail.push(run.vehicle.deck_position(&run.vehicle_tuning));
+                    }
+                }
+                let minimum_cut = trail
+                    .into_iter()
+                    .map(|point| {
+                        run.mowing
+                            .cell(direction_to_cell(
+                                point.normalize(),
+                                run.mowing.resolution(),
+                            ))
+                            .cut_amount()
+                    })
+                    .min()
+                    .unwrap();
+                assert!(
+                    peak_speed > boost_speed * 0.93,
+                    "test did not reach boosted speed: {peak_speed}"
+                );
+                assert_eq!(
+                    airborne_ticks, 0,
+                    "{boost_speed} m/s, rolling={rolling}: lost contact"
+                );
+                assert!(
+                    minimum_cut >= CUT_COVERAGE_THRESHOLD,
+                    "{boost_speed} m/s, rolling={rolling}: actual trail cut only {minimum_cut}/255"
+                );
+                assert_eq!(run.vehicle.state.recoveries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn stationary_and_cruise_cuts_keep_the_original_time_based_result() {
+        for speed in [0.0, 3.0, 12.0] {
+            let mut run = flat_mowing_run();
+            let mut reference = MowingField::from_planet(&run.planet);
+            let radius = run.planet.config.base_radius;
+            for tick in 0..80 {
+                let angle = 0.1 + tick as f32 * speed * FIXED_DT / radius;
+                let next = angle + speed * FIXED_DT / radius;
+                let from = Vec3::new(angle.cos(), angle.sin(), 0.0) * radius;
+                let to = Vec3::new(next.cos(), next.sin(), 0.0) * radius;
+                run.vehicle.state.grounded = true;
+                run.vehicle.state.linear_velocity = (to - from).normalize_or(Vec3::Y) * speed;
+                reference.stamp(MowingStamp {
+                    from,
+                    to,
+                    comb_direction: run
+                        .vehicle
+                        .state
+                        .linear_velocity
+                        .try_normalize()
+                        .unwrap_or(run.vehicle.state.transform.forward),
+                    deck_width: run.vehicle_tuning.mower_width,
+                    cut_delta: run.vehicle_tuning.cut_rate_per_second * FIXED_DT,
+                    recent_epoch: 0,
+                });
+                run.cut_if_valid(VehicleTickResult {
+                    deck_from: from,
+                    deck_to: to,
+                    traveled_distance: speed * FIXED_DT,
+                    ..VehicleTickResult::default()
+                });
+            }
+            assert_eq!(run.mowing.packed_cells(), reference.packed_cells());
+            assert_eq!(run.mowing.coverage(), reference.coverage());
+        }
+    }
+
+    #[test]
+    fn speed_compensation_never_cuts_airborne_or_recovery_sweeps() {
+        let mut run = flat_mowing_run();
+        let before = run.mowing.snapshot();
+        for (grounded, recovered) in [(false, false), (true, true)] {
+            run.vehicle.state.grounded = grounded;
+            run.vehicle.state.boost_active = true;
+            run.cut_if_valid(VehicleTickResult {
+                deck_from: Vec3::X * 15.0,
+                deck_to: Vec3::Y * 15.0,
+                traveled_distance: 25.0,
+                recovered,
+                ..VehicleTickResult::default()
+            });
+        }
+        assert_eq!(run.mowing.packed_cells(), before.cells);
+        assert_eq!(run.mowing.snapshot().cut_residuals, before.cut_residuals);
+        assert!(run.events().is_empty());
+        assert!(run.recorder.stamps().is_empty());
+    }
+
     #[test]
     fn run_clock_uses_tick_count_without_long_session_accumulation_error() {
         let mut run = run(GameMode::Standard);
@@ -598,6 +835,7 @@ mod tests {
             let mut run = run(GameMode::Standard);
             let mut clock = FixedStepClock::default();
             let mut ticks = 0_u32;
+            let mut saw_boost = false;
             while ticks < 600 {
                 clock.advance(
                     Duration::from_secs_f64(1.0 / f64::from(frames_per_second)),
@@ -607,15 +845,19 @@ mod tests {
                                 InputSnapshot {
                                     accelerate: 0.82,
                                     steer: 0.11,
+                                    boost_held: (60..180).contains(&ticks)
+                                        || (360..480).contains(&ticks),
                                     ..InputSnapshot::default()
                                 },
                                 &AccessibilitySettings::default(),
                             );
+                            saw_boost |= run.vehicle.state.boost_active;
                             ticks += 1;
                         }
                     },
                 );
             }
+            assert!(saw_boost, "render-rate fixture must exercise boost");
             let outcome = (
                 run.mowing.packed_cells().to_vec(),
                 run.mowing.coverage(),

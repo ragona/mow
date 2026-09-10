@@ -74,6 +74,8 @@ development packages.
 | Diagnostics | F3 | — |
 
 Movement bindings can be remapped in Settings and analog values are preserved.
+Boost gives a controlled 12-to-18 m/s burst, follows the planet's curve, and keeps
+cutting at full effectiveness while grounded.
 The mower deck is always active directly beneath the chassis whenever it is grounded.
 The settings screen also contains horizontal movement sensitivity/inversion, camera tilt,
 camera shake, camera auto-follow, field of view, motion reduction, boost disable, grass density,

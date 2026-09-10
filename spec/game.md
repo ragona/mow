@@ -241,12 +241,24 @@ These values are starting points and should be exposed as data rather than compi
 | Time to 90% top speed | 0.35 s |
 | Time to shed 90% speed on release | 0.20 s |
 | Time to complete 90% of a direction change | 0.42 s |
-| Boost maximum speed | 28 m/s |
+| Boost maximum speed | 18 m/s |
 | Recovery hold time | 1.0 s |
 
 ### 7.4 Boost
 
-The vehicle has a short rechargeable boost. Boost increases thrust and top speed but makes precise mowing more difficult. The boost meter refills automatically after a short delay, encouraging expressive use without introducing consumable-resource anxiety.
+The vehicle has a short rechargeable boost: top speed rises from 12 to 18 m/s,
+with 1.35× acceleration response. It should feel like a controllable burst along
+the surface. Near-ground support supplies the extra inward acceleration needed
+above cruising speed to follow the planet's curve before the suspension stretches,
+while signed hover springs handle local terrain and ordinary driving retains its
+tuned suspension response. Releasing boost returns promptly to cruising speed.
+The boost meter refills automatically after a short delay, encouraging expressive
+use without introducing consumable-resource anxiety.
+
+Cutting work keeps pace with actual surface travel above cruising speed,
+including the brief coast after releasing boost. A boosted pass finishes the same
+lane as an ordinary pass; the deck footprint stays the same. Contact is checked
+at the resulting physics pose, and airborne or recovery movement never cuts.
 
 Boost is optional for completion and can be disabled in accessibility settings.
 
@@ -1202,7 +1214,6 @@ The following should remain tunable rather than settled on paper:
 - cube-sphere versus subdivided-icosphere terrain patches;
 - whether arbitrary seeds are always exposed or primarily selected through a curated flow;
 - final acceleration, braking, direction-change, and air-control response;
-- whether boost temporarily reduces cutting effectiveness;
 - exact completion and rating thresholds;
 - the need for a fixed-horizon camera mode; and
 - whether results playback is worth its storage and implementation cost.

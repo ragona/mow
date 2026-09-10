@@ -180,8 +180,8 @@ impl Default for VehicleTuning {
             acceleration_time_90_percent: 0.35,
             braking_time_90_percent: 0.2,
             direction_change_time_90_percent: 0.42,
-            boost_max_speed: 28.0,
-            boost_acceleration_multiplier: 3.0,
+            boost_max_speed: 18.0,
+            boost_acceleration_multiplier: 1.35,
             boost_capacity_seconds: 1.5,
             boost_recharge_delay: 1.25,
             boost_recharge_seconds: 3.0,
@@ -355,7 +355,8 @@ mod tests {
         assert_eq!(config.vehicle.acceleration_time_90_percent, 0.35);
         assert_eq!(config.vehicle.braking_time_90_percent, 0.2);
         assert_eq!(config.vehicle.direction_change_time_90_percent, 0.42);
-        assert_eq!(config.vehicle.boost_max_speed, 28.0);
+        assert_eq!(config.vehicle.boost_max_speed, 18.0);
+        assert_eq!(config.vehicle.boost_acceleration_multiplier, 1.35);
         assert_eq!(config.vehicle.surface_glue_acceleration, 42.0);
         assert_eq!(config.job.completion_coverage, 0.98);
     }
