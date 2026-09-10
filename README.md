@@ -124,6 +124,12 @@ cargo run --release -p lawn_tools -- validate 1000 500 --quick
 # Full shipping planet, including grass roots, as a JSON report.
 cargo run --release -p lawn_tools -- inspect "cozy planet"
 
+# Warmed offscreen GPU workload with shipping camera, density and culling.
+# Uses 60 warmup frames then 120 samples. Run on an otherwise idle GPU.
+LAWN_BENCH=1 cargo test --release -p lawn_render gpu_smoke -- --ignored --nocapture --test-threads=1
+# LAWN_BENCH_SCENE=meadow or mown; LAWN_BENCH_QUALITY=low;
+# LAWN_BENCH_WIDTH=2560 LAWN_BENCH_HEIGHT=1440 for a larger framebuffer.
+
 # Fixed 30-second gameplay workload, dirty uploads, and remaining-grass locator.
 # Compare timings on the same idle machine; results are not pass/fail thresholds.
 cargo run --release -p lawn_tools --example performance
@@ -133,7 +139,11 @@ cargo run --release -p lawn_tools --example performance
 generator version, failure details, generation-attempt histogram, mowable and
 reachable bounds, and median/p95/maximum generation times. F3 in the game exposes
 frame p50/p95, draw visibility, grass/triangle counts, texture uploads, particles,
-CPU encoding time, graphics tier, adapter, seed, and deterministic planet hash.
+CPU acquisition/encoding time, measured GPU frame time, graphics tier, adapter,
+seed, and deterministic planet hash. GPU pass spans can overlap and must not be
+added together.
 
 The latest correctness/performance findings and validation results are recorded
-in [`REVIEW.md`](REVIEW.md).
+in [`REVIEW.md`](REVIEW.md). The subsequent measured performance investigation,
+including before/after results and rejected experiments, is in
+[`PERFORMANCE.md`](PERFORMANCE.md).

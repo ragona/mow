@@ -173,6 +173,33 @@ pub fn cell_solid_angle(x: u32, y: u32, resolution: u32) -> f64 {
         + cube_area_term(x0, y0)
 }
 
+/// Face-local solid angles in row-major order. Every cube face uses the same
+/// values, and adjacent cells share corner terms. Evaluate each corner once
+/// while retaining the exact arithmetic order of `cell_solid_angle`.
+pub(crate) fn face_solid_angles(resolution: u32) -> Vec<f64> {
+    let side = resolution as usize;
+    let r = f64::from(resolution);
+    let coordinates: Vec<_> = (0..=resolution)
+        .map(|value| 2.0 * f64::from(value) / r - 1.0)
+        .collect();
+    let mut previous: Vec<_> = coordinates
+        .iter()
+        .map(|&x| cube_area_term(x, coordinates[0]))
+        .collect();
+    let mut current = vec![0.0; side + 1];
+    let mut angles = Vec::with_capacity(side * side);
+    for &y in &coordinates[1..] {
+        for (value, &x) in current.iter_mut().zip(&coordinates) {
+            *value = cube_area_term(x, y);
+        }
+        for x in 0..side {
+            angles.push(current[x + 1] - current[x] - previous[x + 1] + previous[x]);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    angles
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CubeGrid<T> {
     resolution: u32,
@@ -287,6 +314,24 @@ mod tests {
             .sum();
         let sphere = face * 6.0;
         assert!((sphere - std::f64::consts::TAU * 2.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn cached_solid_angles_preserve_exact_texel_weights() {
+        for resolution in [8, 24, 31, 64, 512] {
+            let angles = face_solid_angles(resolution);
+            assert_eq!(angles.len(), resolution as usize * resolution as usize);
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let angle = angles[(y * resolution + x) as usize];
+                    assert!(angle > 0.0);
+                    assert_eq!(
+                        angle.to_bits(),
+                        cell_solid_angle(x, y, resolution).to_bits()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

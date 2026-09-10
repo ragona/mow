@@ -208,9 +208,13 @@ fn companion_moon(direction: Vec3, sky: Vec3, pixel_angle: f32) -> Vec3 {
 }
 
 fn bake(resolution: u32) -> Vec<Vec<u8>> {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
     assert!(resolution.is_power_of_two());
     let width = resolution as usize;
     let mut pixels = vec![Vec3::ZERO; width * width * 6];
+    #[cfg(test)]
+    let allocated = started.elapsed();
     // Only the startup bake uses workers; there is no sky work or allocation on
     // subsequent frames. The number of workers is bounded by the six faces.
     let workers = if resolution >= 128 {
@@ -239,7 +243,11 @@ fn bake(resolution: u32) -> Vec<Vec<u8>> {
             });
         }
     });
+    #[cfg(test)]
+    let clouds_finished = started.elapsed();
     paint_stars(&mut pixels, resolution);
+    #[cfg(test)]
+    let stars_finished = started.elapsed();
     // Paint the distant moon after the star field so it actually occludes stars.
     for face in 0..6 {
         let (uv, depth) = project_face(face, Vec3::new(-0.76, 0.15, -0.63).normalize());
@@ -266,20 +274,32 @@ fn bake(resolution: u32) -> Vec<Vec<u8>> {
             }
         }
     }
+    #[cfg(test)]
+    let moon_finished = started.elapsed();
+    #[cfg(test)]
+    let mut encoding = std::time::Duration::ZERO;
     let mut levels = Vec::with_capacity(resolution.ilog2() as usize + 1);
     let mut width = width;
     loop {
+        #[cfg(test)]
+        let encoding_started = std::time::Instant::now();
         levels.push(encode_srgb(&pixels));
+        #[cfg(test)]
+        {
+            encoding += encoding_started.elapsed();
+        }
         if width == 1 {
             break;
         }
         let next_width = width / 2;
-        let mut next = vec![Vec3::ZERO; next_width * next_width * 6];
+        // Compact each mip into the already-read prefix. Every destination is
+        // before its source block, so this retains exact linear-light filtering
+        // while avoiding another large float image and its zero-fill.
         for face in 0..6 {
             for y in 0..next_width {
                 for x in 0..next_width {
                     let source = (face * width + y * 2) * width + x * 2;
-                    next[(face * next_width + y) * next_width + x] = (pixels[source]
+                    pixels[(face * next_width + y) * next_width + x] = (pixels[source]
                         + pixels[source + 1]
                         + pixels[source + width]
                         + pixels[source + width + 1])
@@ -287,8 +307,26 @@ fn bake(resolution: u32) -> Vec<Vec<u8>> {
                 }
             }
         }
-        pixels = next;
+        pixels.truncate(next_width * next_width * 6);
         width = next_width;
+    }
+    #[cfg(test)]
+    if resolution == RESOLUTION {
+        let total = started.elapsed();
+        println!(
+            "Sky bake phases: allocate={:.2}ms, clouds={:.2}ms, stars={:.2}ms, moon={:.2}ms, encode={:.2}ms, mip/filter={:.2}ms, total={:.2}ms",
+            allocated.as_secs_f64() * 1_000.0,
+            clouds_finished.saturating_sub(allocated).as_secs_f64() * 1_000.0,
+            stars_finished.saturating_sub(clouds_finished).as_secs_f64() * 1_000.0,
+            moon_finished.saturating_sub(stars_finished).as_secs_f64() * 1_000.0,
+            encoding.as_secs_f64() * 1_000.0,
+            total
+                .saturating_sub(moon_finished)
+                .saturating_sub(encoding)
+                .as_secs_f64()
+                * 1_000.0,
+            total.as_secs_f64() * 1_000.0,
+        );
     }
     levels
 }
@@ -354,19 +392,100 @@ fn paint_stars(pixels: &mut [Vec3], resolution: u32) {
     }
 }
 
-fn encode_srgb(pixels: &[Vec3]) -> Vec<u8> {
-    let encode = |value: f32| {
-        let value = value.clamp(0.0, 1.0);
-        let srgb = if value <= 0.003_130_8 {
-            value * 12.92
-        } else {
-            1.055 * value.powf(1.0 / 2.4) - 0.055
-        };
-        (srgb * 255.0).round() as u8
+fn reference_srgb(value: f32) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let srgb = if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
     };
+    (srgb * 255.0).round() as u8
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SrgbBin {
+    value: u8,
+    lower: f32,
+    upper: f32,
+}
+
+/// The linear interval of each bin is smaller than the narrowest sRGB byte
+/// interval. Its lookup is therefore at most one byte away; comparing against
+/// exact float boundaries corrects it without an approximation or a per-channel
+/// transcendental. The immutable 48 KiB table is reused for every sky mip.
+#[derive(Debug)]
+struct SrgbEncoder {
+    bins: Box<[SrgbBin]>,
+}
+
+impl SrgbEncoder {
+    const BIN_COUNT: usize = 4096;
+
+    fn new() -> Self {
+        let mut boundaries = [0.0; 257];
+        boundaries[256] = f32::INFINITY;
+        for (index, boundary) in boundaries.iter_mut().enumerate().take(256).skip(1) {
+            // Binary search float encodings to retain the previous powf/round
+            // result even at representable values adjacent to a byte boundary.
+            let mut low = 0;
+            let mut high = 1.0_f32.to_bits();
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if reference_srgb(f32::from_bits(middle)) < index as u8 {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            *boundary = f32::from_bits(low);
+        }
+        let bins = (0..Self::BIN_COUNT)
+            .map(|index| {
+                let value = reference_srgb(index as f32 / (Self::BIN_COUNT - 1) as f32);
+                SrgbBin {
+                    value,
+                    lower: boundaries[value as usize],
+                    upper: boundaries[value as usize + 1],
+                }
+            })
+            .collect();
+        Self { bins }
+    }
+
+    fn encode(&self, value: f32) -> u8 {
+        let value = value.clamp(0.0, 1.0);
+        let bin = self.bins[(value * (Self::BIN_COUNT - 1) as f32) as usize];
+        bin.value + u8::from(value >= bin.upper) - u8::from(value < bin.lower)
+    }
+}
+
+fn encode_srgb(pixels: &[Vec3]) -> Vec<u8> {
+    static ENCODER: std::sync::OnceLock<SrgbEncoder> = std::sync::OnceLock::new();
+    // Benchmark-only reference path permits timing and whole-cubemap checksum
+    // comparisons against the previous encoder in the same compiled binary.
+    #[cfg(test)]
+    if std::env::var_os("LAWN_SKY_REFERENCE_ENCODER").is_some() {
+        return pixels
+            .iter()
+            .flat_map(|color| {
+                [
+                    reference_srgb(color.x),
+                    reference_srgb(color.y),
+                    reference_srgb(color.z),
+                    255,
+                ]
+            })
+            .collect();
+    }
+    let encoder = ENCODER.get_or_init(SrgbEncoder::new);
     let mut bytes = Vec::with_capacity(pixels.len() * 4);
     for color in pixels {
-        bytes.extend([encode(color.x), encode(color.y), encode(color.z), 255]);
+        bytes.extend([
+            encoder.encode(color.x),
+            encoder.encode(color.y),
+            encoder.encode(color.z),
+            255,
+        ]);
     }
     bytes
 }
@@ -392,6 +511,37 @@ pub(crate) fn direction_color_cube(resolution: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sky_srgb_encoder_preserves_bytes_including_rounding_boundaries() {
+        let encoder = SrgbEncoder::new();
+        for bin in &encoder.bins {
+            for boundary in [bin.lower, bin.upper] {
+                if boundary.is_finite() {
+                    for offset in -16..=16 {
+                        let bits = boundary.to_bits().saturating_add_signed(offset);
+                        let value = f32::from_bits(bits);
+                        assert_eq!(encoder.encode(value), reference_srgb(value), "{value:?}");
+                    }
+                }
+            }
+        }
+        for index in 0..=1_048_576 {
+            let value = index as f32 / 1_048_576.0;
+            assert_eq!(encoder.encode(value), reference_srgb(value), "{value:?}");
+        }
+        for value in [
+            -1.0,
+            0.0,
+            1.0,
+            2.0,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            assert_eq!(encoder.encode(value), reference_srgb(value));
+        }
+    }
 
     #[test]
     fn sky_cube_basis_roundtrips_and_agrees_on_every_edge_and_corner() {
@@ -465,6 +615,13 @@ mod tests {
             levels.iter().map(Vec::len).sum::<usize>(),
             levels.len()
         );
+        let checksum = levels
+            .iter()
+            .flatten()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        println!("Sky mip byte checksum: {checksum:016x}");
         assert_eq!(levels[0].len(), (RESOLUTION * RESOLUTION * 6 * 4) as usize);
     }
 }

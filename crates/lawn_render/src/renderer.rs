@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use lawn_core::{
     FIXED_DT, camera::CameraState, cube_map::CubeFace, profile::QualityPreset, run::RunState,
 };
@@ -12,6 +12,7 @@ use winit::{dpi::PhysicalSize, window::Window};
 use crate::{
     bloom::Bloom,
     gpu_profiler::GpuProfiler,
+    grass_bounds::{self, GrassPatchBounds},
     grass_roots::{self, RenderGrassRoot},
     interaction::{GrassInteraction, INTERACTION_RESOLUTION},
     mesh::{self, MeshVertex, TuftVertex},
@@ -49,7 +50,10 @@ pub struct FrameStats {
     pub clipping_particles: u32,
     /// Known frame-local heap vector allocations in renderer-owned code.
     pub transient_allocations: u32,
+    /// Time waiting for a presentation image, separate from CPU rendering work.
+    pub cpu_acquire_milliseconds: f32,
     pub cpu_encode_milliseconds: f32,
+    pub gpu_frame_milliseconds: f32,
     pub gpu_interaction_milliseconds: f32,
     pub gpu_shadow_milliseconds: f32,
     pub gpu_world_milliseconds: f32,
@@ -114,6 +118,8 @@ struct PlanetResources {
     terrain_indices: wgpu::Buffer,
     terrain_index_count: u32,
     grass_roots: wgpu::Buffer,
+    grass_bounds: Vec<GrassPatchBounds>,
+    inner_radius: f32,
     mowing_texture: wgpu::Texture,
     mowing_view: wgpu::TextureView,
     world_radius: f32,
@@ -525,7 +531,7 @@ impl Renderer {
         interpolation_alpha: f32,
     ) -> Result<RenderFrame, FrameAcquireError> {
         let _span = tracing::debug_span!("render_encode").entered();
-        let encode_started = Instant::now();
+        let acquire_started = Instant::now();
         let visual_dt = self
             .last_visual_frame
             .elapsed()
@@ -541,6 +547,8 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Lost => return Err(FrameAcquireError::Lost),
             wgpu::CurrentSurfaceTexture::Validation => return Err(FrameAcquireError::Validation),
         };
+        let cpu_acquire_milliseconds = acquire_started.elapsed().as_secs_f32() * 1000.0;
+        let encode_started = Instant::now();
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -589,15 +597,11 @@ impl Renderer {
         }
         self.particles
             .update(&self.queue, run, self.reduced_particles);
-        let dirty_tiles = run.mowing.take_dirty_tiles();
-        // Dirty keys retain their allocation; staging uses one update vector
-        // plus a packed-cell vector for each dirty tile.
-        let transient_allocations = if dirty_tiles.is_empty() {
-            0
-        } else {
-            1 + dirty_tiles.len() as u32
-        };
-        for tile in &dirty_tiles {
+        let mut mowing_tile_uploads = 0;
+        // Queue writes copy the borrowed cells before the callback returns;
+        // every tile reuses the mowing field's persistent staging allocation.
+        run.mowing.visit_dirty_tiles(|tile| {
+            mowing_tile_uploads += 1;
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.planet.mowing_texture,
@@ -609,7 +613,7 @@ impl Renderer {
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                bytemuck::cast_slice(&tile.cells),
+                bytemuck::cast_slice(tile.cells),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(tile.width * 4),
@@ -621,7 +625,7 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
             );
-        }
+        });
         let camera = run.camera.interpolated_state(interpolation_alpha);
         let mut frame_uniform = make_frame_uniform(self, run, camera);
         frame_uniform.mower_position = deck_transform
@@ -690,7 +694,7 @@ impl Renderer {
         );
         self.encode_shadow(&mut encoder, query_set);
         let (visible_patches, visible_tufts) =
-            self.encode_world(&mut encoder, run, camera, query_set);
+            self.encode_world(&mut encoder, run, camera, &frame_uniform, query_set);
         self.encode_composite(&mut encoder, &view, query_set);
         if let (Some(slot), Some(profiler)) = (gpu_profile_slot, self.gpu_profiler.as_mut()) {
             profiler.finish_encoding(&mut encoder, slot);
@@ -712,10 +716,12 @@ impl Renderer {
                 visible_patches,
                 visible_tufts,
                 generated_triangles,
-                mowing_tile_uploads: dirty_tiles.len() as u32,
+                mowing_tile_uploads,
                 clipping_particles: self.particles.len(),
-                transient_allocations,
+                transient_allocations: 0,
+                cpu_acquire_milliseconds,
                 cpu_encode_milliseconds: encode_started.elapsed().as_secs_f32() * 1000.0,
+                gpu_frame_milliseconds: gpu_times.frame,
                 gpu_interaction_milliseconds: gpu_times.interaction,
                 gpu_shadow_milliseconds: gpu_times.shadow,
                 gpu_world_milliseconds: gpu_times.world,
@@ -771,6 +777,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         run: &RunState,
         camera: CameraState,
+        frame: &FrameUniformGpu,
         query_set: Option<&wgpu::QuerySet>,
     ) -> (u32, u32) {
         let (color_view, resolve_target) = self
@@ -839,40 +846,23 @@ impl Renderer {
         pass.set_vertex_buffer(0, self.tuft_vertices.slice(..));
         pass.set_vertex_buffer(1, self.planet.grass_roots.slice(..));
         pass.set_index_buffer(self.tuft_indices.slice(..), wgpu::IndexFormat::Uint16);
-        let camera_position = camera.position;
-        let camera_direction = camera_position.normalize();
-        let camera_radius = camera_position.length();
-        // A base-radius horizon incorrectly hides elevated grass and roots in
-        // terrain depressions. Use an inner occluder and the outer blade bound.
-        let inner_radius = (run.planet.config.base_radius
-            - 1.06 * run.planet.config.rolling_amplitude)
-            * (3.0 / run.planet.terrain.resolution() as f32).cos();
-        let horizon_angle =
-            grass_horizon_angle(inner_radius, self.planet.world_radius, camera_radius);
-        let camera_forward = (camera.target - camera_position).normalize();
-        let base_density = quality_density(self.quality);
+        let visibility = GrassVisibility::new(
+            run,
+            camera,
+            self.quality,
+            &self.planet,
+            Mat4::from_cols_array_2d(&frame.view_proj),
+            frame.options[3],
+        );
         let mut visible_patches = 0;
         let mut visible_tufts = 0;
-        for patch in &run.planet.grass_patches {
-            if patch.roots.is_empty() {
-                continue;
-            }
-            let angle = camera_direction.dot(patch.center).clamp(-1.0, 1.0).acos();
-            if angle > horizon_angle + patch.angular_radius {
-                continue;
-            }
-            let patch_position = patch.center * run.planet.config.base_radius;
-            let toward_patch = (patch_position - camera_position).normalize();
-            if camera_forward.dot(toward_patch) < -0.32 {
-                continue;
-            }
-            let total = patch.roots.end - patch.roots.start;
-            let distance = camera_position.distance(patch_position);
-            let high_camera = (camera_radius - run.planet.config.base_radius).max(0.0);
-            let distance_lod = 1.0 - smoothstep(13.0, 48.0, distance) * 0.38;
-            let toy_camera_lod = 1.0 - smoothstep(11.0, 28.0, high_camera) * 0.48;
-            let density = base_density * distance_lod * toy_camera_lod;
-            let draw_count = ((total as f32 * density).ceil() as u32).min(total);
+        for (patch, bounds) in run
+            .planet
+            .grass_patches
+            .iter()
+            .zip(&self.planet.grass_bounds)
+        {
+            let draw_count = visibility.draw_count(patch, bounds);
             if draw_count == 0 {
                 continue;
             }
@@ -924,6 +914,105 @@ impl Renderer {
         pass.set_bind_group(0, &self.composite_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// Shared by the live renderer and the repeatable offscreen workload so GPU
+/// measurements use exactly the shipping visibility and density decisions.
+#[derive(Debug)]
+struct GrassVisibility {
+    camera_position: Vec3,
+    camera_direction: Vec3,
+    camera_radius: f32,
+    inner_radius: f32,
+    planes: [Vec4; 6],
+    blade_extent: f32,
+    base_radius: f32,
+    base_density: f32,
+    toy_camera_lod: f32,
+}
+
+impl GrassVisibility {
+    fn new(
+        run: &RunState,
+        camera: CameraState,
+        quality: QualityPreset,
+        resources: &PlanetResources,
+        view_proj: Mat4,
+        height_scale: f32,
+    ) -> Self {
+        let camera_radius = camera.position.length();
+        Self {
+            camera_position: camera.position,
+            camera_direction: camera.position.normalize_or_zero(),
+            camera_radius,
+            inner_radius: resources.inner_radius,
+            planes: grass_frustum_planes(view_proj),
+            blade_extent: grass_bounds::blade_extent(height_scale),
+            base_radius: run.planet.config.base_radius,
+            base_density: quality_density(quality),
+            toy_camera_lod: 1.0
+                - smoothstep(
+                    11.0,
+                    28.0,
+                    (camera_radius - run.planet.config.base_radius).max(0.0),
+                ) * 0.48,
+        }
+    }
+
+    fn draw_count(&self, patch: &lawn_core::planet::GrassPatch, bounds: &GrassPatchBounds) -> u32 {
+        if patch.roots.is_empty() || !self.contains(bounds) {
+            return 0;
+        }
+        // Keep the established prefix and density so visibility never changes
+        // the appearance of retained patches or reshuffles grass roots.
+        let patch_position = patch.center * self.base_radius;
+        let total = patch.roots.end - patch.roots.start;
+        let distance = self.camera_position.distance(patch_position);
+        let distance_lod = 1.0 - smoothstep(13.0, 48.0, distance) * 0.38;
+        let density = self.base_density * distance_lod * self.toy_camera_lod;
+        ((total as f32 * density).ceil() as u32).min(total)
+    }
+
+    fn contains(&self, bounds: &GrassPatchBounds) -> bool {
+        let extent = bounds.half_extents + Vec3::splat(self.blade_extent);
+        for plane in self.planes {
+            let normal = plane.truncate();
+            let support = normal.abs().dot(extent);
+            if normal.dot(bounds.center) + plane.w < -support {
+                return false;
+            }
+        }
+        let center_radius = bounds.center.length();
+        let radius = bounds.radius + self.blade_extent;
+        if radius >= center_radius || self.inner_radius <= 0.0 {
+            return true;
+        }
+        let angular_radius = (radius / center_radius).asin();
+        let angle = self
+            .camera_direction
+            .dot(bounds.center / center_radius)
+            .clamp(-1.0, 1.0)
+            .acos();
+        let horizon = grass_horizon_angle(
+            self.inner_radius,
+            bounds.max_radius + self.blade_extent,
+            self.camera_radius,
+        );
+        angle <= horizon + angular_radius
+    }
+}
+
+fn grass_frustum_planes(view_proj: Mat4) -> [Vec4; 6] {
+    let rows = view_proj.transpose();
+    // WebGPU clips depth to 0..w, unlike OpenGL's -w..w.
+    [
+        rows.w_axis + rows.x_axis,
+        rows.w_axis - rows.x_axis,
+        rows.w_axis + rows.y_axis,
+        rows.w_axis - rows.y_axis,
+        rows.z_axis,
+        rows.w_axis - rows.z_axis,
+    ]
 }
 
 fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) -> FrameUniformGpu {
@@ -1018,6 +1107,22 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Each cube-face triangle spans at most 2*sqrt(2)/resolution radians.
+/// All its vertices have radius >= the minimum, so every convex combination
+/// has projection >= minimum*cos(span) onto its first vertex's direction.
+/// This gives an inner sphere even below crater valleys without treating the
+/// infinitely extended planes of steep mountain faces as nearby occluders.
+fn terrain_inner_radius(vertices: &[MeshVertex], resolution: u32) -> f32 {
+    let minimum = vertices
+        .iter()
+        .map(|vertex| Vec3::from_array(vertex.position).length())
+        .fold(f32::INFINITY, f32::min);
+    if !minimum.is_finite() || resolution < 2 {
+        return 0.0;
+    }
+    minimum * (3.0 / resolution as f32).cos() * (1.0 - 8.0 * f32::EPSILON)
+}
+
 fn create_planet_resources(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1025,6 +1130,10 @@ fn create_planet_resources(
 ) -> PlanetResources {
     let surface = TerrainSurface::new(&run.planet);
     let (terrain_vertices, terrain_indices) = mesh::build_terrain(&run.planet, &surface);
+    let inner_radius = terrain_inner_radius(
+        &terrain_vertices,
+        mesh::terrain_render_resolution(run.planet.terrain.resolution()),
+    );
     // Include the hover vehicle and tallest blades beyond the terrain shell.
     let world_radius = terrain_vertices
         .iter()
@@ -1105,6 +1214,8 @@ fn create_planet_resources(
         array_layer_count: Some(6),
     });
     PlanetResources {
+        grass_bounds: grass_bounds::prepare(&run.planet),
+        inner_radius,
         terrain_vertices: terrain_vertex_buffer,
         terrain_indices: terrain_index_buffer,
         terrain_index_count: terrain_indices.len() as u32,
@@ -1548,7 +1659,7 @@ fn create_composite_resources(
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,

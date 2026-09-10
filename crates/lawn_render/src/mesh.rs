@@ -139,7 +139,7 @@ pub fn build_terrain(planet: &Planet, surface: &TerrainSurface) -> (Vec<MeshVert
     (vertices, indices)
 }
 
-fn terrain_render_resolution(simulation_resolution: u32) -> u32 {
+pub(crate) fn terrain_render_resolution(simulation_resolution: u32) -> u32 {
     // Refine shipping terrain while leaving already-dense editor worlds at
     // their original resolution instead of multiplying their upload budget.
     simulation_resolution.max(simulation_resolution.saturating_mul(2).min(128))

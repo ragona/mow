@@ -16,6 +16,8 @@ const FAILED: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct GpuPassTimes {
+    /// Entire GPU frame span. Individual pass windows may overlap on tile GPUs.
+    pub frame: f32,
     pub interaction: f32,
     pub shadow: f32,
     pub world: f32,
@@ -143,6 +145,9 @@ impl GpuProfiler {
                             * 1.0e-6
                     };
                     self.latest = GpuPassTimes {
+                        frame: ticks[7].wrapping_sub(ticks[0]) as f32
+                            * self.timestamp_period_ns
+                            * 1.0e-6,
                         interaction: milliseconds(0),
                         shadow: milliseconds(1),
                         world: milliseconds(2),

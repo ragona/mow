@@ -33,7 +33,9 @@ fn render_direction_probes(
     queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
     sky: &wgpu::TextureView,
-    probes: &[(Vec3, Vec3)],
+    frames: &[CompositeUniformGpu],
+    extent: [u32; 2],
+    legacy_projection: bool,
 ) -> Vec<[u8; 4]> {
     let transparent = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("transparent world for panorama probes"),
@@ -60,19 +62,70 @@ fn render_direction_probes(
         transparent.size(),
     );
     let world = transparent.create_view(&wgpu::TextureViewDescriptor::default());
-    let uniforms: Vec<_> = probes
+    let uniforms: Vec<_> = frames
         .iter()
-        .map(|&(direction, camera)| {
+        .map(|frame| {
             create_init_buffer(
                 device,
                 "world-direction panorama probe",
-                bytemuck::bytes_of(&direction_frame(direction, camera)),
+                bytemuck::bytes_of(frame),
                 wgpu::BufferUsages::UNIFORM,
             )
         })
         .collect();
     let (pipeline, layout, sampler, _) =
         create_composite_resources(device, format, &world, &world, &uniforms[0], sky);
+    let pipeline = if legacy_projection {
+        let shipping = include_str!("../../shaders/composite.wgsl");
+        let reference = shipping.replace(
+            "let far = input.far_position;",
+            "let far = frame.inverse_view_proj * vec4<f32>(input.uv.x * 2.0 - 1.0, 1.0 - input.uv.y * 2.0, 0.99, 1.0);",
+        );
+        assert_ne!(
+            reference, shipping,
+            "reference must exercise the former fragment projection"
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("reference composite with per-fragment projection"),
+            source: wgpu::ShaderSource::Wgsl(reference.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("reference composite layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("reference composite"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(if format.is_srgb() {
+                    "fs_main_linear_framebuffer"
+                } else {
+                    "fs_main_gamma_framebuffer"
+                }),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    } else {
+        pipeline
+    };
     let groups: Vec<_> = uniforms
         .iter()
         .map(|uniform| {
@@ -82,8 +135,8 @@ fn render_direction_probes(
     let output = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("panorama direction and output-transfer probes"),
         size: wgpu::Extent3d {
-            width: probes.len() as u32,
-            height: 1,
+            width: frames.len() as u32 * extent[0],
+            height: extent[1],
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -94,10 +147,10 @@ fn render_direction_probes(
         view_formats: &[],
     });
     let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-    let row_bytes = (probes.len() * 4).div_ceil(256) * 256;
+    let row_bytes = (output.width() * 4).div_ceil(256) * 256;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("panorama probe readback"),
-        size: row_bytes as u64,
+        size: u64::from(row_bytes) * u64::from(output.height()),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -118,7 +171,14 @@ fn render_direction_probes(
         });
         pass.set_pipeline(&pipeline);
         for (index, group) in groups.iter().enumerate() {
-            pass.set_viewport(index as f32, 0.0, 1.0, 1.0, 0.0, 1.0);
+            pass.set_viewport(
+                (index as u32 * extent[0]) as f32,
+                0.0,
+                extent[0] as f32,
+                extent[1] as f32,
+                0.0,
+                1.0,
+            );
             pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -129,8 +189,8 @@ fn render_direction_probes(
             buffer: &readback,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(row_bytes as u32),
-                rows_per_image: Some(1),
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(output.height()),
             },
         },
         output.size(),
@@ -143,8 +203,9 @@ fn render_direction_probes(
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     receiver.recv().unwrap().unwrap();
     let bytes = readback.slice(..).get_mapped_range();
-    let pixels = bytes[..probes.len() * 4]
-        .chunks_exact(4)
+    let pixels = bytes
+        .chunks_exact(row_bytes as usize)
+        .flat_map(|row| row[..output.width() as usize * 4].chunks_exact(4))
         .map(|pixel| pixel.try_into().unwrap())
         .collect();
     drop(bytes);
@@ -218,19 +279,27 @@ fn gpu_sky_cube_orientation_seams_translation_and_output_transfer() {
                 [Vec3::ZERO, Vec3::new(31.0, -13.0, 27.0)].map(|camera| (direction, camera))
             })
             .collect();
+        let frames: Vec<_> = probes
+            .iter()
+            .map(|&(direction, camera)| direction_frame(direction, camera))
+            .collect();
         let gamma = render_direction_probes(
             &device,
             &queue,
             wgpu::TextureFormat::Rgba8Unorm,
             &sky,
-            &probes,
+            &frames,
+            [1, 1],
+            false,
         );
         let srgb = render_direction_probes(
             &device,
             &queue,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             &sky,
-            &probes,
+            &frames,
+            [1, 1],
+            false,
         );
         for (index, &(direction, _)) in probes.iter().enumerate() {
             let expected = (direction * 0.5 + Vec3::splat(0.5))
@@ -263,5 +332,86 @@ fn gpu_sky_cube_orientation_seams_translation_and_output_transfer() {
             "{} sky directions checked across two camera origins and both framebuffer transfers",
             directions.len()
         );
+    });
+}
+
+#[test]
+#[ignore = "requires a working wgpu graphics adapter"]
+fn gpu_sky_vertex_projection_matches_full_images_from_fragment_projection() {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .unwrap();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .unwrap();
+        let sky = SkyMap::new(&device, &queue);
+        let mut frames = Vec::new();
+        for direction in [
+            Vec3::X,
+            Vec3::NEG_X,
+            Vec3::Y,
+            Vec3::NEG_Y,
+            Vec3::Z,
+            Vec3::NEG_Z,
+        ] {
+            for shift in [0.0, 0.6] {
+                let camera = Vec3::new(31.0, -13.0, 27.0);
+                let mut frame = direction_frame(direction, camera);
+                let inverse = Mat4::from_cols_array_2d(&frame.inverse_view_proj);
+                frame.inverse_view_proj = (inverse
+                    * Mat4::from_translation(Vec3::new(-shift, 0.0, 0.0)))
+                .to_cols_array_2d();
+                frame.camera_radius[3] = 15.6;
+                frames.push(frame);
+            }
+        }
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            let actual = render_direction_probes(
+                &device,
+                &queue,
+                format,
+                sky.view(),
+                &frames,
+                [128, 96],
+                false,
+            );
+            let reference = render_direction_probes(
+                &device,
+                &queue,
+                format,
+                sky.view(),
+                &frames,
+                [128, 96],
+                true,
+            );
+            let mut changed = 0;
+            let mut maximum = 0;
+            for (actual, reference) in actual.iter().zip(&reference) {
+                for channel in 0..4 {
+                    let difference = actual[channel].abs_diff(reference[channel]);
+                    changed += usize::from(difference != 0);
+                    maximum = maximum.max(difference);
+                    assert!(
+                        difference <= 2,
+                        "{format:?} changed beyond rounding: {actual:?} vs {reference:?}"
+                    );
+                }
+            }
+            assert!(
+                changed < actual.len() / 20,
+                "projection changed too many output channels"
+            );
+            println!(
+                "{format:?}: {} sky pixels compared; {changed} changed channels, maximum difference {maximum}",
+                actual.len()
+            );
+        }
     });
 }

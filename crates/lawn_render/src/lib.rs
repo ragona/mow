@@ -2,6 +2,7 @@
 
 mod bloom;
 mod gpu_profiler;
+mod grass_bounds;
 mod grass_roots;
 mod interaction;
 mod mesh;

@@ -1,6 +1,7 @@
 use super::*;
 
 mod sky;
+mod visibility;
 use lawn_core::{
     GameMode, GeneratorConfig, JobConfig, PlanetGenerator, VehicleTuning, WorldSeed,
     input::InputSnapshot, planet::CURRENT_GENERATOR_VERSION, profile::AccessibilitySettings,
@@ -62,7 +63,40 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         let capture_dir = std::env::var_os("LAWN_CAPTURE_DIR").map(std::path::PathBuf::from);
         let capture_view = std::env::var("LAWN_CAPTURE_VIEW").unwrap_or_else(|_| "day".into());
         let capture = capture_dir.is_some();
-        let (width, height) = if capture { (1024, 768) } else { (64, 64) };
+        let benchmark = std::env::var_os("LAWN_BENCH").is_some();
+        let scene = std::env::var("LAWN_BENCH_SCENE").unwrap_or_else(|_| "craggy".into());
+        let parameter = |name, default| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(default)
+        };
+        let quality = if std::env::var("LAWN_BENCH_QUALITY").is_ok_and(|value| value == "low") {
+            QualityPreset::Low
+        } else {
+            QualityPreset::High
+        };
+        let (width, height) = if benchmark {
+            (
+                parameter("LAWN_BENCH_WIDTH", 1280),
+                parameter("LAWN_BENCH_HEIGHT", 720),
+            )
+        } else if capture {
+            (1024, 768)
+        } else {
+            (64, 64)
+        };
+        assert!(
+            width > 0 && height > 0 && width % 64 == 0,
+            "readback rows must be aligned"
+        );
+        let measured_frames = parameter("LAWN_BENCH_FRAMES", 120).max(1);
+        let warmup_frames = 60;
+        let frame_count = if benchmark {
+            warmup_frames + measured_frames
+        } else {
+            1
+        };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -91,6 +125,20 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             })
             .to_vec();
         counts.dedup();
+        if benchmark {
+            assert!(
+                features.contains(wgpu::Features::TIMESTAMP_QUERY),
+                "benchmark requires GPU timestamps"
+            );
+            counts = vec![supported_msaa_samples(
+                parameter(
+                    "LAWN_BENCH_MSAA",
+                    if quality == QualityPreset::Low { 2 } else { 4 },
+                ),
+                flags(WORLD_FORMAT),
+                flags(DEPTH_FORMAT),
+            )];
+        }
         println!(
             "GPU smoke adapter: {}; sample counts: {counts:?}",
             adapter.get_info().name
@@ -99,7 +147,7 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             .contains(wgpu::Features::TIMESTAMP_QUERY)
             .then(|| GpuProfiler::new(&device, queue.get_timestamp_period()));
         let accessibility = AccessibilitySettings::default();
-        let planet_config = if capture {
+        let mut planet_config = if capture || benchmark {
             GeneratorConfig {
                 base_radius: 17.0,
                 mountain_count_min: 6,
@@ -119,6 +167,16 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                 ..GeneratorConfig::test_quality()
             }
         };
+        if benchmark && scene == "meadow" {
+            planet_config = GeneratorConfig {
+                mountain_count_min: 0,
+                mountain_count_max: 0,
+                mowable_ratio_min: 1.0,
+                mowable_ratio_max: 1.0,
+                rolling_amplitude: 0.3,
+                ..GeneratorConfig::default()
+            };
+        }
         let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, planet_config)
             .generate(WorldSeed(21))
             .unwrap();
@@ -144,6 +202,13 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             {
                 break;
             }
+        }
+        if benchmark && scene == "mown" {
+            let mut snapshot = run.mowing.snapshot();
+            snapshot
+                .cells
+                .fill(lawn_core::mowing::PackedMowingCell(255));
+            run.mowing.restore(&snapshot).unwrap();
         }
         let resources = create_planet_resources(&device, &queue, &run);
         let mut interaction = GrassInteraction::new(&device, run.planet.config.base_radius);
@@ -190,7 +255,9 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             bytemuck::cast_slice(&tuft_indices),
             wgpu::BufferUsages::INDEX,
         );
-        let (camera, look_at) = if capture {
+        let (camera, look_at) = if benchmark {
+            (run.camera.state.position, run.camera.state.target)
+        } else if capture {
             match capture_view.as_str() {
                 "night" => (Vec3::new(-30.0, -24.0, -34.0), Vec3::ZERO),
                 "moon" => {
@@ -219,22 +286,32 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         } else {
             (Vec3::new(0.0, 25.0, 32.0), Vec3::ZERO)
         };
+        let camera_up = if benchmark {
+            run.camera.state.up
+        } else {
+            Vec3::Y
+        };
+        let camera_fov = if benchmark {
+            run.camera.state.field_of_view_degrees
+        } else {
+            60.0_f32
+        };
         let uniform = FrameUniformGpu {
             view_proj: (Mat4::perspective_rh(
-                60.0_f32.to_radians(),
+                camera_fov.to_radians(),
                 width as f32 / height as f32,
                 0.08,
                 180.0,
-            ) * Mat4::look_at_rh(camera, look_at, Vec3::Y))
+            ) * Mat4::look_at_rh(camera, look_at, camera_up))
             .to_cols_array_2d(),
             light_view_proj: resources.light_view_proj.to_cols_array_2d(),
             camera_time: [camera.x, camera.y, camera.z, 1.0],
             light_epoch: [-0.42, -0.81, -0.38, 0.0],
             options: [
-                1.0,
+                quality_density(quality),
                 INTERACTION_RESOLUTION as f32,
                 0.0,
-                if capture {
+                if capture || benchmark {
                     run.planet.config.grass_height_scale
                 } else {
                     1.0
@@ -244,6 +321,32 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             mower_position: run.vehicle.state.transform.position.extend(1.0).to_array(),
             mower_forward: run.vehicle.state.transform.forward.extend(0.0).to_array(),
         };
+        let mut visibility = GrassVisibility::new(
+            &run,
+            CameraState {
+                position: camera,
+                target: look_at,
+                up: camera_up,
+                field_of_view_degrees: camera_fov,
+            },
+            quality,
+            &resources,
+            Mat4::from_cols_array_2d(&uniform.view_proj),
+            uniform.options[3],
+        );
+        // Reference mode keeps the same density and root prefixes but bypasses
+        // visibility rejection for pixel comparisons against the optimized path.
+        if benchmark && std::env::var_os("LAWN_BENCH_NO_CULL").is_some() {
+            visibility.planes = [Vec4::ZERO; 6];
+            visibility.inner_radius = 0.0;
+        }
+        let visible_roots: u32 = run
+            .planet
+            .grass_patches
+            .iter()
+            .zip(&resources.grass_bounds)
+            .map(|(patch, bounds)| visibility.draw_count(patch, bounds))
+            .sum();
         let composite_uniform = create_init_buffer(
             &device,
             "smoke composite uniform",
@@ -255,7 +358,16 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                     .extend(run.planet.config.base_radius + 0.6)
                     .to_array(),
                 sun_time: [0.42, 0.81, 0.38, 1.0],
-                display: [width as f32 / height as f32, 0.0, 0.65, 0.20],
+                display: [
+                    width as f32 / height as f32,
+                    0.0,
+                    0.65,
+                    if quality == QualityPreset::Low {
+                        0.0
+                    } else {
+                        0.20
+                    },
+                ],
             }),
             wgpu::BufferUsages::UNIFORM,
         );
@@ -330,205 +442,288 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-            let slot = profiler
-                .as_mut()
-                .and_then(|profiler| profiler.begin_frame(&device));
-            let query_set = slot.and_then(|_| profiler.as_ref().map(GpuProfiler::query_set));
-            interaction.encode(
-                &queue,
-                &mut encoder,
-                &run.planet,
-                &run.vehicle.state,
-                2.2,
-                0.0,
-                1.0 / 60.0,
-                query_set.map(|query_set| wgpu::ComputePassTimestampWrites {
-                    query_set,
-                    beginning_of_pass_write_index: Some(0),
-                    end_of_pass_write_index: Some(1),
-                }),
-            );
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    timestamp_writes: query_set.map(|query_set| wgpu::RenderPassTimestampWrites {
+            let mut measurements = Vec::with_capacity(measured_frames as usize);
+            for frame_index in 0..frame_count {
+                let encode_started = Instant::now();
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                let slot = profiler
+                    .as_mut()
+                    .and_then(|profiler| profiler.begin_frame(&device));
+                let query_set = slot.and_then(|_| profiler.as_ref().map(GpuProfiler::query_set));
+                interaction.encode(
+                    &queue,
+                    &mut encoder,
+                    &run.planet,
+                    &run.vehicle.state,
+                    2.2,
+                    frame_index as f32 / 60.0,
+                    1.0 / 60.0,
+                    query_set.map(|query_set| wgpu::ComputePassTimestampWrites {
                         query_set,
-                        beginning_of_pass_write_index: Some(2),
-                        end_of_pass_write_index: Some(3),
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: Some(1),
                     }),
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &shadow.view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
+                );
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        timestamp_writes: query_set.map(|query_set| {
+                            wgpu::RenderPassTimestampWrites {
+                                query_set,
+                                beginning_of_pass_write_index: Some(2),
+                                end_of_pass_write_index: Some(3),
+                            }
                         }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
-                pass.set_pipeline(&shadow_pipeline);
-                pass.set_bind_group(0, &shadow_group, &[]);
-                pass.set_vertex_buffer(0, resources.terrain_vertices.slice(..));
-                pass.set_index_buffer(
-                    resources.terrain_indices.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..resources.terrain_index_count, 0, 0..1);
-                pass.set_vertex_buffer(0, vehicle_vertices.slice(..));
-                pass.set_index_buffer(vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
-            }
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    timestamp_writes: query_set.map(|query_set| wgpu::RenderPassTimestampWrites {
-                        query_set,
-                        beginning_of_pass_write_index: Some(4),
-                        end_of_pass_write_index: Some(5),
-                    }),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: targets
-                            .multisample_view
-                            .as_ref()
-                            .unwrap_or(&targets.world_view),
-                        depth_slice: None,
-                        resolve_target: targets
-                            .multisample_view
-                            .as_ref()
-                            .map(|_| &targets.world_view),
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &targets.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &shadow.view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
                         }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
-                pass.set_pipeline(&terrain_pipeline);
-                pass.set_bind_group(0, &frame_group, &[]);
-                pass.set_vertex_buffer(0, resources.terrain_vertices.slice(..));
-                pass.set_index_buffer(
-                    resources.terrain_indices.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..resources.terrain_index_count, 0, 0..1);
-                pass.set_vertex_buffer(0, vehicle_vertices.slice(..));
-                pass.set_index_buffer(vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
-                pass.set_pipeline(&grass_pipeline);
-                let parity = usize::from(!std::ptr::eq(
-                    interaction.current_displacement(),
-                    interaction.displacement_buffers()[0],
-                ));
-                pass.set_bind_group(1, &grass_groups[parity], &[]);
-                pass.set_vertex_buffer(0, tuft_vertices.slice(..));
-                pass.set_vertex_buffer(1, resources.grass_roots.slice(..));
-                pass.set_index_buffer(tuft_indices.slice(..), wgpu::IndexFormat::Uint16);
-                pass.draw_indexed(
-                    0..tuft_index_count,
-                    0,
-                    0..run.planet.grass_roots.len() as u32,
-                );
-                pass.set_pipeline(&particle_pipeline);
-                particles.draw(&mut pass);
-            }
-            bloom.encode(&mut encoder, query_set);
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    timestamp_writes: query_set.map(|query_set| wgpu::RenderPassTimestampWrites {
-                        query_set,
-                        beginning_of_pass_write_index: None,
-                        end_of_pass_write_index: Some(7),
-                    }),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &output_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_pipeline(&composite);
-                pass.set_bind_group(0, &composite_group, &[]);
-                pass.draw(0..3, 0..1);
-            }
-            encoder.copy_texture_to_buffer(
-                output.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &readback,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(width * 4),
-                        rows_per_image: Some(height),
-                    },
-                },
-                wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-            encoder.map_buffer_on_submit(&readback, wgpu::MapMode::Read, .., move |result| {
-                sender.send(result).unwrap();
-            });
-            if let (Some(slot), Some(profiler)) = (slot, profiler.as_mut()) {
-                profiler.finish_encoding(&mut encoder, slot);
-            }
-            queue.submit([encoder.finish()]);
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            receiver.recv().unwrap().unwrap();
-            let pixels = readback.slice(..).get_mapped_range();
-            if !capture {
-                let center = &pixels[((height / 2 * width + width / 2) * 4) as usize..][..4];
-                assert!(
-                    center[0] > center[2] || center[1] > center[2],
-                    "world center must show terrain, not blue sky: {center:?}"
-                );
-            }
-            assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
-            if let Some(directory) = &capture_dir {
-                use std::io::Write;
-                std::fs::create_dir_all(directory).unwrap();
-                let path = directory.join(format!("asteroid-{capture_view}-{samples}x.ppm"));
-                let mut output = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
-                write!(output, "P6\n{width} {height}\n255\n").unwrap();
-                for pixel in pixels.chunks_exact(4) {
-                    output.write_all(&pixel[..3]).unwrap();
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&shadow_pipeline);
+                    pass.set_bind_group(0, &shadow_group, &[]);
+                    pass.set_vertex_buffer(0, resources.terrain_vertices.slice(..));
+                    pass.set_index_buffer(
+                        resources.terrain_indices.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..resources.terrain_index_count, 0, 0..1);
+                    pass.set_vertex_buffer(0, vehicle_vertices.slice(..));
+                    pass.set_index_buffer(vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
                 }
-                output.flush().unwrap();
-                println!("Saved {}", path.display());
-            }
-            drop(pixels);
-            readback.unmap();
-            if let Some(profiler) = profiler.as_mut() {
-                profiler.begin_frame(&device);
-                let times = profiler.latest();
-                if capture {
-                    println!(
-                        "Reference {capture_view}, {samples}x MSAA GPU milliseconds: {times:?}"
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        timestamp_writes: query_set.map(|query_set| {
+                            wgpu::RenderPassTimestampWrites {
+                                query_set,
+                                beginning_of_pass_write_index: Some(4),
+                                end_of_pass_write_index: Some(5),
+                            }
+                        }),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: targets
+                                .multisample_view
+                                .as_ref()
+                                .unwrap_or(&targets.world_view),
+                            depth_slice: None,
+                            resolve_target: targets
+                                .multisample_view
+                                .as_ref()
+                                .map(|_| &targets.world_view),
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: if targets.multisample_view.is_some() {
+                                    wgpu::StoreOp::Discard
+                                } else {
+                                    wgpu::StoreOp::Store
+                                },
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &targets.depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Discard,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&terrain_pipeline);
+                    pass.set_bind_group(0, &frame_group, &[]);
+                    pass.set_vertex_buffer(0, resources.terrain_vertices.slice(..));
+                    pass.set_index_buffer(
+                        resources.terrain_indices.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..resources.terrain_index_count, 0, 0..1);
+                    pass.set_vertex_buffer(0, vehicle_vertices.slice(..));
+                    pass.set_index_buffer(vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
+                    pass.set_pipeline(&grass_pipeline);
+                    let parity = usize::from(!std::ptr::eq(
+                        interaction.current_displacement(),
+                        interaction.displacement_buffers()[0],
+                    ));
+                    pass.set_bind_group(1, &grass_groups[parity], &[]);
+                    pass.set_vertex_buffer(0, tuft_vertices.slice(..));
+                    pass.set_vertex_buffer(1, resources.grass_roots.slice(..));
+                    pass.set_index_buffer(tuft_indices.slice(..), wgpu::IndexFormat::Uint16);
+                    if benchmark {
+                        for (patch, bounds) in
+                            run.planet.grass_patches.iter().zip(&resources.grass_bounds)
+                        {
+                            let count = visibility.draw_count(patch, bounds);
+                            if count > 0 {
+                                pass.draw_indexed(
+                                    0..tuft_index_count,
+                                    0,
+                                    patch.roots.start..patch.roots.start + count,
+                                );
+                            }
+                        }
+                    } else {
+                        pass.draw_indexed(
+                            0..tuft_index_count,
+                            0,
+                            0..run.planet.grass_roots.len() as u32,
+                        );
+                    }
+                    pass.set_pipeline(&particle_pipeline);
+                    particles.draw(&mut pass);
+                }
+                if quality != QualityPreset::Low {
+                    bloom.encode(&mut encoder, query_set);
+                }
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        timestamp_writes: query_set.map(|query_set| {
+                            wgpu::RenderPassTimestampWrites {
+                                query_set,
+                                beginning_of_pass_write_index: (quality == QualityPreset::Low)
+                                    .then_some(6),
+                                end_of_pass_write_index: Some(7),
+                            }
+                        }),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &output_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&composite);
+                    pass.set_bind_group(0, &composite_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                let final_frame = frame_index + 1 == frame_count;
+                if final_frame {
+                    encoder.copy_texture_to_buffer(
+                        output.as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &readback,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(width * 4),
+                                rows_per_image: Some(height),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
                     );
                 }
-                assert!(
-                    [
-                        times.interaction,
-                        times.shadow,
-                        times.world,
-                        times.composite
-                    ]
-                    .into_iter()
-                    .all(|time| time.is_finite() && time >= 0.0)
+                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                if final_frame {
+                    encoder.map_buffer_on_submit(
+                        &readback,
+                        wgpu::MapMode::Read,
+                        ..,
+                        move |result| {
+                            sender.send(result).unwrap();
+                        },
+                    );
+                }
+                if let (Some(slot), Some(profiler)) = (slot, profiler.as_mut()) {
+                    profiler.finish_encoding(&mut encoder, slot);
+                }
+                queue.submit([encoder.finish()]);
+                let encode_ms = encode_started.elapsed().as_secs_f32() * 1000.0;
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                if final_frame {
+                    receiver.recv().unwrap().unwrap();
+                    let pixels = readback.slice(..).get_mapped_range();
+                    if !capture && !benchmark {
+                        let center =
+                            &pixels[((height / 2 * width + width / 2) * 4) as usize..][..4];
+                        assert!(
+                            center[0] > center[2] || center[1] > center[2],
+                            "world center must show terrain, not blue sky: {center:?}"
+                        );
+                    }
+                    assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+                    if let Some(directory) = &capture_dir {
+                        use std::io::Write;
+                        std::fs::create_dir_all(directory).unwrap();
+                        let path =
+                            directory.join(format!("asteroid-{capture_view}-{samples}x.ppm"));
+                        let mut output =
+                            std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+                        write!(output, "P6\n{width} {height}\n255\n").unwrap();
+                        for pixel in pixels.chunks_exact(4) {
+                            output.write_all(&pixel[..3]).unwrap();
+                        }
+                        output.flush().unwrap();
+                        println!("Saved {}", path.display());
+                    }
+                    drop(pixels);
+                    readback.unmap();
+                }
+                if let Some(profiler) = profiler.as_mut() {
+                    profiler.begin_frame(&device);
+                    let times = profiler.latest();
+                    if benchmark && frame_index >= warmup_frames {
+                        measurements.push([
+                            encode_ms,
+                            times.interaction,
+                            times.shadow,
+                            times.world,
+                            times.composite,
+                            times.frame,
+                        ]);
+                    }
+                    if capture && final_frame {
+                        println!(
+                            "Reference {capture_view}, {samples}x MSAA GPU milliseconds: {times:?}"
+                        );
+                    }
+                    assert!(
+                        [
+                            times.interaction,
+                            times.shadow,
+                            times.world,
+                            times.composite
+                        ]
+                        .into_iter()
+                        .all(|time| time.is_finite() && time >= 0.0)
+                    );
+                }
+            }
+            if benchmark {
+                println!(
+                    "BENCH scene={scene} size={width}x{height} msaa={samples} quality={quality:?} roots={visible_roots} frames={measured_frames}"
                 );
+                for (index, label) in [
+                    "cpu_encode",
+                    "interaction",
+                    "shadow",
+                    "world",
+                    "bloom_composite",
+                    "gpu_total",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut values: Vec<_> =
+                        measurements.iter().map(|sample| sample[index]).collect();
+                    values.sort_by(f32::total_cmp);
+                    println!(
+                        "BENCH {label} median_ms={:.6} p95_ms={:.6}",
+                        values[values.len() / 2],
+                        values[values.len() * 95 / 100]
+                    );
+                }
             }
             assert!(
                 error_scope.pop().await.is_none(),

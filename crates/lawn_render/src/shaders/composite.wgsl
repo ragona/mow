@@ -14,6 +14,7 @@ struct CompositeUniform {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) far_position: vec4<f32>,
 };
 
 @vertex
@@ -23,6 +24,10 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
     var output: VertexOutput;
     output.clip_position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
     output.uv = vec2<f32>(x, y);
+    // Matrix projection is affine in clip-space coordinates. Interpolating its
+    // homogeneous result preserves ray geometry while doing this
+    // matrix multiply for three vertices instead of every output pixel.
+    output.far_position = frame.inverse_view_proj * vec4<f32>(output.clip_position.xy, 0.99, 1.0);
     return output;
 }
 
@@ -64,7 +69,7 @@ fn composite_color(input: VertexOutput) -> vec3<f32> {
     if (frame.display.w > 0.0) {
         bloom = textureSampleLevel(bloom_texture, world_sampler, input.uv, 0.0).rgb;
     }
-    let far = frame.inverse_view_proj * vec4<f32>(input.uv.x * 2.0 - 1.0, 1.0 - input.uv.y * 2.0, 0.99, 1.0);
+    let far = input.far_position;
     let ray = normalize(far.xyz / far.w - frame.camera_radius.xyz);
     // Evaluate derivatives uniformly before the coverage branch. Explicit LOD
     // keeps subpixel stars quiet without performing a sky fetch behind terrain.

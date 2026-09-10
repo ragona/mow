@@ -1208,17 +1208,30 @@ impl LawnOrbitApp {
                     percentile(0.95)
                 ));
                 ui.monospace(format!(
+                    "acquire   {:>5.2} ms",
+                    self.last_stats.cpu_acquire_milliseconds
+                ));
+                ui.monospace(format!(
                     "encode    {:>5.2} ms",
                     self.last_stats.cpu_encode_milliseconds
                 ));
+                if self.last_stats.gpu_frame_milliseconds > 0.0 {
+                    ui.monospace(format!(
+                        "gpu frame {:>5.2} ms",
+                        self.last_stats.gpu_frame_milliseconds
+                    ));
+                }
                 if self.last_stats.gpu_world_milliseconds > 0.0 {
                     ui.monospace(format!(
-                        "gpu       i {:>4.2}  s {:>4.2}  w {:>4.2}  c {:>4.2} ms",
+                        "gpu spans i {:>4.2}  s {:>4.2}  w {:>4.2}  c {:>4.2} ms",
                         self.last_stats.gpu_interaction_milliseconds,
                         self.last_stats.gpu_shadow_milliseconds,
                         self.last_stats.gpu_world_milliseconds,
                         self.last_stats.gpu_composite_milliseconds,
-                    ));
+                    ))
+                    .on_hover_text(
+                        "Pass timestamp spans can overlap; GPU frame measures the total directly.",
+                    );
                 }
                 ui.monospace(format!("patches   {:>7}", self.last_stats.visible_patches));
                 ui.monospace(format!("tufts     {:>7}", self.last_stats.visible_tufts));

@@ -7,7 +7,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cube_map::{CubeCell, CubeFace, cell_center_direction, cell_solid_angle, offset_cell},
+    cube_map::{CubeCell, CubeFace, cell_center_direction, face_solid_angles, offset_cell},
     planet::{Planet, SurfaceMaterial},
 };
 
@@ -77,6 +77,18 @@ pub struct DirtyTileUpdate {
     pub cells: Vec<u32>,
 }
 
+/// A compact tile whose packed cells are valid for the duration of an upload
+/// callback. Upload consumers can copy directly from this shared staging slice.
+#[derive(Clone, Copy, Debug)]
+pub struct DirtyTileView<'a> {
+    pub face: CubeFace,
+    pub origin_x: u32,
+    pub origin_y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub cells: &'a [PackedMowingCell],
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MowingFieldSnapshot {
     pub resolution: u32,
@@ -103,6 +115,7 @@ pub struct MowingField {
     dirty_tile_size: u32,
     dirty_tiles: Vec<u32>,
     dirty_flags: Vec<bool>,
+    dirty_staging: Vec<PackedMowingCell>,
     locator_cache: OnceLock<Option<Vec3>>,
     nominal_radius: f32,
 }
@@ -115,6 +128,7 @@ impl MowingField {
         let mut mowable = vec![false; len];
         let mut weights = vec![0.0; len];
         let mut total_mowable_weight = 0.0;
+        let solid_angles = face_solid_angles(resolution);
         for face in CubeFace::ALL {
             for y in 0..resolution {
                 for x in 0..resolution {
@@ -124,7 +138,7 @@ impl MowingField {
                     let terrain = planet.terrain_cell(direction);
                     if terrain.material == SurfaceMaterial::Grass {
                         let radial_alignment = terrain.normal.dot(direction).clamp(0.35, 1.0);
-                        let weight = (cell_solid_angle(x, y, resolution)
+                        let weight = (solid_angles[(y * resolution + x) as usize]
                             * f64::from(terrain.radius * terrain.radius)
                             / f64::from(radial_alignment))
                             as f32;
@@ -149,6 +163,7 @@ impl MowingField {
                 false;
                 6 * resolution.div_ceil(DEFAULT_DIRTY_TILE_SIZE).pow(2) as usize
             ],
+            dirty_staging: Vec::with_capacity(DEFAULT_DIRTY_TILE_SIZE.pow(2) as usize),
             locator_cache: OnceLock::new(),
             nominal_radius: planet.config.base_radius,
         }
@@ -386,41 +401,60 @@ impl MowingField {
         }
     }
 
-    /// Drain compact tile uploads for the GPU mirror.
+    /// Drain compact tile uploads for the GPU mirror. Renderers should prefer
+    /// `visit_dirty_tiles` to reuse staging memory instead of owning each tile.
     pub fn take_dirty_tiles(&mut self) -> Vec<DirtyTileUpdate> {
+        let mut updates = Vec::with_capacity(self.dirty_tiles.len());
+        self.visit_dirty_tiles(|tile| {
+            updates.push(DirtyTileUpdate {
+                face: tile.face,
+                origin_x: tile.origin_x,
+                origin_y: tile.origin_y,
+                width: tile.width,
+                height: tile.height,
+                cells: tile.cells.iter().map(|cell| cell.0).collect(),
+            });
+        });
+        updates
+    }
+
+    /// Drain sorted dirty tiles through a reusable staging slice. Calls after
+    /// construction allocate no tile storage, including for partial edge tiles.
+    pub fn visit_dirty_tiles(&mut self, mut visit: impl FnMut(DirtyTileView<'_>)) {
         if self.dirty_tiles.is_empty() {
-            return Vec::new();
+            return;
         }
         self.dirty_flags.fill(false);
-        let mut keys = std::mem::take(&mut self.dirty_tiles);
-        keys.sort_unstable();
-        let updates = keys
-            .iter()
-            .map(|&key| {
-                let (face, tile_x, tile_y) = decode_tile_key(key);
-                let origin_x = tile_x * self.dirty_tile_size;
-                let origin_y = tile_y * self.dirty_tile_size;
-                let width = self.dirty_tile_size.min(self.resolution - origin_x);
-                let height = self.dirty_tile_size.min(self.resolution - origin_y);
-                let mut cells = Vec::with_capacity((width * height) as usize);
-                for y in origin_y..origin_y + height {
-                    for x in origin_x..origin_x + width {
-                        cells.push(self.cell(CubeCell { face, x, y }).0);
-                    }
-                }
-                DirtyTileUpdate {
-                    face,
-                    origin_x,
-                    origin_y,
-                    width,
-                    height,
-                    cells,
-                }
-            })
-            .collect();
-        keys.clear();
-        self.dirty_tiles = keys;
-        updates
+        self.dirty_tiles.sort_unstable();
+        for &key in &self.dirty_tiles {
+            let (face, tile_x, tile_y) = decode_tile_key(key);
+            let origin_x = tile_x * self.dirty_tile_size;
+            let origin_y = tile_y * self.dirty_tile_size;
+            let width = self.dirty_tile_size.min(self.resolution - origin_x);
+            let height = self.dirty_tile_size.min(self.resolution - origin_y);
+            self.dirty_staging.clear();
+            for y in origin_y..origin_y + height {
+                let start = flat_index(
+                    CubeCell {
+                        face,
+                        x: origin_x,
+                        y,
+                    },
+                    self.resolution,
+                );
+                self.dirty_staging
+                    .extend_from_slice(&self.cells[start..start + width as usize]);
+            }
+            visit(DirtyTileView {
+                face,
+                origin_x,
+                origin_y,
+                width,
+                height,
+                cells: &self.dirty_staging,
+            });
+        }
+        self.dirty_tiles.clear();
     }
 
     /// Weighted centroid of the largest connected uncut region, used by the 95%
@@ -619,6 +653,66 @@ mod tests {
                 .generate_with_roots(crate::WorldSeed(7), false)
                 .unwrap();
         MowingField::from_planet(&planet)
+    }
+
+    #[test]
+    fn borrowed_dirty_tiles_reconstruct_exact_cells_and_reuse_storage() {
+        let mut planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(crate::WorldSeed(7), false)
+                .unwrap();
+        for resolution in [8, 19, 64] {
+            planet.config.mowing_resolution = resolution;
+            let mut field = MowingField::from_planet(&planet);
+            let mut mirror = field.cells.clone();
+            let staging_address = field.dirty_staging.as_ptr();
+            let staging_capacity = field.dirty_staging.capacity();
+            for pass in 1..=2_u32 {
+                // Reverse marking order and repeated marks exercise sorting and
+                // deduplication, including each face's partial edge tiles.
+                for index in (0..field.cells.len()).rev() {
+                    field.cells[index] = PackedMowingCell(
+                        (index as u32).wrapping_mul(0x9e37_79b9).wrapping_add(pass),
+                    );
+                    let cell = cell_from_index(index, resolution);
+                    field.mark_dirty(cell);
+                    field.mark_dirty(cell);
+                }
+                let mut previous = None;
+                let mut tile_count = 0;
+                field.visit_dirty_tiles(|tile| {
+                    let address = (tile.face as u8, tile.origin_y, tile.origin_x);
+                    assert!(previous.is_none_or(|previous| previous < address));
+                    previous = Some(address);
+                    assert_eq!(tile.cells.as_ptr(), staging_address);
+                    assert_eq!(tile.cells.len(), (tile.width * tile.height) as usize);
+                    for y in 0..tile.height {
+                        let target = flat_index(
+                            CubeCell {
+                                face: tile.face,
+                                x: tile.origin_x,
+                                y: tile.origin_y + y,
+                            },
+                            resolution,
+                        );
+                        let source = (y * tile.width) as usize;
+                        mirror[target..target + tile.width as usize]
+                            .copy_from_slice(&tile.cells[source..source + tile.width as usize]);
+                    }
+                    tile_count += 1;
+                });
+                assert_eq!(
+                    tile_count,
+                    6 * resolution.div_ceil(DEFAULT_DIRTY_TILE_SIZE).pow(2)
+                );
+                assert_eq!(mirror, field.cells);
+                assert_eq!(field.dirty_staging.capacity(), staging_capacity);
+                assert!(field.dirty_tiles.is_empty());
+                assert!(field.dirty_flags.iter().all(|flag| !flag));
+                field.visit_dirty_tiles(|_| panic!("clean field produced an upload"));
+                assert!(field.take_dirty_tiles().is_empty());
+            }
+        }
     }
 
     #[test]
