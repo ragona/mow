@@ -30,8 +30,10 @@ struct Crater {
 #[derive(Debug)]
 pub(crate) struct TerrainSurface {
     resolution: u32,
-    stride: usize,
     coverage: Vec<f32>,
+    garden_phase: Vec3,
+    cavity_resolution: u32,
+    cavity: Vec<f32>,
     craters: Vec<Crater>,
     crater_bins: Vec<Vec<usize>>,
     base_radius: f32,
@@ -45,6 +47,7 @@ impl TerrainSurface {
             .map(|cell| f32::from(cell.material == SurfaceMaterial::Rock))
             .collect();
         let mut surface = Self::from_mask(planet.terrain.resolution(), &mask);
+        surface.prepare_garden(planet);
         surface.prepare_craters(planet);
         surface
     }
@@ -79,8 +82,10 @@ impl TerrainSurface {
         }
         Self {
             resolution,
-            stride,
             coverage,
+            garden_phase: Vec3::ZERO,
+            cavity_resolution: 0,
+            cavity: Vec::new(),
             craters: Vec::new(),
             crater_bins: Vec::new(),
             base_radius: 0.0,
@@ -90,29 +95,116 @@ impl TerrainSurface {
     /// Samples four cached values, with a smooth transition about cell centers.
     /// Interior values remain exactly zero or one; 0.5 is the shared rock edge.
     pub(crate) fn rock_coverage(&self, direction: Vec3) -> f32 {
-        let address = direction_to_face_uv(direction);
-        let coordinate =
-            (address.uv * 0.5 + Vec2::splat(0.5)) * self.resolution as f32 + Vec2::splat(0.5);
-        let base = coordinate.floor();
-        let fraction = coordinate - base;
-        let weight = fraction * fraction * (Vec2::splat(3.0) - fraction * 2.0);
-        let index = address.face.index() * self.stride * self.stride
-            + base.y as usize * self.stride
-            + base.x as usize;
-        let top = lerp(self.coverage[index], self.coverage[index + 1], weight.x);
-        let bottom = lerp(
-            self.coverage[index + self.stride],
-            self.coverage[index + self.stride + 1],
-            weight.x,
-        );
-        lerp(top, bottom, weight.y).clamp(0.0, 1.0)
+        sample_padded(&self.coverage, self.resolution, direction)
     }
 
-    /// Cosmetic radial offset and bowl/rim/tint data, evaluated only while
-    /// building the immutable render mesh. Gameplay heights remain unchanged.
+    /// Seeded, broad garden clusters shared by terrain and blade preparation.
+    /// Evaluated only on upload: the grass shader reads one packed attribute.
+    pub(crate) fn garden(&self, direction: Vec3) -> [f32; 3] {
+        let direction = direction.normalize();
+        let broad = (direction.dot(Vec3::new(4.7, 6.1, 2.9)) + self.garden_phase.x).sin();
+        let middle = (direction.dot(Vec3::new(12.2, -7.8, 5.4)) + self.garden_phase.y).sin();
+        let fine = (direction.dot(Vec3::new(-16.3, 14.1, 10.5)) + self.garden_phase.z).sin();
+        let tone = smoothstep(0.12, 0.88, 0.5 + broad * 0.27 + middle * 0.15 + fine * 0.08);
+        let shape = smoothstep(0.10, 0.90, 0.5 + middle * 0.30 + fine * 0.20);
+        let cavity = if self.cavity_resolution == 0 {
+            0.0
+        } else {
+            sample_padded(&self.cavity, self.cavity_resolution, direction)
+        };
+        [tone, shape, cavity]
+    }
+
+    fn prepare_garden(&mut self, planet: &Planet) {
+        let seed = planet.world_seed.0 ^ 0x4741_5244_454E;
+        self.garden_phase = Vec3::new(
+            random01(hash64(seed)),
+            random01(hash64(seed ^ 0x544F_4E45)),
+            random01(hash64(seed ^ 0x0053_4841_5045)),
+        ) * std::f32::consts::TAU;
+
+        // A small static horizon field captures sheltered rock feet and valleys.
+        // Its resolution is bounded independently of large editor worlds. Only
+        // these centers sample analytic heights; the horizon uses cached taps.
+        let resolution = self.resolution.min(64);
+        let radii: Vec<_> = CubeFace::ALL
+            .into_iter()
+            .flat_map(|face| {
+                (0..resolution).flat_map(move |y| {
+                    (0..resolution).map(move |x| {
+                        let uv = (Vec2::new(x as f32, y as f32) + Vec2::splat(0.5))
+                            * (2.0 / resolution as f32)
+                            - Vec2::ONE;
+                        planet.surface_radius(face_vector(face, uv))
+                    })
+                })
+            })
+            .collect();
+        let mut cavities = Vec::with_capacity(radii.len());
+        for face in CubeFace::ALL {
+            for y in 0..i64::from(resolution) {
+                for x in 0..i64::from(resolution) {
+                    let point = |dx: i64, dy: i64| {
+                        let uv = (Vec2::new((x + dx) as f32, (y + dy) as f32) + Vec2::splat(0.5))
+                            * (2.0 / resolution as f32)
+                            - Vec2::ONE;
+                        face_vector(face, uv).normalize()
+                            * mask_tap(&radii, resolution, face, x + dx, y + dy)
+                    };
+                    let center = point(0, 0);
+                    let radial = center.normalize();
+                    let mut normal = (point(1, 0) - point(-1, 0))
+                        .cross(point(0, 1) - point(0, -1))
+                        .try_normalize()
+                        .unwrap_or(radial);
+                    if normal.dot(radial) < 0.0 {
+                        normal = -normal;
+                    }
+                    let mut occlusion = 0.0;
+                    for (dx, dy) in [
+                        (-1, 0),
+                        (1, 0),
+                        (0, -1),
+                        (0, 1),
+                        (-3, 0),
+                        (3, 0),
+                        (0, -3),
+                        (0, 3),
+                        (-2, -2),
+                        (-2, 2),
+                        (2, -2),
+                        (2, 2),
+                    ] {
+                        let delta = point(dx, dy) - center;
+                        let horizon = delta.dot(normal) / delta.length().max(0.00001);
+                        occlusion += (horizon - 0.025).max(0.0);
+                    }
+                    cavities.push((occlusion * (3.0 / 12.0)).clamp(0.0, 1.0));
+                }
+            }
+        }
+        // Reuse the seam-safe padded tent filter. Values remain continuous as
+        // terrain vertices and roots cross cube boundaries and corners.
+        let filtered = Self::from_mask(resolution, &cavities);
+        self.cavity_resolution = resolution;
+        self.cavity = filtered.coverage;
+    }
+
+    fn surface_detail(&self, direction: Vec3, bowl: f32, rim: f32, tint: f32) -> [f32; 4] {
+        let [tone, _, cavity] = self.garden(direction);
+        [
+            bowl,
+            rim,
+            lerp(tone, tint, bowl.max(rim)),
+            (cavity + bowl * 0.24).min(1.0),
+        ]
+    }
+
+    /// Cosmetic radial offset and bowl/rim/tone/cavity data, evaluated only
+    /// while building the immutable render mesh. Gameplay heights stay intact.
     pub(crate) fn meteor_detail(&self, direction: Vec3, coverage: f32) -> (f32, [f32; 4]) {
         if coverage <= GRASS_PROTECTION_COVERAGE || self.craters.is_empty() {
-            return (0.0, [0.0; 4]);
+            return (0.0, self.surface_detail(direction, 0.0, 0.0, 0.0));
         }
         let cell = direction_to_cell(direction, CRATER_BIN_RESOLUTION);
         let index = (cell.face.index() * CRATER_BIN_RESOLUTION as usize + cell.y as usize)
@@ -166,7 +258,12 @@ impl TerrainSurface {
         let safety_scale = (self.base_radius / 15.0).min(1.0);
         (
             displacement.clamp(-0.36 * safety_scale, 0.07 * safety_scale) * protection,
-            [bowl_mask * protection, rim_mask * protection, tint, 0.0],
+            self.surface_detail(
+                direction,
+                bowl_mask * protection,
+                rim_mask * protection,
+                tint,
+            ),
         )
     }
 
@@ -282,6 +379,19 @@ fn random01(value: u64) -> f32 {
 
 fn lerp(a: f32, b: f32, weight: f32) -> f32 {
     (b - a).mul_add(weight, a)
+}
+
+fn sample_padded(values: &[f32], resolution: u32, direction: Vec3) -> f32 {
+    let address = direction_to_face_uv(direction);
+    let coordinate = (address.uv * 0.5 + Vec2::splat(0.5)) * resolution as f32 + Vec2::splat(0.5);
+    let base = coordinate.floor();
+    let fraction = coordinate - base;
+    let weight = fraction * fraction * (Vec2::splat(3.0) - fraction * 2.0);
+    let stride = resolution as usize + 2;
+    let index = address.face.index() * stride * stride + base.y as usize * stride + base.x as usize;
+    let top = lerp(values[index], values[index + 1], weight.x);
+    let bottom = lerp(values[index + stride], values[index + stride + 1], weight.x);
+    lerp(top, bottom, weight.y).clamp(0.0, 1.0)
 }
 
 fn mask_cell(mask: &[f32], resolution: u32, face: CubeFace, x: i64, y: i64) -> f32 {
@@ -462,6 +572,62 @@ mod tests {
     }
 
     #[test]
+    fn garden_clusters_and_cavity_are_bounded_continuous_and_seeded() {
+        let planet = crater_planet();
+        let first = TerrainSurface::new(&planet);
+        let second = TerrainSurface::new(&planet);
+        assert_eq!(first.garden_phase, second.garden_phase);
+        assert_eq!(first.cavity, second.cavity);
+        assert_eq!(first.cavity_resolution, planet.terrain.resolution().min(64));
+        assert!(first.cavity.len() <= 6 * 66 * 66);
+        let mut maximum_cavity: f32 = 0.0;
+        let mut tone_range = (1.0_f32, 0.0_f32);
+        for face in CubeFace::ALL {
+            for y in -20..=20 {
+                for x in -20..=20 {
+                    let direction = face_vector(face, Vec2::new(x as f32, y as f32) / 20.0);
+                    let garden = first.garden(direction);
+                    assert!(garden.into_iter().all(|value| (0.0..=1.0).contains(&value)));
+                    maximum_cavity = maximum_cavity.max(garden[2]);
+                    tone_range.0 = tone_range.0.min(garden[0]);
+                    tone_range.1 = tone_range.1.max(garden[0]);
+                }
+            }
+            for side in [-1.0, 1.0] {
+                for along in [-1.0, -0.7, -0.2, 0.0, 0.35, 0.8, 1.0] {
+                    let first_side =
+                        first.garden(face_vector(face, Vec2::new(side - 1.0e-5, along)));
+                    let other_side =
+                        first.garden(face_vector(face, Vec2::new(side + 1.0e-5, along)));
+                    for channel in 0..3 {
+                        assert!((first_side[channel] - other_side[channel]).abs() < 0.001);
+                    }
+                }
+            }
+        }
+        assert!(
+            maximum_cavity > 0.02,
+            "rocky terrain should contain sheltered ground"
+        );
+        assert!(tone_range.1 - tone_range.0 > 0.65);
+        let mut different_seed = planet;
+        different_seed.world_seed = WorldSeed(22);
+        assert_ne!(
+            first.garden_phase,
+            TerrainSurface::new(&different_seed).garden_phase
+        );
+    }
+
+    #[test]
+    fn a_smooth_sphere_has_no_false_static_contact_shade() {
+        let mut planet = crater_planet();
+        planet.mountains.clear();
+        planet.config.rolling_amplitude = 0.0;
+        let surface = TerrainSurface::new(&planet);
+        assert!(surface.cavity.iter().all(|&value| value < 1.0e-5));
+    }
+
+    #[test]
     fn meteor_impacts_are_deterministic_varied_and_protect_grass() {
         let planet = crater_planet();
         let first = TerrainSurface::new(&planet);
@@ -496,7 +662,10 @@ mod tests {
             let (offset, detail) = first.meteor_detail(crater.center, coverage);
             visible_bowls += usize::from(offset < -0.02 && detail[0] > 0.7);
             for grass in [0.0, 0.2, 0.5, GRASS_PROTECTION_COVERAGE] {
-                assert_eq!(first.meteor_detail(crater.center, grass), (0.0, [0.0; 4]));
+                let (offset, detail) = first.meteor_detail(crater.center, grass);
+                assert_eq!(offset, 0.0);
+                assert_eq!(&detail[..2], &[0.0, 0.0]);
+                assert_eq!(detail[2], first.garden(crater.center)[0]);
             }
         }
         assert!(visible_bowls >= first.craters.len() * 3 / 4);

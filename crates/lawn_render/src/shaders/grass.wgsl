@@ -15,10 +15,12 @@ struct FrameUniform {
 @group(1) @binding(1) var<storage, read> interaction: array<vec4<f32>>;
 
 struct VertexInput {
+    @builtin(vertex_index) vertex_index: u32,
     @location(0) local_position: vec3<f32>,
     @location(1) root_position: vec3<f32>,
     @location(2) packed_normal_seed: u32,
     @location(3) turf_weight: f32,
+    @location(4) garden_data: u32,
 };
 
 struct VertexOutput {
@@ -28,6 +30,8 @@ struct VertexOutput {
     @location(2) color: vec3<f32>,
     @location(3) shadow_position: vec4<f32>,
     @location(4) normalized_height: f32,
+    @location(5) cut: f32,
+    @location(6) cavity: f32,
 };
 
 struct FaceUv {
@@ -150,6 +154,18 @@ fn hash01(value: u32) -> f32 {
     return f32(x) / 4294967295.0;
 }
 
+// A single smooth world-space field bends neighboring tufts together. Projecting
+// it onto the local ground keeps the breeze continuous around the whole globe;
+// only the very small leaf flutter uses each tuft's random orientation.
+fn garden_breeze(direction: vec3<f32>, normal: vec3<f32>, time: f32) -> vec3<f32> {
+    let flow = vec3<f32>(0.78, 0.18, -0.60);
+    let tangent_flow = flow - normal * dot(flow, normal);
+    let phase = dot(direction, vec3<f32>(11.0, 6.0, -8.0)) - time * 0.9;
+    let front = 0.5 + 0.5 * sin(dot(direction, vec3<f32>(3.7, -2.8, 4.6)) - time * 0.35);
+    let pressure = (0.60 + 0.40 * sin(phase)) * (0.028 + 0.052 * front * front * front);
+    return tangent_flow * pressure + cross(normal, flow) * sin(phase * 0.67 + time * 0.30) * 0.014;
+}
+
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
@@ -176,15 +192,23 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let state = sample_mowing(address);
     let cut = f32(state.x) / 255.0;
     let root_direction = normalize(input.root_position);
-    // Match the terrain's broad, continuous garden patches across cube faces.
-    let regional_variation = 0.5 + 0.5 * sin(dot(root_direction, vec3<f32>(5.2, 7.8, 3.6)));
-    let individual_variation = hash01(seed * 1597334677u);
+    // Cached seed-dependent clusters match the underlying terrain. Species
+    // differences change the existing blades, never root density or topology.
+    let regional_variation = f32(input.garden_data & 255u) / 255.0;
+    let cluster_shape = f32((input.garden_data >> 8u) & 255u) / 255.0;
+    let cavity = f32((input.garden_data >> 16u) & 255u) / 255.0;
+    let individual_variation = f32(input.garden_data >> 24u) / 255.0;
+    let blade = input.vertex_index / 8u;
+    // Three decorrelated phases vary the existing leaves without a second
+    // integer hash per vertex. The root's random byte is prepared only once.
+    let blade_variation = fract(individual_variation * 1.618034 + f32(blade) * 0.381966);
     let height_scale = max(frame.options.w, 0.1);
     let sqrt_height_scale = sqrt(height_scale);
-    let uncut_height = mix(0.39, 0.63, individual_variation * 0.50 + regional_variation * 0.50) * height_scale * input.turf_weight;
+    let stature = regional_variation * 0.45 + individual_variation * 0.30 + blade_variation * 0.25;
+    let uncut_height = mix(0.38, 0.63, stature) * height_scale * input.turf_weight;
     // Custom worlds can have extremely short grass. Cutting must never make
     // those blades taller, and their comb bend must shrink with the stubble.
-    let stubble_height = min(0.064, uncut_height * 0.22);
+    let stubble_height = min(mix(0.050, 0.064, blade_variation), uncut_height * 0.22);
     let blade_height = mix(uncut_height, stubble_height, cut);
     let tip = input.local_position.y;
     let camera_delta = frame.camera_time.xyz - input.root_position;
@@ -192,9 +216,22 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let view = camera_delta / max(camera_distance, 0.0001);
     let distant_width = mix(1.0, 1.42, smoothstep(20.0, 58.0, camera_distance));
     let tall_width = mix(1.0, sqrt_height_scale, 0.55);
-    let horizontal = (rotated_tangent * input.local_position.x + rotated_bitangent * input.local_position.z) * distant_width * tall_width * input.turf_weight;
-    let wind_phase = dot(root_direction, vec3<f32>(13.1, 9.7, 17.3)) * 5.0 + frame.camera_time.w * 1.25;
-    let wind = (rotated_tangent * sin(wind_phase) + rotated_bitangent * cos(wind_phase * 0.73)) * (0.043 * sqrt_height_scale);
+    var curve_axis = vec2<f32>(0.0, 1.0);
+    if (blade == 1u) { curve_axis = vec2<f32>(-0.8660254, 0.5); }
+    if (blade == 2u) { curve_axis = vec2<f32>(-0.8660254, -0.5); }
+    let template_curve = curve_axis * (tip * tip * 0.07);
+    let template_width = input.local_position.xz - template_curve;
+    let leaf_width = mix(0.76, 1.0, cluster_shape * 0.70 + blade_variation * 0.30) * mix(1.0, 0.82, cut);
+    let leaf_curve = mix(0.42, 1.0, cluster_shape * 0.55 + individual_variation * 0.45) * mix(1.0, 0.28, cut);
+    // Width and curvature can only shrink, preserving the existing conservative
+    // grass bounds even at maximum height, zoom, and saturated rotor pressure.
+    let local_horizontal = template_width * leaf_width + template_curve * leaf_curve;
+    let horizontal = (rotated_tangent * local_horizontal.x + rotated_bitangent * local_horizontal.y) * distant_width * tall_width * input.turf_weight;
+    let breeze = garden_breeze(root_direction, surface_normal, frame.camera_time.w);
+    // Small leaf-specific motion follows the same changing pressure. Reusing
+    // that field avoids a fourth wind sine in each of the tuft's 24 vertices.
+    let flutter = rotated_tangent * dot(breeze, rotated_bitangent) * 0.06;
+    let wind = (breeze + flutter) * sqrt_height_scale;
     let comb = decode_oct(vec2<f32>(state.yz) / 255.0 * 2.0 - vec2<f32>(1.0));
     let projected_comb = comb - surface_normal * dot(comb, surface_normal);
     let comb_length_sq = dot(projected_comb, projected_comb);
@@ -224,15 +261,16 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.clip_position = frame.view_proj * vec4<f32>(world_position, 1.0);
     output.world_position = world_position;
     output.normal = normalize(surface_normal * 0.72 + normalize(horizontal + rotated_tangent * 0.001) * 0.28 - bend * 0.8);
-    let patch_variation = individual_variation * 0.16 + regional_variation * 0.84;
+    let patch_variation = individual_variation * 0.12 + regional_variation * 0.88;
     let high_contrast = frame.options.z;
-    let tall_color = mix(vec3<f32>(0.06, 0.245, 0.10), vec3<f32>(0.16, 0.395, 0.145), patch_variation);
+    let tall_color = mix(vec3<f32>(0.070, 0.255, 0.105), vec3<f32>(0.16, 0.385, 0.135), patch_variation);
     // A signed response preserves opposite mowing passes. A small sun term
     // keeps the brush direction visible with the nearly overhead chase camera.
     let brush_light = normalize(-frame.light_epoch.xyz);
     let brush_response = clamp(dot(comb_tangent, view) * 1.65 + dot(comb_tangent, brush_light) * 0.35, -1.0, 1.0);
     let brushed = 0.5 + 0.5 * brush_response;
-    let short_color = mix(vec3<f32>(0.045, 0.20, 0.09), vec3<f32>(0.17, 0.36, 0.14), brushed);
+    let short_color = mix(vec3<f32>(0.055, 0.215, 0.087), vec3<f32>(0.175, 0.365, 0.135), brushed)
+        * mix(0.92, 1.07, regional_variation);
     output.color = mix(tall_color, short_color * mix(1.0, 1.35, high_contrast), cut);
     // Evaluate the broad contact shade per vertex; grass fragments keep a
     // single hardware-filtered shadow lookup and no procedural color noise.
@@ -247,6 +285,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.color *= 1.0 - contact * 0.32;
     output.shadow_position = frame.light_view_proj * vec4<f32>(world_position, 1.0);
     output.normalized_height = tip;
+    output.cut = cut;
+    output.cavity = cavity;
     return output;
 }
 
@@ -269,12 +309,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Match the terrain's soft fill: readable night-side grass, with the
     // original root shading and sunny highlights keeping the lawn dimensional.
     let unlit = 1.0 - diffuse * shadow;
-    let ambient = vec3<f32>(0.27, 0.35, 0.47) * (1.0 + 0.85 * unlit * unlit);
+    let sky_facing = clamp(dot(normal, normalize(vec3<f32>(-0.30, 0.85, 0.42))) * 0.5 + 0.5, 0.0, 1.0);
+    let ambient = mix(vec3<f32>(0.255, 0.315, 0.415), vec3<f32>(0.285, 0.37, 0.49), sky_facing)
+        * (1.0 + 0.85 * unlit * unlit) * (1.0 - input.cavity * 0.38);
     let sunshine = vec3<f32>(1.18, 1.06, 0.73);
-    let root_darkening = mix(0.53, 1.0, smoothstep(0.0, 0.68, input.normalized_height));
+    let root_darkening = mix(mix(0.53, 0.78, input.cut), 1.0, smoothstep(0.0, 0.68, input.normalized_height));
     var color = input.color * (ambient + sunshine * diffuse * shadow) * root_darkening;
-    color += input.color * vec3<f32>(1.15, 1.12, 0.62) * transmission * tip_light * shadow;
+    color += input.color * vec3<f32>(1.15, 1.12, 0.62) * transmission * tip_light * shadow * (1.0 - input.cut * 0.65);
     // Soft warm tips give the grass a velvet finish without specular sparkle.
     color += vec3<f32>(0.042, 0.049, 0.017) * tip_light * tip_light * diffuse * shadow;
+    // Fresh cut ends catch a restrained warm edge while the signed comb color
+    // retains opposite mowing stripes and the actual short silhouette.
+    color += vec3<f32>(0.018, 0.020, 0.006) * input.cut * tip_light * diffuse * shadow;
     return vec4<f32>(color, 1.0);
 }

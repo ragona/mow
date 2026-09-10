@@ -101,16 +101,16 @@ fn stone_surface(
     let axis_a = vec3<f32>(0.47, 0.73, -0.29);
     let axis_b = vec3<f32>(-0.61, 0.23, 0.51);
     let phase = vec2<f32>(dot(position, axis_a), dot(position, axis_b) + 1.7);
-    let fold = fract(phase * vec2<f32>(0.23, 0.19)) - vec2<f32>(0.5);
+    let fold = fract(phase * vec2<f32>(0.15, 0.12)) - vec2<f32>(0.5);
     let wave = abs(fold) * 4.0 - vec2<f32>(1.0);
     let crossing = wave.y * 0.9;
     let mineral = max(wave.x, crossing) + min(wave.x, crossing) * 0.35;
-    let gradient_a = axis_a * select(-0.92, 0.92, fold.x >= 0.0);
-    let gradient_b = axis_b * select(-0.684, 0.684, fold.y >= 0.0);
+    let gradient_a = axis_a * select(-0.60, 0.60, fold.x >= 0.0);
+    let gradient_b = axis_b * select(-0.432, 0.432, fold.y >= 0.0);
     let gradient = select(gradient_b + gradient_a * 0.35, gradient_a + gradient_b * 0.35, wave.x >= crossing);
-    let mineral_width = max(dot(pixel_width, abs(axis_a) * 0.92 + abs(axis_b) * 0.684), 0.0001);
+    let mineral_width = max(dot(pixel_width, abs(axis_a) * 0.60 + abs(axis_b) * 0.432), 0.0001);
     let plane = smoothstep(-mineral_width * 0.65, mineral_width * 0.65, mineral);
-    var color = mix(vec3<f32>(0.072, 0.12, 0.245), vec3<f32>(0.145, 0.145, 0.265), plane);
+    var color = mix(vec3<f32>(0.082, 0.12, 0.23), vec3<f32>(0.127, 0.143, 0.25), plane);
 
     // Real geometry supplies the bowl and rim masks. Dust settles in bowls;
     // exposed rim chips are pale, with stable individual crater hues.
@@ -137,9 +137,12 @@ fn stone_surface(
         * min(1.0, 0.045 / mineral_width);
     let lip = (1.0 - smoothstep(0.025 - mineral_width, 0.025 + mineral_width, abs(mineral - 0.066)))
         * min(1.0, 0.025 / mineral_width);
-    let fracture_exposure = 1.0 - bowl * 0.55;
-    color = mix(color, vec3<f32>(0.025, 0.05, 0.10), fracture * 0.62 * fracture_exposure);
-    color = mix(color, vec3<f32>(0.43, 0.52, 0.66), lip * 0.72 * fracture_exposure);
+    // Broad quiet slabs separate the occasional mineral seams. Their exposure
+    // varies smoothly in world space, without a new high-frequency noise layer.
+    let vein_region = smoothstep(-0.12, 0.70, sin(dot(position, vec3<f32>(0.31, -0.19, 0.27))));
+    let fracture_exposure = (1.0 - bowl * 0.55) * vein_region;
+    color = mix(color, vec3<f32>(0.025, 0.05, 0.10), fracture * 0.44 * fracture_exposure);
+    color = mix(color, vec3<f32>(0.35, 0.43, 0.56), lip * 0.48 * fracture_exposure);
 
     // Sparse octahedral inclusions are tiny copper chips within the rock,
     // rather than emissive sparks. Their world-space cells never animate.
@@ -148,7 +151,7 @@ fn stone_surface(
     let ore_shape = dot(abs(fract(ore_position) - vec3<f32>(0.5)), vec3<f32>(1.0));
     let ore_width = max(dot(pixel_width, vec3<f32>(2.4)), 0.0001);
     let ore = (1.0 - smoothstep(0.32 - ore_width, 0.32 + ore_width, ore_shape))
-        * min(1.0, 0.16 / ore_width) * select(0.0, 1.0, stone_grain(ore_cell) > 0.82);
+        * min(1.0, 0.16 / ore_width) * select(0.0, 1.0, stone_grain(ore_cell) > 0.94);
     color = mix(color, vec3<f32>(0.54, 0.235, 0.115), ore * (1.0 - bowl * 0.8));
 
     // Overgrowth follows crevices near the actual grass boundary, leaving the
@@ -160,7 +163,7 @@ fn stone_surface(
 
     let grain_visibility = 1.0 - smoothstep(0.35, 0.90, length(pixel_width) * 22.0);
     let grain = stone_grain(floor(position * 22.0)) - 0.5;
-    color += vec3<f32>(grain * 0.014 * grain_visibility);
+    color += vec3<f32>(grain * 0.009 * grain_visibility);
 
     let tangent_gradient = gradient - normal * dot(gradient, normal);
     let detail_visibility = (1.0 - smoothstep(0.3, 0.9, mineral_width)) * (1.0 - bowl * 0.6);
@@ -180,9 +183,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var gloss_power = 24.0;
     switch input.material {
         case 0u: {
-            let radial = normalize(input.world_position);
-            let region = 0.5 + 0.5 * sin(dot(radial, vec3<f32>(5.2, 7.8, 3.6)));
-            base = mix(vec3<f32>(0.065, 0.22, 0.085), vec3<f32>(0.16, 0.33, 0.09), region);
+            // The cached garden tone matches the same seeded clusters used by
+            // grass roots, including short turf and reduced-density settings.
+            base = mix(vec3<f32>(0.068, 0.225, 0.083), vec3<f32>(0.15, 0.33, 0.10), input.detail.z);
             // Terrain variation carries interpolated rock coverage. A narrow
             // screen-space threshold makes a crisp continuous material edge.
             let rock = smoothstep(0.5 - coverage_width, 0.5 + coverage_width, input.variation);
@@ -217,7 +220,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(vec3<f32>(0.12, 1.05, 1.28) * (1.55 + frame.mower_forward.w * 0.9), 1.0);
         }
         case 6u: { return vec4<f32>(2.4, 0.13, 0.045, 1.0); }
-        case 7u: { return vec4<f32>(0.62, 1.25, 0.20, 1.0); }
+        case 7u: { return vec4<f32>(0.36, 0.76, 0.12, 1.0); }
+        case 8u: {
+            base = vec3<f32>(0.028, 0.10, 0.075);
+            gloss = 0.32;
+            gloss_power = 42.0;
+        }
+        case 9u: {
+            base = vec3<f32>(0.56, 0.30, 0.10);
+            gloss = 0.60;
+            gloss_power = 54.0;
+        }
         default: { base = vec3<f32>(0.12, 0.20, 0.23); }
     }
     let light = normalize(-frame.light_epoch.xyz);
@@ -234,10 +247,31 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Cool fill lifts the night side and cast shadows while tapering away
     // quadratically on sunlit faces, preserving the warm direct-light contrast.
     let unlit = 1.0 - diffuse * shadow;
-    let ambient = vec3<f32>(0.29, 0.34, 0.48) * (1.0 + 0.85 * unlit * unlit);
+    let sky_facing = clamp(dot(n, normalize(vec3<f32>(-0.30, 0.85, 0.42))) * 0.5 + 0.5, 0.0, 1.0);
+    var ambient = mix(vec3<f32>(0.275, 0.315, 0.435), vec3<f32>(0.31, 0.375, 0.505), sky_facing)
+        * (1.0 + 0.85 * unlit * unlit);
+    if (input.material <= 1u) {
+        // Static local horizons darken only indirect light at sheltered rock
+        // feet and cavities. Direct sunlight and night-side readability remain.
+        ambient *= 1.0 - clamp(input.detail.w, 0.0, 1.0) * 0.38;
+        let radial = normalize(input.world_position);
+        let side = 1.0 - max(dot(n, radial), 0.0);
+        ambient += vec3<f32>(0.016, 0.032, 0.012) * side * (1.0 - smoothstep(0.65, 1.0, input.variation));
+    }
     let sunshine = vec3<f32>(1.22, 1.04, 0.76);
     var color = base * (ambient + sunshine * diffuse * shadow);
     color += sunshine * highlight;
+    if (input.material == 2u || input.material == 3u || input.material == 8u || input.material == 9u) {
+        // Broad, fixed environment lobes bend across glossy shells even on the
+        // night hemisphere. Their soft reflection reveals canopy curvature
+        // without adding point lights, texture fetches, or gloss to the stone.
+        let reflected = reflect(-view, n);
+        let cool_lobe = pow(clamp(dot(reflected, normalize(vec3<f32>(-0.44, 0.55, 0.70))) * 0.5 + 0.5, 0.0, 1.0), 5.0);
+        let warm_lobe = pow(clamp(dot(reflected, normalize(vec3<f32>(0.68, -0.25, -0.69))) * 0.5 + 0.5, 0.0, 1.0), 7.0);
+        let environment = vec3<f32>(0.24, 0.31, 0.42) * cool_lobe
+            + vec3<f32>(0.25, 0.16, 0.10) * warm_lobe * 0.50;
+        color += environment * gloss * (0.80 + fresnel * 0.70);
+    }
     color += vec3<f32>(0.12, 0.19, 0.23) * rim * mix(0.22, 0.65, gloss);
     if (input.material <= 1u) {
         color *= mower_contact(input.world_position);

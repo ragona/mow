@@ -7,6 +7,66 @@ use lawn_core::{
     input::InputSnapshot, planet::CURRENT_GENERATOR_VERSION, profile::AccessibilitySettings,
 };
 
+/// Art references use the real authoritative sweep API, including its comb
+/// encoding and seam handling. Never paint synthetic stripes in the shader.
+fn prepare_mowing_reference(run: &mut RunState, view: &str) -> (Vec3, Vec3) {
+    use lawn_core::mowing::MowingStamp;
+    let normal =
+        Vec3::new(0.42, 0.81, 0.38).normalize() * if view.ends_with("night") { -1.0 } else { 1.0 };
+    let right = normal.cross(Vec3::Y).normalize();
+    let up = right.cross(normal).normalize();
+    let radius = run.planet.config.base_radius;
+    let surface = |x: f32, y: f32| {
+        run.planet
+            .surface_point((normal * radius + right * x + up * y).normalize())
+    };
+    let mut paths: Vec<Vec<Vec3>> = Vec::new();
+    if view.starts_with("curve") {
+        for radius in [3.6_f32, 7.2] {
+            paths.push(
+                (0..=80)
+                    .map(|step| {
+                        let angle = step as f32 / 80.0 * std::f32::consts::TAU * 0.85;
+                        surface(angle.cos() * radius, angle.sin() * radius)
+                    })
+                    .collect(),
+            );
+        }
+    } else {
+        for lane in -3..=3 {
+            let x = lane as f32 * 2.25;
+            let direction = if lane % 2 == 0 { 1.0 } else { -1.0 };
+            paths.push(
+                (0..=40)
+                    .map(|step| surface(x, (step as f32 * 0.4 - 8.0) * direction))
+                    .collect(),
+            );
+        }
+        if view.starts_with("crosscut") {
+            for y in [-4.0, 1.0, 6.0] {
+                paths.push(
+                    (0..=40)
+                        .map(|step| surface(step as f32 * 0.45 - 9.0, y))
+                        .collect(),
+                );
+            }
+        }
+    }
+    for path in paths {
+        for pair in path.windows(2) {
+            run.mowing.stamp(MowingStamp {
+                from: pair[0],
+                to: pair[1],
+                comb_direction: (pair[1] - pair[0]).normalize(),
+                deck_width: run.vehicle_tuning.mower_width,
+                cut_delta: 1.0,
+                recent_epoch: 0,
+            });
+        }
+    }
+    (normal * 40.0, up)
+}
+
 #[test]
 fn msaa_selection_requires_color_depth_and_resolve_support() {
     use wgpu::TextureFormatFeatureFlags as Flags;
@@ -63,6 +123,10 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         let capture_dir = std::env::var_os("LAWN_CAPTURE_DIR").map(std::path::PathBuf::from);
         let capture_view = std::env::var("LAWN_CAPTURE_VIEW").unwrap_or_else(|_| "day".into());
         let capture = capture_dir.is_some();
+        let mowing_reference = capture
+            && ["stripes", "crosscut", "curve"]
+                .iter()
+                .any(|prefix| capture_view.starts_with(prefix));
         let benchmark = std::env::var_os("LAWN_BENCH").is_some();
         let scene = std::env::var("LAWN_BENCH_SCENE").unwrap_or_else(|_| "craggy".into());
         let parameter = |name, default| {
@@ -167,7 +231,7 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                 ..GeneratorConfig::test_quality()
             }
         };
-        if benchmark && scene == "meadow" {
+        if (benchmark && scene == "meadow") || mowing_reference {
             planet_config = GeneratorConfig {
                 mountain_count_min: 0,
                 mountain_count_max: 0,
@@ -203,6 +267,8 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                 break;
             }
         }
+        let mowing_camera =
+            mowing_reference.then(|| prepare_mowing_reference(&mut run, &capture_view));
         if benchmark && scene == "mown" {
             let mut snapshot = run.mowing.snapshot();
             snapshot
@@ -214,6 +280,18 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         let mut interaction = GrassInteraction::new(&device, run.planet.config.base_radius);
         let mut particles = ClippingParticles::new(&device);
         particles.update(&queue, &run, false);
+        if capture {
+            use lawn_core::run::RunEvent;
+            let event = match capture_view.as_str() {
+                "recovery" => Some(RunEvent::Recovered),
+                "impact" => Some(RunEvent::SubstantialCollision { impulse: 8.0 }),
+                "milestone" => Some(RunEvent::CoverageMilestone(25)),
+                _ => None,
+            };
+            if let Some(event) = event {
+                particles.preview_event(&queue, &run, event);
+            }
+        }
         assert!(
             particles.len() > 0,
             "smoke test must exercise a particle draw"
@@ -255,10 +333,19 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             bytemuck::cast_slice(&tuft_indices),
             wgpu::BufferUsages::INDEX,
         );
-        let (camera, look_at) = if benchmark {
+        let (camera, look_at) = if let Some((camera, _)) = mowing_camera {
+            (camera, Vec3::ZERO)
+        } else if benchmark {
             (run.camera.state.position, run.camera.state.target)
         } else if capture {
             match capture_view.as_str() {
+                "vehicle" | "recovery" | "impact" | "milestone" => {
+                    let pose = run.vehicle.state.transform;
+                    (
+                        pose.position + pose.up * 4.8 - pose.forward * 2.2,
+                        pose.position,
+                    )
+                }
                 "night" => (Vec3::new(-30.0, -24.0, -34.0), Vec3::ZERO),
                 "moon" => {
                     let moon = Vec3::new(-0.76, 0.15, -0.63).normalize();
@@ -286,7 +373,11 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         } else {
             (Vec3::new(0.0, 25.0, 32.0), Vec3::ZERO)
         };
-        let camera_up = if benchmark {
+        let camera_up = if let Some((_, up)) = mowing_camera {
+            up
+        } else if ["vehicle", "recovery", "impact", "milestone"].contains(&capture_view.as_str()) {
+            run.vehicle.state.transform.forward
+        } else if benchmark {
             run.camera.state.up
         } else {
             Vec3::Y

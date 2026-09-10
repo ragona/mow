@@ -132,3 +132,40 @@ at several terrain resolutions.
 - Bloom already uses quarter-resolution targets, paired blur taps, and a Low
   quality bypass. No reduction in resolution, grass density, MSAA, texture
   detail, or lighting was made for the reported improvements.
+
+## Miniature-garden visual polish cost
+
+Measured on the same Apple M2, Craggy scene, 1280×720, High quality and 4× MSAA,
+with 279,060 visible tufts out of 533,714. Each run uses 60 warmup frames and 120
+measured frames. The native game and other GPU tests were closed for comparison.
+The total is the measured GPU frame span, excluding UI and presentation; pass
+spans overlap and must not be added together.
+
+| Measurement | Before visual polish | Final visual polish |
+| --- | ---: | ---: |
+| GPU total median | 12.779 ms | 14.519 ms |
+| GPU total p95 | 13.500 ms | 15.371 ms |
+| World pass median | 11.993 ms | 13.872 ms |
+| CPU encoding median | 0.172 ms | 0.172 ms |
+
+The new leaf variation, coherent breeze and material lighting add approximately
+1.74 ms (14%) to this GPU workload. This is an explicit visual-quality tradeoff,
+not a performance improvement or a guarantee of 60 FPS. A targeted follow-up
+stores an individual variation byte in unused packed space, replaces per-blade
+hashing with phase offsets, and reuses shared gust motion for flutter. It removes
+two hashes and one sine per grass vertex without changing density, memory or
+features. Its measured timing difference is within run-to-run variation; no
+reliable speedup is claimed. No additional compute pass or large intermediate
+buffer was introduced.
+
+Local release preparation measurements for seeds 42 and 21 found approximately
+24–25 ms additional work per planet for the cached garden/cavity fields and render
+root data. This work runs at planet preparation, with no added per-frame CPU
+sampling. Render roots grow from 20 to 24 bytes: about 1.56 MiB additional storage
+for 409,320 roots, or 2.04 MiB for the Craggy reference. The bounded cavity cache
+uses about 102 KiB. Terrain detail reuses existing vertex fields; grass density,
+triangle count, MSAA and output resolution are unchanged.
+
+Reproduce using the warmed `LAWN_BENCH=1` command in README. Local comparison
+logs are `/tmp/lawn-polish-before-bench.txt` and
+`/tmp/lawn-polish-after-final-bench.txt`.

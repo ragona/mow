@@ -10,12 +10,13 @@ use egui::{Align2, Color32, RichText};
 use egui_wgpu::wgpu;
 use lawn_core::{
     GameConfig, PlanetGenerator, WorldSeed,
+    camera::{CameraRig, CameraState},
     config::GeneratorConfig,
     flow::GameState,
     input::Action,
     planet::TUTORIAL_SEED,
     profile::{Profile, QualityPreset, RecordKey},
-    run::{GameMode, RunState, TutorialStage},
+    run::{GameMode, RunEvent, RunState, TutorialStage},
     score::Results,
     simulation::FixedStepClock,
 };
@@ -29,6 +30,13 @@ use winit::{
 };
 
 use crate::{input_adapter::InputAdapter, profile_store::ProfileStore};
+
+mod garden_ui;
+#[cfg(test)]
+mod ui_capture_tests;
+use garden_ui::{
+    Icon, action_label, boost_meter, coverage_dial, display, icon, icon_button, keycap, preset_card,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum ConfirmAction {
@@ -45,6 +53,7 @@ enum UiCommand {
     Start(WorldSeed),
     Random,
     Resume,
+    Pause,
     Restart,
     ReturnToEditor,
     Submit,
@@ -52,6 +61,7 @@ enum UiCommand {
     Quit,
     ToggleFullscreen,
     ToggleFavorite(WorldSeed),
+    SkipArrival,
 }
 
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
@@ -63,6 +73,71 @@ const GARDEN_MUTED: Color32 = Color32::from_rgb(93, 108, 91);
 const GARDEN_SAGE: Color32 = Color32::from_rgb(206, 222, 182);
 const GARDEN_CORAL: Color32 = Color32::from_rgb(248, 147, 111);
 const GARDEN_ERROR: Color32 = Color32::from_rgb(161, 57, 42);
+const ARRIVAL_SECONDS: f32 = 0.9;
+
+#[derive(Clone, Copy, Debug)]
+struct SceneTransition {
+    from: CameraState,
+    to: CameraState,
+    elapsed: f32,
+    from_inset: f32,
+    to_editor: bool,
+}
+
+impl SceneTransition {
+    fn fraction(self) -> f32 {
+        let t = (self.elapsed / ARRIVAL_SECONDS).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    fn pose(self) -> CameraState {
+        let t = self.fraction();
+        // Interpolate radial direction and distance separately: a straight
+        // segment between opposite sides of the planet would pass through it.
+        let from_direction = self.from.position.normalize_or(glam::Vec3::Y);
+        let to_direction = self.to.position.normalize_or(from_direction);
+        let arc = glam::Quat::from_rotation_arc(from_direction, to_direction);
+        let radial_rotation = glam::Quat::IDENTITY.slerp(arc, t);
+        let direction = radial_rotation * from_direction;
+        let distance = self.from.position.length()
+            + (self.to.position.length() - self.from.position.length()) * t;
+        let position = direction * distance;
+        let target = self.from.target.lerp(self.to.target, t);
+        let view = (target - position).normalize_or(-direction);
+        let from_view = (self.from.target - self.from.position).normalize_or(-from_direction);
+        let to_view = (self.to.target - self.to.position).normalize_or(-to_direction);
+        let from_up = self
+            .from
+            .up
+            .reject_from_normalized(from_view)
+            .normalize_or(from_view.any_orthonormal_vector());
+        let to_up = self
+            .to
+            .up
+            .reject_from_normalized(to_view)
+            .normalize_or(to_view.any_orthonormal_vector());
+        // Carry the camera's frame along its radial arc and align it with the
+        // changing target, then interpolate only the remaining signed roll.
+        // Opposite endpoint ups make a continuous half turn instead of
+        // cancelling to zero halfway through a normalized vector lerp.
+        let transport_up = |rotation: glam::Quat, look: glam::Vec3| {
+            let align_view = glam::Quat::from_rotation_arc(rotation * from_view, look);
+            (align_view * rotation * from_up).normalize()
+        };
+        let transported_end_up = transport_up(arc, to_view);
+        let roll = to_view
+            .dot(transported_end_up.cross(to_up))
+            .atan2(transported_end_up.dot(to_up));
+        let up = glam::Quat::from_axis_angle(view, roll * t) * transport_up(radial_rotation, view);
+        CameraState {
+            position,
+            target,
+            up,
+            field_of_view_degrees: self.from.field_of_view_degrees
+                + (self.to.field_of_view_degrees - self.from.field_of_view_degrees) * t,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GenerationPurpose {
@@ -195,7 +270,12 @@ pub struct LawnOrbitApp {
     confirmation: Option<ConfirmAction>,
     last_stats: FrameStats,
     status_message: Option<String>,
-    survey_started: Option<Instant>,
+    scene_transition: Option<SceneTransition>,
+    editor_zoom: f32,
+    editor_orbit: f32,
+    hud_milestone: Option<(u8, f32)>,
+    boost_was_ready: bool,
+    boost_ready_age: f32,
     app_started: Instant,
     show_diagnostics: bool,
     frame_times_ms: VecDeque<f32>,
@@ -279,7 +359,12 @@ impl LawnOrbitApp {
             confirmation: None,
             last_stats: FrameStats::default(),
             status_message: None,
-            survey_started: None,
+            scene_transition: None,
+            editor_zoom: 1.0,
+            editor_orbit: 0.5,
+            hud_milestone: None,
+            boost_was_ready: true,
+            boost_ready_age: 10.0,
             app_started: Instant::now(),
             show_diagnostics: false,
             frame_times_ms: VecDeque::with_capacity(240),
@@ -298,16 +383,18 @@ impl LawnOrbitApp {
         if self.profile.settings.fullscreen {
             window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         }
-        let renderer = pollster::block_on(Renderer::new(
+        let mut renderer = pollster::block_on(Renderer::new(
             window.clone(),
             &self.run,
             self.profile.settings.msaa_samples,
             self.profile.settings.quality,
             self.profile.settings.render_scale,
             self.profile.settings.accessibility.high_contrast_grass,
-            self.profile.settings.accessibility.reduced_particles,
+            self.profile.settings.accessibility.reduced_particles
+                || self.profile.settings.accessibility.reduced_motion,
             self.profile.settings.grass_height_multiplier,
         ))?;
+        renderer.set_motion_reduction(self.profile.settings.accessibility.reduced_motion);
         tracing::info!(
             adapter = %renderer.capabilities().adapter_name,
             backend = ?renderer.capabilities().backend,
@@ -339,6 +426,19 @@ impl LawnOrbitApp {
 
     fn update_simulation(&mut self, elapsed: Duration) {
         let _span = tracing::debug_span!("fixed_simulation_batch").entered();
+        if self.state == GameState::WorldEditor && !self.settings_open {
+            if self.profile.settings.accessibility.reduced_motion {
+                self.scene_transition = None;
+            } else {
+                self.editor_orbit += elapsed.as_secs_f32().min(0.05) * 0.08;
+            }
+            if let Some(transition) = &mut self.scene_transition {
+                transition.elapsed += elapsed.as_secs_f32().min(0.05);
+                if transition.elapsed >= ARRIVAL_SECONDS {
+                    self.scene_transition = None;
+                }
+            }
+        }
         if self.state != GameState::Playing {
             return;
         }
@@ -346,15 +446,38 @@ impl LawnOrbitApp {
             self.pause();
             return;
         }
-        if self
-            .survey_started
-            .is_some_and(|started| started.elapsed() < Duration::from_secs(4))
-        {
-            self.input.clear_transient();
-            self.animate_planet_camera(0.12);
+        if self.scene_transition.is_some() {
+            let snapshot = self.input.snapshot(
+                &self.profile.settings.controls,
+                &self.profile.settings.accessibility,
+            );
+            let skip = snapshot.steer.abs() > 0.1
+                || snapshot.accelerate > 0.1
+                || snapshot.brake_reverse > 0.1
+                || snapshot.boost_held
+                || snapshot.recover_held
+                || snapshot.look_behind
+                || snapshot.recenter_pressed
+                || snapshot.camera_orbit.iter().any(|value| value.abs() > 0.1)
+                || snapshot.submit_pressed;
+            let transition = self.scene_transition.as_mut().expect("arrival exists");
+            transition.elapsed += elapsed.as_secs_f32().min(0.05);
+            if skip
+                || transition.elapsed >= ARRIVAL_SECONDS
+                || self.profile.settings.accessibility.reduced_motion
+            {
+                self.finish_arrival();
+            } else {
+                let pose = transition.pose();
+                self.run
+                    .camera
+                    .snap_to_pose(pose.position, pose.target, pose.up);
+                self.run.camera.state.field_of_view_degrees = pose.field_of_view_degrees;
+            }
+            // Camera arrival never advances mowing or the authoritative body.
+            self.run.clear_frame_events();
             return;
         }
-        self.survey_started = None;
         self.run.clear_frame_events();
         let input = &mut self.input;
         let run = &mut self.run;
@@ -381,6 +504,25 @@ impl LawnOrbitApp {
             self.finish_run();
         }
         self.input.update_feedback(&self.run);
+        let presentation_dt = elapsed.as_secs_f32().min(0.05);
+        self.boost_ready_age += presentation_dt;
+        if let Some((_, age)) = &mut self.hud_milestone {
+            *age += presentation_dt;
+            if *age >= 3.0 {
+                self.hud_milestone = None;
+            }
+        }
+        for event in self.run.events() {
+            if let RunEvent::CoverageMilestone(percent) = event {
+                self.hud_milestone = Some((*percent, 0.0));
+            }
+        }
+        let ready = self.run.vehicle.state.boost_charge
+            >= self.run.vehicle_tuning.boost_capacity_seconds * 0.995;
+        if ready && !self.boost_was_ready {
+            self.boost_ready_age = 0.0;
+        }
+        self.boost_was_ready = ready;
     }
 
     fn pause(&mut self) {
@@ -439,7 +581,6 @@ impl LawnOrbitApp {
                 } else {
                     self.run.paused = true;
                     self.preview_recipe = Some(recipe);
-                    self.survey_started = None;
                 }
             }
             Err(error) => {
@@ -550,6 +691,31 @@ impl LawnOrbitApp {
     }
 
     fn enter_sandbox(&mut self) {
+        let from = self.run.camera.state;
+        let from_inset = if self.state == GameState::WorldEditor {
+            EDITOR_SCENE_INSET
+        } else {
+            0.0
+        };
+        let arrival = CameraRig::new(
+            self.run.vehicle.state.transform,
+            self.run.planet.config.base_radius,
+            &self.profile.settings.accessibility,
+        );
+        let moving_to_game =
+            from.position.distance(arrival.state.position) > 0.5 || from_inset > 0.0;
+        self.scene_transition = (!self.profile.settings.accessibility.reduced_motion
+            && moving_to_game)
+            .then_some(SceneTransition {
+                from,
+                to: arrival.state,
+                elapsed: 0.0,
+                from_inset,
+                to_editor: false,
+            });
+        if self.scene_transition.is_none() {
+            self.run.camera = arrival;
+        }
         self.profile.record_seed(
             self.run.planet.generator_version,
             self.run.planet.world_seed,
@@ -561,7 +727,9 @@ impl LawnOrbitApp {
         self.preview_recipe = None;
         self.preview_attempt = None;
         self.preview_queued_at = None;
-        self.survey_started = Some(Instant::now());
+        self.hud_milestone = None;
+        self.boost_ready_age = 10.0;
+        self.boost_was_ready = true;
         self.clock = FixedStepClock::default();
         self.input.clear_transient();
         self.last_frame = Instant::now();
@@ -569,6 +737,44 @@ impl LawnOrbitApp {
             self.pause();
         }
         self.save_profile();
+    }
+
+    fn finish_arrival(&mut self) {
+        self.scene_transition = None;
+        self.run.camera = CameraRig::new(
+            self.run.vehicle.state.transform,
+            self.run.planet.config.base_radius,
+            &self.profile.settings.accessibility,
+        );
+        self.clock = FixedStepClock::default();
+        self.input.clear_transient();
+    }
+
+    fn enter_editor(&mut self) {
+        let from = self.run.camera.state;
+        let from_inset = if self.state == GameState::Title {
+            TITLE_SCENE_INSET
+        } else {
+            0.0
+        };
+        self.state = GameState::WorldEditor;
+        self.run.paused = true;
+        self.preview_attempt = None;
+        self.status_message = None;
+        self.editor_orbit = from.position.z.atan2(from.position.x);
+        self.scene_transition =
+            (!self.profile.settings.accessibility.reduced_motion).then_some(SceneTransition {
+                from,
+                to: from,
+                elapsed: 0.0,
+                from_inset,
+                to_editor: true,
+            });
+    }
+
+    fn return_to_title(&mut self) {
+        self.state = GameState::Title;
+        self.scene_transition = None;
     }
 
     fn random_seed() -> WorldSeed {
@@ -580,7 +786,11 @@ impl LawnOrbitApp {
     }
 
     fn animate_planet_camera(&mut self, speed: f32) {
-        let angle = self.app_started.elapsed().as_secs_f32() * speed;
+        let angle = if self.profile.settings.accessibility.reduced_motion {
+            0.5
+        } else {
+            self.app_started.elapsed().as_secs_f32() * speed
+        };
         let planet_radius = self.run.planet.config.base_radius;
         let radius = planet_radius * 1.8;
         let position = glam::Vec3::new(
@@ -600,12 +810,24 @@ impl LawnOrbitApp {
         let half_fov = vertical_half_fov.min((vertical_half_fov.tan() * aspect).atan());
         // A fixed envelope fits even the largest craggy planet. Keeping the
         // distance independent of the sliders makes radius changes visible.
-        let distance = 32.0 / half_fov.sin() * 1.08;
-        let angle = self.app_started.elapsed().as_secs_f32() * 0.08;
+        let distance = (32.0 / half_fov.sin() * 1.08 / self.editor_zoom).max(36.0);
+        let angle = self.editor_orbit;
         let direction = glam::Vec3::new(angle.cos(), 0.4, angle.sin()).normalize();
+        let to = CameraState {
+            position: direction * distance,
+            target: glam::Vec3::ZERO,
+            up: glam::Vec3::Y,
+            field_of_view_degrees: self.run.camera.state.field_of_view_degrees,
+        };
+        let pose = if let Some(transition) = &mut self.scene_transition {
+            transition.to = to;
+            transition.pose()
+        } else {
+            to
+        };
         self.run
             .camera
-            .snap_to_pose(direction * distance, glam::Vec3::ZERO, glam::Vec3::Y);
+            .snap_to_pose(pose.position, pose.target, pose.up);
     }
 
     fn draw_ui(&mut self, context: &egui::Context) -> Vec<UiCommand> {
@@ -620,6 +842,7 @@ impl LawnOrbitApp {
             GameState::Boot => {}
         }
         if self.state == GameState::WorldEditor {
+            self.draw_editor_inspection(context);
             self.animate_editor_camera(context);
         } else if matches!(self.state, GameState::Title | GameState::Results) {
             self.animate_planet_camera(0.08);
@@ -658,8 +881,7 @@ impl LawnOrbitApp {
                     ui.add_space(14.0);
                     ui.label(
                         RichText::new("Lawn Orbit")
-                            .size(48.0)
-                            .strong()
+                            .font(display(48.0))
                             .color(GARDEN_PINE),
                     );
                     ui.label(RichText::new("A little world. A lovely lawn.").size(18.0));
@@ -687,6 +909,10 @@ impl LawnOrbitApp {
 
     fn draw_world_editor(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
         let classic = WorldEditorSettings::from_generator(&self.game_config.generator);
+        let opacity = self
+            .scene_transition
+            .filter(|transition| transition.to_editor)
+            .map_or(1.0, |transition| (transition.fraction() * 2.0).min(1.0));
         egui::Window::new("World Editor")
             .id(egui::Id::new("world-editor"))
             .fixed_pos([16.0, 16.0])
@@ -694,8 +920,13 @@ impl LawnOrbitApp {
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
-            .frame(garden_card().inner_margin(10))
+            .frame(
+                garden_card()
+                    .inner_margin(10)
+                    .multiply_with_opacity(opacity),
+            )
             .show(context, |ui| {
+                ui.set_opacity(opacity);
                 ui.set_width(302.0);
                 ui.spacing_mut().item_spacing.y = 5.0;
                 ui.label(
@@ -711,13 +942,13 @@ impl LawnOrbitApp {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            for (label, preset) in [
-                                ("Meadow", WorldEditorSettings::meadow()),
-                                ("Classic", classic),
-                                ("Craggy", WorldEditorSettings::craggy()),
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            for (label, preset, peaks) in [
+                                ("Meadow", WorldEditorSettings::meadow(), 0),
+                                ("Classic", classic, 2),
+                                ("Craggy", WorldEditorSettings::craggy(), 3),
                             ] {
-                                if ui
-                                    .selectable_label(self.world_editor == preset, label)
+                                if preset_card(ui, label, self.world_editor == preset, peaks)
                                     .clicked()
                                 {
                                     self.world_editor = preset;
@@ -810,7 +1041,10 @@ impl LawnOrbitApp {
                     && self.pending_generation.is_none();
                 ui.horizontal(|ui| {
                     if ready {
-                        ui.colored_label(GARDEN_PINE, "● Live preview");
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(9.0, 18.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 3.0, GARDEN_PINE);
+                        ui.colored_label(GARDEN_PINE, "Live preview");
                     } else if recipe.is_none() {
                         ui.colored_label(GARDEN_ERROR, "Enter a seed to preview your planet.");
                     } else if self.pending_generation.is_none() && self.preview_attempt == recipe {
@@ -838,6 +1072,45 @@ impl LawnOrbitApp {
             });
     }
 
+    fn draw_editor_inspection(&mut self, context: &egui::Context) {
+        let screen = context.content_rect();
+        egui::Area::new("planet-inspection".into())
+            .fixed_pos([
+                EDITOR_SCENE_INSET + (screen.width() - EDITOR_SCENE_INSET - 310.0) * 0.5,
+                screen.bottom() - 70.0,
+            ])
+            .show(context, |ui| {
+                garden_card().inner_margin(10).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Inspect").color(GARDEN_MUTED).size(12.0));
+                        if ui.small_button("−").on_hover_text("Zoom out").clicked() {
+                            self.editor_zoom = (self.editor_zoom - 0.15).max(0.85);
+                        }
+                        ui.spacing_mut().slider_width = 78.0;
+                        ui.add(
+                            egui::Slider::new(&mut self.editor_zoom, 0.85..=1.8).show_value(false),
+                        );
+                        if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+                            self.editor_zoom = (self.editor_zoom + 0.15).min(1.8);
+                        }
+                        if ui
+                            .small_button("Reset")
+                            .on_hover_text("Restore the shared scale for comparing planet sizes")
+                            .clicked()
+                        {
+                            self.editor_zoom = 1.0;
+                        }
+                        if icon_button(ui, Icon::Rotate(false), "Rotate planet left").clicked() {
+                            self.editor_orbit -= 0.35;
+                        }
+                        if icon_button(ui, Icon::Rotate(true), "Rotate planet right").clicked() {
+                            self.editor_orbit += 0.35;
+                        }
+                    });
+                });
+            });
+    }
+
     fn draw_loading(context: &egui::Context) {
         egui::Area::new("loading".into())
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -853,116 +1126,178 @@ impl LawnOrbitApp {
     }
 
     fn draw_hud(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
+        let reduced_motion = self.profile.settings.accessibility.reduced_motion;
+        let arrival = self.scene_transition.map_or(1.0, SceneTransition::fraction);
+        let hud_opacity = if reduced_motion {
+            1.0
+        } else {
+            ((arrival - 0.25) / 0.75).clamp(0.0, 1.0)
+        };
+        let gamepad = self.input.last_device_label == "Gamepad";
+        let coverage = self.run.mowing.display_coverage_percent() as f32;
+        let boost = (self.run.vehicle.state.boost_charge
+            / self.run.vehicle_tuning.boost_capacity_seconds)
+            .clamp(0.0, 1.0);
+        let active = self.run.vehicle.state.boost_active;
+        let boost_label = action_label(&self.profile.settings.controls, Action::Boost, gamepad);
+        let accent = if reduced_motion {
+            0.0
+        } else {
+            self.hud_milestone
+                .map_or(0.0, |(_, age)| (1.0 - age).max(0.0))
+        };
         egui::Area::new("hud".into())
-            .fixed_pos([18.0, 18.0])
+            .fixed_pos([18.0 - (1.0 - hud_opacity) * 12.0, 18.0])
             .show(context, |ui| {
-                garden_card().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("A LITTLE TIDIER")
-                            .size(11.0)
-                            .color(GARDEN_MUTED),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{:.1}%",
-                                self.run.mowing.display_coverage_percent()
-                            ))
-                            .size(34.0)
-                            .strong(),
-                        );
-                        ui.label(
-                            RichText::new("of your planet\nfreshly mown")
-                                .size(12.0)
+                ui.set_opacity(hud_opacity);
+                garden_card().inner_margin(12).show(ui, |ui| {
+                    coverage_dial(ui, coverage, accent);
+                    if self.profile.settings.accessibility.boost_enabled {
+                        let flash = if reduced_motion {
+                            0.0
+                        } else {
+                            (1.0 - self.boost_ready_age / 0.8).max(0.0)
+                        };
+                        boost_meter(ui, boost, active, flash);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            keycap(ui, &boost_label);
+                            ui.label(
+                                RichText::new(if active {
+                                    "A little extra zip"
+                                } else if boost >= 0.995 {
+                                    "Boost ready"
+                                } else {
+                                    "Recharging"
+                                })
+                                .size(11.0)
                                 .color(GARDEN_MUTED),
-                        );
+                            );
+                        });
+                    }
+                });
+            });
+        egui::Area::new("pause-button".into())
+            .anchor(Align2::RIGHT_TOP, [-18.0, 18.0])
+            .show(context, |ui| {
+                garden_card().inner_margin(5).show(ui, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+                    if response.hovered() || response.has_focus() {
+                        ui.painter().rect_filled(rect, 9, GARDEN_SAGE);
+                    }
+                    icon(ui.painter(), rect.center(), 22.0, Icon::Pause, GARDEN_PINE);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Pause")
                     });
-                    ui.add(
-                        egui::ProgressBar::new(
-                            (self.run.mowing.display_coverage_percent() / 100.0) as f32,
-                        )
-                        .desired_width(196.0)
-                        .desired_height(5.0)
-                        .fill(GARDEN_PINE),
-                    );
-                    ui.add_space(2.0);
-                    let boost = self.run.vehicle.state.boost_charge
-                        / self.run.vehicle_tuning.boost_capacity_seconds;
-                    ui.add(
-                        egui::ProgressBar::new(boost)
-                            .desired_width(196.0)
-                            .desired_height(16.0)
-                            .fill(GARDEN_CORAL)
-                            .text("Boost"),
-                    );
-                    ui.small(format!(
-                        "Always mowing · {} impacts",
-                        self.run.metrics.substantial_collision_count()
-                    ));
+                    if response.on_hover_text("Pause").clicked() {
+                        commands.push(UiCommand::Pause);
+                    }
                 });
             });
         egui::Area::new("telemetry".into())
-            .anchor(Align2::RIGHT_TOP, [-18.0, 18.0])
+            .anchor(Align2::RIGHT_BOTTOM, [-20.0, -20.0])
             .show(context, |ui| {
-                garden_card().inner_margin(10).show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} · {:.0} km/h",
-                            self.input.last_device_label,
-                            self.run.vehicle.state.speed() * 3.6
-                        ))
-                        .color(GARDEN_PINE),
-                    );
-                });
+                ui.set_opacity(hud_opacity);
+                egui::Frame::NONE
+                    .fill(GARDEN_CREAM.gamma_multiply(0.92))
+                    .corner_radius(20)
+                    .inner_margin(egui::Margin::symmetric(12, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:.0}",
+                                    self.run.vehicle.state.speed() * 3.6
+                                ))
+                                .font(display(22.0)),
+                            );
+                            ui.label(RichText::new("km/h").size(10.0).color(GARDEN_MUTED));
+                        });
+                    });
             });
-        if let Some(direction) = self.run.locator_direction() {
-            let transform = self.run.vehicle.state.transform;
-            let forward = direction.dot(transform.forward);
-            let side = direction.dot(transform.forward.cross(transform.up));
+        if let Some((percent, age)) = self.hud_milestone {
+            egui::Area::new("milestone".into())
+                .anchor(Align2::CENTER_TOP, [0.0, 24.0])
+                .show(context, |ui| {
+                    let fade = (age / 0.15).min(1.0) * ((3.0 - age) / 0.4).min(1.0);
+                    ui.set_opacity(if reduced_motion { 1.0 } else { fade });
+                    garden_card().inner_margin(12).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                            icon(ui.painter(), rect.center(), 20.0, Icon::Leaf, GARDEN_PINE);
+                            ui.label(
+                                RichText::new(match percent {
+                                    100 => "Every blade. Beautifully done.".to_owned(),
+                                    50 => "Half a world, freshly mown.".to_owned(),
+                                    _ => format!("{percent}% — a lovely little lawn."),
+                                })
+                                .font(display(20.0)),
+                            );
+                        });
+                    });
+                });
+        } else if let Some(direction) = self.run.locator_direction() {
+            let camera = self.run.camera.state;
+            let camera_forward = (camera.target - camera.position).normalize_or(glam::Vec3::NEG_Z);
+            let screen_right = camera_forward.cross(camera.up).normalize_or(glam::Vec3::X);
+            let screen_up = screen_right.cross(camera_forward);
+            let forward = direction.dot(screen_up);
+            let side = direction.dot(screen_right);
             egui::Area::new("locator".into())
                 .anchor(Align2::CENTER_TOP, [0.0, 24.0])
                 .show(context, |ui| {
-                    let arrow = if side.abs() > forward.abs() {
-                        if side > 0.0 { "▶" } else { "◀" }
-                    } else if forward >= 0.0 {
-                        "▲"
-                    } else {
-                        "▼"
-                    };
                     let size = if self.profile.settings.accessibility.enlarged_locator {
                         27.0
                     } else {
-                        17.0
+                        18.0
                     };
                     garden_card().inner_margin(10).show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!("{arrow} UNCUT GRASS"))
-                                .size(size)
-                                .strong()
-                                .color(GARDEN_PINE),
-                        );
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+                            icon(
+                                ui.painter(),
+                                rect.center(),
+                                size,
+                                Icon::Arrow(side.atan2(forward)),
+                                GARDEN_PINE,
+                            );
+                            ui.label(
+                                RichText::new("A little grass this way")
+                                    .size(size * 0.72)
+                                    .color(GARDEN_PINE),
+                            );
+                        });
                     });
                 });
         }
-        if self.run.tutorial_enabled
+        if self.scene_transition.is_some() {
+            egui::Area::new("arrival".into())
+                .anchor(Align2::CENTER_BOTTOM, [0.0, -28.0])
+                .show(context, |ui| {
+                    garden_card().inner_margin(12).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Your little patch awaits.").font(display(21.0)),
+                            );
+                            if ui.button("Start now").clicked() {
+                                commands.push(UiCommand::SkipArrival);
+                            }
+                        });
+                    });
+                });
+        } else if self.run.tutorial_enabled
             && let Some(prompt) = self.run.tutorial_stage.prompt()
             && (self.run.tutorial_stage != TutorialStage::Recovery
                 || self.run.vehicle.state.stuck_seconds >= 1.0)
         {
             egui::Area::new("tutorial".into())
-                .anchor(Align2::CENTER_BOTTOM, [0.0, -42.0])
+                .anchor(Align2::CENTER_BOTTOM, [0.0, -28.0])
                 .show(context, |ui| {
-                    garden_card().show(ui, |ui| {
-                        ui.label(RichText::new(prompt).size(18.0));
-                    });
-                });
-        }
-        if self.survey_started.is_some() {
-            egui::Area::new("survey".into())
-                .anchor(Align2::CENTER_TOP, [0.0, 70.0])
-                .show(context, |ui| {
-                    garden_card().show(ui, |ui| {
-                        ui.label(RichText::new("Surveying mountain routes…").size(20.0));
+                    garden_card().inner_margin(12).show(ui, |ui| {
+                        ui.label(RichText::new(prompt).size(16.0));
                     });
                 });
         }
@@ -985,8 +1320,27 @@ impl LawnOrbitApp {
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
             .resizable(false)
+            .title_bar(false)
+            .frame(garden_card().inner_margin(24))
             .show(context, |ui| {
                 ui.set_min_width(300.0);
+                ui.label(
+                    RichText::new("PAUSED · TAKE A LITTLE BREATHER")
+                        .size(11.0)
+                        .color(GARDEN_MUTED),
+                );
+                ui.label(RichText::new("The lawn can wait.").font(display(32.0)));
+                ui.label(
+                    RichText::new(format!(
+                        "{:.1}% mown · {} impacts · {} recoveries",
+                        self.run.mowing.display_coverage_percent(),
+                        self.run.metrics.substantial_collision_count(),
+                        self.run.metrics.recoveries,
+                    ))
+                    .size(12.0)
+                    .color(GARDEN_MUTED),
+                );
+                ui.add_space(8.0);
                 ui.label("Hold Recover at any time if the mower is stuck or overturned.");
                 if garden_button(ui, "Resume", [300.0, 38.0], true).clicked() {
                     commands.push(UiCommand::Resume);
@@ -1012,12 +1366,39 @@ impl LawnOrbitApp {
             .anchor(Align2::RIGHT_CENTER, [-54.0, 0.0])
             .collapsible(false)
             .resizable(false)
+            .title_bar(false)
+            .frame(garden_card().inner_margin(24))
             .show(context, |ui| {
                 ui.set_min_width(370.0);
                 ui.vertical_centered(|ui| {
-                    ui.heading("★".repeat(results.stars as usize));
-                    ui.label(format!("Seed {}", results.world_seed));
+                    ui.label(
+                        RichText::new("JOB COMPLETE · A POSTCARD FROM YOUR PLANET")
+                            .size(11.0)
+                            .color(GARDEN_MUTED),
+                    );
+                    ui.label(RichText::new("A lovely day's work.").font(display(34.0)));
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(150.0, 42.0), egui::Sense::hover());
+                    for index in 0..3 {
+                        icon(
+                            ui.painter(),
+                            rect.center() + egui::vec2((index as f32 - 1.0) * 40.0, 0.0),
+                            30.0,
+                            Icon::Star,
+                            if index < results.stars {
+                                GARDEN_CORAL
+                            } else {
+                                GARDEN_SAGE
+                            },
+                        );
+                    }
+                    ui.label(
+                        RichText::new(format!("Planet {}", results.world_seed))
+                            .size(12.0)
+                            .color(GARDEN_MUTED),
+                    );
                 });
+                ui.add_space(12.0);
                 egui::Grid::new("results-grid")
                     .striped(true)
                     .show(ui, |ui| {
@@ -1071,12 +1452,27 @@ impl LawnOrbitApp {
     }
 
     fn draw_settings(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
+        let content_width = (context.content_rect().width() - 80.0).clamp(300.0, 600.0);
         egui::Window::new("Settings & Accessibility")
+            .id(egui::Id::new("garden-settings"))
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
-            .default_width(600.0)
+            .resizable(false)
+            .default_width(content_width)
+            .title_bar(false)
+            .frame(garden_card().inner_margin(22))
             .show(context, |ui| {
-                egui::ScrollArea::vertical().max_height(610.0).show(ui, |ui| {
+                ui.set_width(content_width);
+                ui.label(RichText::new("SETTINGS & ACCESSIBILITY").size(11.0).color(GARDEN_MUTED));
+                ui.label(RichText::new("Make yourself at home.").font(display(32.0)));
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-scroll")
+                    .max_height((context.content_rect().height() - 300.0).max(160.0))
+                    .max_width(content_width)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                    ui.set_max_width(content_width);
                     if !self.profile_write_enabled {
                         ui.colored_label(GARDEN_ERROR, "Changes apply for this session only: the existing profile could not be loaded.");
                     }
@@ -1095,6 +1491,8 @@ impl LawnOrbitApp {
                     ui.heading("Visual accessibility");
                     ui.checkbox(&mut a.high_contrast_grass, "High-contrast cut grass");
                     ui.checkbox(&mut a.reduced_particles, "Reduced particles");
+                    ui.checkbox(&mut a.reduced_motion, "Reduced motion")
+                        .on_hover_text("Skip camera arrivals and stop decorative motion, camera shake, and interface pulses.");
                     ui.checkbox(&mut a.enlarged_locator, "Enlarged uncut-grass locator");
                     ui.add(
                         egui::Slider::new(
@@ -1132,35 +1530,59 @@ impl LawnOrbitApp {
                     ui.separator();
                     ui.heading("Remap controls");
                     ui.label("Choose an action, then press any keyboard or gamepad control.");
-                    egui::Grid::new("bindings").striped(true).show(ui, |ui| {
-                        for action in [
+                    for action in [
                             Action::SteerLeft, Action::SteerRight, Action::Accelerate, Action::BrakeReverse,
                             Action::Boost, Action::LookBehind, Action::Recover,
                             Action::CameraLeft, Action::CameraRight, Action::CameraUp, Action::CameraDown,
                             Action::RecenterCamera, Action::Pause,
                         ] {
-                            ui.label(match action {
-                                Action::SteerLeft => "Move left".to_owned(),
-                                Action::SteerRight => "Move right".to_owned(),
-                                Action::Accelerate => "Move forward".to_owned(),
-                                Action::BrakeReverse => "Move backward".to_owned(),
-                                _ => format!("{action:?}"),
-                            });
+                            let name = match action {
+                                Action::SteerLeft => "Move left",
+                                Action::SteerRight => "Move right",
+                                Action::Accelerate => "Move forward",
+                                Action::BrakeReverse => "Move backward",
+                                Action::Boost => "Boost",
+                                Action::LookBehind => "Look behind",
+                                Action::Recover => "Recover mower",
+                                Action::CameraLeft => "Camera left",
+                                Action::CameraRight => "Camera right",
+                                Action::CameraUp => "Camera up",
+                                Action::CameraDown => "Camera down",
+                                Action::RecenterCamera => "Center camera",
+                                Action::Pause => "Pause",
+                                _ => unreachable!("only displayed actions are listed"),
+                            };
                             let label = if self.input.rebind_action == Some(action) {
                                 "Press a control…".into()
                             } else {
-                                self.profile.settings.controls.bindings.get(&action).map_or_else(|| "Unbound".into(), |list| list.iter().map(|binding| format!("{binding:?}")).collect::<Vec<_>>().join(" / "))
+                                self.profile.settings.controls.bindings.get(&action).map_or_else(|| "Unbound".into(), |list| {
+                                    let mut labels = Vec::new();
+                                    for label in list.iter().map(settings_binding_label) {
+                                        if !labels.contains(&label) { labels.push(label); }
+                                    }
+                                    labels.join(" · ")
+                                })
                             };
-                            if ui.button(label).clicked() { self.input.rebind_action = Some(action); }
-                            ui.end_row();
+                            ui.horizontal(|ui| {
+                                ui.add_sized([134.0, 28.0], egui::Label::new(name));
+                                let response = ui.add_sized([ui.available_width(), 28.0], egui::Button::new(label).wrap());
+                                if response.on_hover_text(format!("Change {name}")).clicked() {
+                                    self.input.rebind_action = Some(action);
+                                }
+                            });
                         }
-                    });
                     if ui.button("Reset tutorial prompts").clicked() {
                         self.profile.tutorial_completed = false;
                         self.profile.tutorial_reset_requested = true;
                     }
-                    ui.add_space(10.0);
-                    if ui.button("Done").clicked() { commands.push(UiCommand::Back); }
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if garden_button(ui, "Done", [100.0, 34.0], true).clicked() {
+                        commands.push(UiCommand::Back);
+                    }
+                    ui.label(RichText::new("Make it comfortable. Make it yours.").size(12.0).color(GARDEN_MUTED));
                 });
             });
     }
@@ -1279,10 +1701,8 @@ impl LawnOrbitApp {
     fn process_commands(&mut self, commands: Vec<UiCommand>, event_loop: &ActiveEventLoop) {
         for command in commands {
             match command {
-                UiCommand::OpenEditor => {
-                    self.state = GameState::WorldEditor;
-                    self.preview_attempt = None;
-                    self.status_message = None;
+                UiCommand::OpenEditor | UiCommand::ReturnToEditor => {
+                    self.enter_editor();
                 }
                 UiCommand::OpenSettings => {
                     self.settings_return_state = self.state;
@@ -1295,7 +1715,7 @@ impl LawnOrbitApp {
                         self.input.clear_transient();
                         self.state = self.settings_return_state;
                     } else {
-                        self.state = GameState::Title;
+                        self.return_to_title();
                     }
                     if self.state == GameState::Paused {
                         self.run.paused = true;
@@ -1312,15 +1732,11 @@ impl LawnOrbitApp {
                     self.confirmation = None;
                     self.last_frame = Instant::now();
                 }
+                UiCommand::Pause => self.pause(),
+                UiCommand::SkipArrival => self.finish_arrival(),
                 UiCommand::Restart => {
                     self.run.restart(&self.profile.settings.accessibility);
                     self.enter_sandbox();
-                }
-                UiCommand::ReturnToEditor => {
-                    self.state = GameState::WorldEditor;
-                    self.run.paused = true;
-                    self.preview_attempt = None;
-                    self.status_message = None;
                 }
                 UiCommand::Submit => self.finish_run(),
                 UiCommand::Retry => {
@@ -1348,10 +1764,12 @@ impl LawnOrbitApp {
             }
         }
         if let Some(renderer) = &mut self.renderer {
+            renderer.set_motion_reduction(self.profile.settings.accessibility.reduced_motion);
             renderer.set_visual_options(
                 self.profile.settings.quality,
                 self.profile.settings.accessibility.high_contrast_grass,
-                self.profile.settings.accessibility.reduced_particles,
+                self.profile.settings.accessibility.reduced_particles
+                    || self.profile.settings.accessibility.reduced_motion,
                 self.profile.settings.grass_height_multiplier,
             );
         }
@@ -1439,11 +1857,21 @@ impl LawnOrbitApp {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
-        renderer.set_scene_left_inset(match self.state {
-            GameState::WorldEditor => EDITOR_SCENE_INSET / context.content_rect().width(),
-            GameState::Title => TITLE_SCENE_INSET / context.content_rect().width(),
-            _ => 0.0,
-        });
+        let scene_inset = if let Some(transition) = self.scene_transition {
+            let to_inset = if transition.to_editor {
+                EDITOR_SCENE_INSET
+            } else {
+                0.0
+            };
+            transition.from_inset + (to_inset - transition.from_inset) * transition.fraction()
+        } else {
+            match self.state {
+                GameState::WorldEditor => EDITOR_SCENE_INSET,
+                GameState::Title => TITLE_SCENE_INSET,
+                _ => 0.0,
+            }
+        };
+        renderer.set_scene_left_inset(scene_inset / context.content_rect().width());
         // Texture deltas (especially the first font atlas) are independent of
         // surface acquisition. Upload them before any recoverable early return,
         // or one initial Outdated/Occluded frame would desynchronize egui's
@@ -1680,7 +2108,19 @@ fn garden_button(ui: &mut egui::Ui, label: &str, size: [f32; 2], enabled: bool) 
 }
 
 fn configure_egui_style(context: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "DM Serif Display".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/DMSerifDisplay-Regular.ttf"))
+            .into(),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("garden-display".into()),
+        vec!["DM Serif Display".into()],
+    );
+    context.set_fonts(fonts);
     let mut visuals = egui::Visuals::light();
+    visuals.override_text_color = Some(GARDEN_PINE);
     visuals.window_fill = GARDEN_CREAM;
     visuals.panel_fill = GARDEN_CREAM;
     visuals.window_corner_radius = egui::CornerRadius::same(18);
@@ -1735,7 +2175,65 @@ fn configure_egui_style(context: &egui::Context) {
                 .text_styles
                 .insert(text_style, egui::FontId::proportional(size));
         }
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, display(24.0));
     });
+}
+
+fn settings_binding_label(binding: &lawn_core::input::Binding) -> String {
+    use lawn_core::input::Binding;
+    match binding {
+        Binding::Key(key) => match key.as_str() {
+            "ShiftLeft" | "ShiftRight" => "Shift",
+            "ControlLeft" | "ControlRight" => "Ctrl",
+            "AltLeft" | "AltRight" => "Alt",
+            "SuperLeft" | "SuperRight" => "Command",
+            "ArrowLeft" => "Left arrow",
+            "ArrowRight" => "Right arrow",
+            "ArrowUp" => "Up arrow",
+            "ArrowDown" => "Down arrow",
+            "Escape" => "Esc",
+            _ => key
+                .strip_prefix("Key")
+                .or_else(|| key.strip_prefix("Digit"))
+                .unwrap_or(key),
+        }
+        .to_owned(),
+        Binding::MouseButton(button) => format!("Mouse {button}"),
+        Binding::GamepadButton(button) => match button.as_str() {
+            "South" => "A / Cross",
+            "East" => "B / Circle",
+            "West" => "X / Square",
+            "North" => "Y / Triangle",
+            "LeftTrigger" => "LB / L1",
+            "RightTrigger" => "RB / R1",
+            "LeftTrigger2" => "LT / L2",
+            "RightTrigger2" => "RT / R2",
+            "LeftThumb" => "Left stick press",
+            "RightThumb" => "Right stick press",
+            "DPadLeft" => "D-pad left",
+            "DPadRight" => "D-pad right",
+            "DPadUp" => "D-pad up",
+            "DPadDown" => "D-pad down",
+            "Start" => "Menu",
+            "Select" => "View / Share",
+            _ => button,
+        }
+        .to_owned(),
+        Binding::GamepadAxis { axis, direction } => {
+            let positive = *direction >= 0;
+            match axis.as_str() {
+                "LeftStickX" => format!("Left stick {}", if positive { "right" } else { "left" }),
+                "LeftStickY" => format!("Left stick {}", if positive { "up" } else { "down" }),
+                "RightStickX" => format!("Right stick {}", if positive { "right" } else { "left" }),
+                "RightStickY" => format!("Right stick {}", if positive { "up" } else { "down" }),
+                "LeftZ" | "ButtonLeftTrigger2" => "LT / L2".into(),
+                "RightZ" | "ButtonRightTrigger2" => "RT / R2".into(),
+                _ => format!("{axis} {}", if positive { "+" } else { "−" }),
+            }
+        }
+    }
 }
 
 fn format_time(seconds: f32) -> String {
@@ -2057,6 +2555,243 @@ mod tests {
                     run.tutorial_stage = TutorialStage::Boost;
                     run.tick(InputSnapshot::default(), &accessibility);
                     assert_eq!(run.tutorial_stage, TutorialStage::WaitForLocator);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arrival_keeps_simulation_and_mowing_frozen_and_can_be_skipped() {
+        let mut app = preview_app();
+        app.profile_write_enabled = false;
+        let context = egui::Context::default();
+        app.animate_editor_camera(&context);
+        let camera_before = app.run.camera.state;
+        let coverage_before = app.run.mowing.coverage();
+        let cells_before = app.run.mowing.snapshot().cells;
+        let vehicle_before = app.run.vehicle.state.transform;
+        app.enter_sandbox();
+        for _ in 0..12 {
+            app.update_simulation(Duration::from_millis(33));
+        }
+        assert!(app.scene_transition.is_some());
+        assert_ne!(app.run.camera.state.position, camera_before.position);
+        assert_eq!(app.run.simulation_seconds, 0.0);
+        assert_eq!(app.run.mowing.coverage(), coverage_before);
+        assert_eq!(app.run.mowing.snapshot().cells, cells_before);
+        assert_eq!(app.run.vehicle.state.transform, vehicle_before);
+        app.finish_arrival();
+        assert!(app.scene_transition.is_none());
+        let camera = CameraRig::new(
+            vehicle_before,
+            app.run.planet.config.base_radius,
+            &app.profile.settings.accessibility,
+        );
+        assert_eq!(app.run.camera.state, camera.state);
+        app.update_simulation(Duration::from_millis(17));
+        assert!(app.run.simulation_seconds > 0.0);
+    }
+
+    #[test]
+    fn returning_to_title_abandons_an_unfinished_editor_transition() {
+        let mut app = preview_app();
+        app.state = GameState::Title;
+        app.enter_editor();
+        app.update_simulation(Duration::from_millis(50));
+        assert!(app.scene_transition.is_some());
+        app.return_to_title();
+        app.update_simulation(Duration::from_millis(50));
+        assert_eq!(app.state, GameState::Title);
+        assert!(app.scene_transition.is_none());
+    }
+
+    #[test]
+    fn reduced_motion_skips_arrival_and_holds_editor_orbit() {
+        let mut app = preview_app();
+        app.profile_write_enabled = false;
+        app.profile.settings.accessibility.reduced_motion = true;
+        let orbit = app.editor_orbit;
+        app.update_simulation(Duration::from_millis(50));
+        assert_eq!(app.editor_orbit, orbit);
+        app.enter_sandbox();
+        assert!(app.scene_transition.is_none());
+        app.update_simulation(Duration::from_millis(17));
+        assert!(app.run.simulation_seconds > 0.0);
+        app.enter_editor();
+        assert!(app.scene_transition.is_none());
+    }
+
+    #[test]
+    fn editor_zoom_keeps_a_shared_scale_and_camera_outside_the_world() {
+        let mut app = preview_app();
+        let context = egui::Context::default();
+        app.run.planet.config.base_radius = 12.0;
+        app.animate_editor_camera(&context);
+        let small_distance = app.run.camera.state.position.length();
+        app.run.planet.config.base_radius = 22.0;
+        app.animate_editor_camera(&context);
+        assert!((small_distance - app.run.camera.state.position.length()).abs() < 0.001);
+        app.editor_zoom = 1.8;
+        app.animate_editor_camera(&context);
+        let inspection_distance = app.run.camera.state.position.length();
+        assert!(inspection_distance < small_distance);
+        assert!(inspection_distance >= 35.99);
+    }
+
+    #[test]
+    fn transition_roll_stays_continuous_between_opposite_endpoint_ups() {
+        let from = CameraState {
+            position: glam::Vec3::Z * 50.0,
+            target: glam::Vec3::ZERO,
+            up: glam::Vec3::NEG_Y,
+            field_of_view_degrees: 90.0,
+        };
+        // Include a pure roll, an orbit with an off-center look target, and
+        // the opposite hemisphere. Every endpoint up is valid and opposite.
+        for (position, target) in [
+            (glam::Vec3::Z * 38.0, glam::Vec3::ZERO),
+            (
+                glam::Vec3::new(40.0, 0.0, -30.0),
+                glam::Vec3::new(5.0, 0.0, -3.0),
+            ),
+            (glam::Vec3::NEG_Z * 40.0, glam::Vec3::ZERO),
+        ] {
+            let to = CameraState {
+                position,
+                target,
+                up: glam::Vec3::Y,
+                ..from
+            };
+            let projected_frame = |pose: CameraState| {
+                let view = (pose.target - pose.position).normalize();
+                let right = view.cross(pose.up).normalize();
+                let up = right.cross(view).normalize();
+                (view, right, up)
+            };
+            let (_, mut previous_right, mut previous_up) = projected_frame(from);
+            for sample in 0..=256 {
+                let transition = SceneTransition {
+                    from,
+                    to,
+                    elapsed: ARRIVAL_SECONDS * sample as f32 / 256.0,
+                    from_inset: 0.0,
+                    to_editor: true,
+                };
+                let pose = transition.pose();
+                let (view, right, up) = projected_frame(pose);
+                assert!(pose.up.is_normalized());
+                assert!(pose.up.dot(view).abs() < 0.0001);
+                assert!(
+                    right.dot(previous_right) > 0.995,
+                    "right vector jumped at sample {sample}"
+                );
+                assert!(
+                    up.dot(previous_up) > 0.995,
+                    "up vector jumped at sample {sample}"
+                );
+                previous_right = right;
+                previous_up = up;
+            }
+            let (_, expected_right, expected_up) = projected_frame(to);
+            assert!(previous_right.dot(expected_right) > 0.9999);
+            assert!(previous_up.dot(expected_up) > 0.9999);
+        }
+    }
+
+    #[test]
+    fn transition_goes_around_the_planet_even_between_opposite_hemispheres() {
+        let from = CameraState {
+            position: glam::Vec3::Y * 50.0,
+            target: glam::Vec3::ZERO,
+            up: glam::Vec3::Z,
+            field_of_view_degrees: 90.0,
+        };
+        let to = CameraState {
+            position: glam::Vec3::NEG_Y * 30.0,
+            ..from
+        };
+        for step in 0..=20 {
+            let transition = SceneTransition {
+                from,
+                to,
+                elapsed: ARRIVAL_SECONDS * step as f32 / 20.0,
+                from_inset: 0.0,
+                to_editor: false,
+            };
+            let pose = transition.pose();
+            assert!(pose.position.length() >= 29.99);
+            assert!(pose.position.is_finite());
+            assert!(pose.up.is_normalized());
+        }
+    }
+
+    #[test]
+    fn settings_window_and_done_action_fit_supported_window_sizes() {
+        fn text_rect(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    (text.galley.text() == label).then_some(text.visual_bounding_rect())
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| text_rect(shape, label))
+                }
+                _ => None,
+            }
+        }
+        let mut app = preview_app();
+        // Several readable bindings still require wrapping; retain all of
+        // them rather than truncating the remapping information to fit.
+        app.profile
+            .settings
+            .controls
+            .bindings
+            .get_mut(&Action::Accelerate)
+            .unwrap()
+            .push(lawn_core::input::Binding::GamepadButton(
+                "Additional controller forward control".into(),
+            ));
+        for size in [egui::vec2(960.0, 540.0), egui::vec2(1280.0, 720.0)] {
+            let context = egui::Context::default();
+            configure_egui_style(&context);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for frame in 0..8 {
+                let output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        time: Some(f64::from(frame)),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        app.draw_settings(ui.ctx(), &mut Vec::new());
+                    },
+                );
+                if frame < 7 {
+                    continue;
+                }
+                let window = context
+                    .memory(|memory| memory.area_rect(egui::Id::new("garden-settings")))
+                    .unwrap();
+                assert!(
+                    screen.contains_rect(window),
+                    "settings overflows {size:?}: {window:?}"
+                );
+                assert!(
+                    window.width() <= 646.0,
+                    "bindings expanded the settings window: {window:?}"
+                );
+                for label in ["SETTINGS & ACCESSIBILITY", "Done"] {
+                    let (clip, text) = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| {
+                            text_rect(&shape.shape, label).map(|rect| (shape.clip_rect, rect))
+                        })
+                        .expect("settings action is painted");
+                    assert!(clip.contains_rect(text), "{label} is clipped at {size:?}");
+                    assert!(
+                        screen.contains_rect(text),
+                        "{label} is offscreen at {size:?}"
+                    );
                 }
             }
         }

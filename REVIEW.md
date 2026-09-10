@@ -222,3 +222,39 @@ editor, and active mowing with visible clippings. UI-driven scenes showed
 visible tufts on this M2; these are local observations, not an isolated benchmark
 or a guarantee of a locked frame rate. All-roots reference captures deliberately
 skip gameplay culling and should not be used as frame-time benchmarks.
+
+## Complete miniature-garden polish pass
+
+The seven accepted visual areas are implemented and audited in
+[VISUAL_POLISH.md](VISUAL_POLISH.md): clustered leaf silhouettes and coherent
+wind, richer directional turf, local cavity depth and quieter stone, a complete
+garden UI, inspection zoom and camera arrivals, mower identity/materials, and
+area-sensitive clipping plus contact/recovery/milestone effects.
+
+Integration review and visual inspection resolved these issues before completion:
+
+- Opposite camera-up directions could flip during arrival. The camera now
+  transports its frame continuously along a spherical path and interpolates roll;
+  tests also cover antipodal hemispheres and moving targets.
+- Leaving a return transition for the title could retain the editor inset. The
+  transition is explicitly cleared when returning to the title.
+- Settings overflowed both supported reference sizes because remap strings
+  expanded the panel. Width is bounded, friendly binding names wrap, duplicate
+  aliases collapse, and Done stays outside the scroll area. Layout tests include
+  additional long bindings and settled egui window bounds.
+- Unsupported decorative glyphs and a concave bolt produced broken icons.
+  Rotation, status and boost now use explicit drawn geometry.
+- Updated hover-pad positions disagreed with their cosmetic grass-wash sources.
+  Both now use the same render constant.
+
+Validation: 169 ordinary workspace tests and all eight explicit renderer GPU
+checks passed on Apple M2, including 1×/2×/4× MSAA, bloom, sky, terrain boundaries,
+hover wash, field interpolation, and the new tangent/coherent breeze readback.
+The offscreen UI test passed all 14 references (seven scenes at 960×540 and
+1280×720), checking visible headings/actions without profile writes. Formatting
+and strict workspace Clippy passed, as did the final release build. Native
+inspection covered title, editor zoom, arrival, gameplay, pause, minimum-window
+settings and reduced motion; the original motion preference was restored and
+the game closed afterward. Shipping validation passed all 1,000 seeds with no
+failures and fully reachable mowable terrain. The final visual checklist
+and measured presentation cost are recorded in VISUAL_POLISH and PERFORMANCE.

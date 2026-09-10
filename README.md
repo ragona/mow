@@ -20,6 +20,14 @@ Rock edges use a continuous material contour shared with a short grass fringe,
 and the stone has crisp mineral detail that fades at distance to avoid shimmer.
 Crater relief is prepared with the static render mesh and fades out before the
 lawn; it does not change generated worlds, driving, mowing, or saved seeds.
+Seeded clusters vary individual leaf shapes and greens, while a shared breeze
+and slow gusts travel across the globe. Finished turf retains compact varied
+stubble and directional brushed stripes. Cached local cavity shading gives
+rock feet and sheltered terrain depth, with quieter mineral accents on the stone.
+The mower has a four-leaf canopy badge, pine trim, soft enamel reflections, and
+cyan upper pad rings that remain visible from the playing camera. Clipping
+quantity follows the area freshly cut; rock contact, recovery, and coverage
+milestones have restrained, distinct effects.
 
 No reusable game engine is used. Gameplay simulation is headless and independent
 of the renderer, which keeps world generation, mowing, scoring, and vehicle rules
@@ -40,6 +48,11 @@ The planet updates beside the controls as you edit, including when you change it
 seed. Rockiness can be set to 0% for a fully grassy world without outcroppings;
 the Meadow preset starts there. Enter a hexadecimal, decimal, or phrase seed,
 then choose Start Mowing to enter the exact planet shown in the preview.
+Illustrated preset cards and the Inspect zoom/rotation controls help compare
+worlds; zoom keeps a common scale when the shape controls change. A brief camera
+arrival carries the preview into play and can be skipped with movement, boost,
+Enter, or Start now. The garden interface uses a bundled, licensed display
+typeface, a coverage dial, a segmented boost meter, and remapping-aware hints.
 Settings plus favorite and recent seeds are saved atomically in the operating
 system's per-user application-data directory.
 
@@ -65,6 +78,8 @@ The mower deck is always active directly beneath the chassis whenever it is grou
 The settings screen also contains horizontal movement sensitivity/inversion, camera tilt,
 camera shake, camera auto-follow, field of view, motion reduction, boost disable, grass density,
 grass height, render scale, MSAA, fullscreen, and a high-contrast coverage overlay.
+Reduced motion skips camera arrivals, stops ambient menu orbits and decorative
+oscillation, disables speed shake, and reduces particle motion and HUD animation.
 
 ## Workspace layout
 
@@ -98,9 +113,14 @@ cargo test -p lawn_render gpu_bloom -- --ignored --nocapture
 # Includes hover wash, cube-edge interpolation, and the grass/rock material edge.
 cargo test -p lawn_render gpu_ -- --ignored --nocapture
 # Optional repeatable 1024×768 art reference; writes PPMs at each supported MSAA count.
-# LAWN_CAPTURE_VIEW also accepts night, detail, or moon. Captures draw all roots,
+# LAWN_CAPTURE_VIEW also accepts night, detail, moon, vehicle, recovery, impact,
+# milestone, stripes-day, stripes-night, crosscut-day, crosscut-night,
+# curve-day, or curve-night. Captures draw all roots,
 # so their one-frame GPU timings are not representative gameplay benchmarks.
 LAWN_CAPTURE_DIR=/tmp/lawn-art LAWN_CAPTURE_VIEW=day cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
+# Real UI reference images at 960×540 and 1280×720, including scrolled settings.
+# Writes PPMs without opening a window or saving a user profile.
+LAWN_UI_CAPTURE_DIR=/tmp/lawn-ui cargo test -p lawn_orbit gpu_capture_garden_ui_references -- --ignored --nocapture
 ```
 
 The test suite exercises deterministic generation (including compact grass-root
@@ -147,3 +167,6 @@ The latest correctness/performance findings and validation results are recorded
 in [`REVIEW.md`](REVIEW.md). The subsequent measured performance investigation,
 including before/after results and rejected experiments, is in
 [`PERFORMANCE.md`](PERFORMANCE.md).
+The current visual pass and its acceptance evidence are tracked in
+[`VISUAL_POLISH.md`](VISUAL_POLISH.md). DM Serif Display is distributed with its
+[SIL Open Font License](crates/lawn_orbit/assets/fonts/OFL-DMSerifDisplay.txt).

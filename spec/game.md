@@ -99,7 +99,7 @@ There is no death. Falling away from the surface, becoming stuck, or overturning
 
 ## 5. Core Game Loop
 
-1. **Generate and survey:** A seed produces the planet. The opening camera circles it and reveals its largest mountain groups, open lawns, and narrow routes.
+1. **Generate and survey:** A seed produces the planet. The editor's rotating preview and inspection controls reveal its mountain groups, open lawns, and routes. Starting play makes a brief, skippable camera approach to the mower.
 2. **Mow:** The player drives freely and cuts tall grass beneath the active mower deck.
 3. **Route:** The player chooses efficient paths around rock faces, through passes, and across already-cut areas while cleaning up missed patches.
 4. **Explore:** The player can continue refining the cut pattern, revisit terrain, or simply drive.
@@ -207,7 +207,7 @@ The minimum shippable version includes:
 
 The vehicle is a small, rounded-square hover mower with a belly-mounted deck directly beneath its chassis. It should read as a charming utility machine rather than a weaponized racing vehicle. Its largely symmetric silhouette intentionally avoids implying that one travel direction is privileged.
 
-The shippable baseline model uses a compact, layered, chamfered shell with a centered canopy and four exposed corner hover pods connected by short dark outriggers. Each pod has a sturdy upper housing and a bright cyan lower emitter. The emitters may pulse subtly, but all four pads must remain individually legible from the standard camera. A recessed circular deck stays close to the lawn while the chassis floats visibly above it, communicating both the centered cutting footprint and the hover gap without competing with the pad silhouette.
+The shippable model uses a compact, layered, chamfered shell with a centered canopy and four exposed corner hover pods connected by short dark outriggers. Pine canopy trim and a bronze-rimmed four-leaf badge give the mower a recognizable, rotationally symmetric mark. Each pod has a sturdy upper housing, a bright cyan lower emitter, and a slim upper light ring visible from the overhead playing camera. The emitters may pulse subtly, but all four pads must remain individually legible. A recessed circular deck stays close to the lawn while the chassis floats visibly above it, communicating both the centered cutting footprint and the hover gap without competing with the pad silhouette. Broad, soft environment reflections retain enamel and canopy curvature in shade.
 
 ### 7.2 Movement model
 
@@ -420,9 +420,16 @@ Keep the HUD small and readable. It contains:
 
 A miniature globe map is not required during ordinary play. After 95% coverage, an optional locator can point toward the largest nearby uncut region.
 
+The garden instrument combines a leaf-marked coverage dial and segmented boost
+meter with a remapping-aware keycap. A small speed display is secondary;
+collision counts appear with paused statistics. Boost readiness and coverage
+milestones receive brief, restrained accents. The locator uses a drawn arrow in
+the actual camera's screen basis. Display headings use bundled DM Serif Display;
+body text and settings retain a clear proportional face.
+
 ### 12.2 World editor
 
-The world editor replaces mode selection in the current prototype. A narrow panel on the left presents terrain presets, bounded shape controls, seed entry and history, preview status, and Start Mowing. Controls scroll on smaller windows while preview status and the play action remain accessible. The rotating planet is centered in the remaining space, with a stable camera distance so changes in planet radius are visible.
+The world editor replaces mode selection in the current prototype. A narrow panel on the left presents illustrated terrain presets, bounded shape controls, seed entry and history, preview status, and Start Mowing. Controls scroll on smaller windows while preview status and the play action remain accessible. The rotating planet is centered in the remaining space. Inspect controls provide zoom, reset, and manual rotation while keeping a common distance across shape edits, so changes in planet radius remain visible. A roughly 0.9-second camera/HUD arrival can be skipped with movement or an explicit action; it never advances simulation or mowing. Returning to the editor transports the camera around the planet and interpolates roll without crossing through the globe or flipping at opposite orientations.
 
 ### 12.3 Menus
 
@@ -461,6 +468,10 @@ Use a stylized, storybook miniature aesthetic with simplified forms, soft lighti
 The shipping presentation is a cozy garden growing on a weathered meteor. Warm directional sunlight meets cool ambient shadows; exposed stone is dusty blue-violet with shallow craters, chipped rims, pale fractures, occasional copper inclusions, and moss in sheltered crevices. Mower bodywork is coral enamel and cream, and hover pads have concentrated cyan emission. A textured indigo, violet, and teal nebula sky with varied stars, a small cratered companion moon, and a soft camera-correct atmospheric rim frame the globe. The sky is anchored in world direction, so orbiting reveals the surrounding cosmos naturally. Menus and the compact HUD use cream cards, pine text, sage controls, and coral primary actions.
 
 Ambient fill increases smoothly in shade, reaching 1.85 times the base ambient on the fully unlit side. Full sunlight retains its original contrast and warm highlights, while grass and rock remain readable around the whole globe.
+The fill is directional, and a bounded static local-horizon cache adds sheltered
+contact depth to terrain and grass roots. This modifies indirect illumination
+without adding a fullscreen occlusion pass. Broad stone slabs retain quiet areas;
+fractures and sparse copper inclusions act as selective accents around craters.
 
 The visible grass–rock contour comes from a continuous, seam-safe field derived from the authoritative cell classifications. Terrain evaluates a narrow antialiased material threshold within each triangle; the grass fringe tapers to the same contour. Stone uses world-space mineral facets, seams, and grain with distance filtering. Shallow crater relief and its material masks are prepared once with the static render mesh and fade out before the lawn, preserving planted grass, collision geometry, and authoritative mowing.
 
@@ -495,12 +506,23 @@ Hover-wash displacement scales with remaining blade height rather than applying 
 The current exaggerated presentation scales uncut blades to approximately 0.9–1.4 meters tall at the default grass-height scale while retaining roughly 6.4-centimeter stubble, making every cut path dramatically legible from the mostly top-down camera. Stubble scales down further for very short custom grass, so cutting never increases blade height.
 
 Variation should occur in patches as well as per blade. Fully independent random color and motion will resemble visual noise rather than vegetation.
+Seeded garden tone, blade-shape clusters, and local cavity shade are prepared
+with the immutable render uploads. Every existing tuft still has three blades;
+individual width, curvature, and height vary within the original culling bounds.
+A smooth world-space breeze projected onto the local tangent plane carries
+traveling gusts across neighboring tufts, with only a small local flutter.
 
 ### 14.3 Mowing appearance
 
 The primary mowing transition is geometric: tall blades bend toward the deck, shorten, and settle into stubble. Clipping particles briefly continue along the vehicle's velocity and local wind direction.
 
 Mowing stripes come primarily from the comb direction written by the mower. Short blades lean along that tangent direction, changing their normals and response to the light. Painted light and dark stripes may reinforce this effect, but must not create it alone.
+Compact stubble varies slightly in height and has lighter roots and a restrained
+cut-tip response. Clipping quantity follows freshly cut square metres, and the
+size mix distinguishes a full pass from shaving an edge. Moving rock scrapes
+and substantial impacts produce low stone dust. Recovery clears old effects
+and adds a soft mint arrival gesture; coverage milestones release a few warm
+motes. All event emission is bounded and consumed once per simulation batch.
 
 ### 14.4 Vehicle feedback
 

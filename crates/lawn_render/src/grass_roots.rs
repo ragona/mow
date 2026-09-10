@@ -1,5 +1,5 @@
 //! Upload-only grass data. The immutable generator records stay compact and
-//! deterministic; the renderer adds a cached fringe weight once per planet.
+//! deterministic; the renderer caches fringe, garden clusters and cavity shade.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -13,12 +13,14 @@ pub(crate) struct RenderGrassRoot {
     position: [f32; 3],
     packed_normal_seed: u32,
     turf_weight: f32,
+    garden_data: u32,
 }
 
-const ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
     1 => Float32x3,
     2 => Uint32,
-    3 => Float32
+    3 => Float32,
+    4 => Uint32
 ];
 
 pub(crate) const fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -43,8 +45,27 @@ pub(crate) fn prepare(roots: &[GrassRootGpu], surface: &TerrainSurface) -> Vec<R
             position: root.position,
             packed_normal_seed: root.packed_normal_seed,
             turf_weight: turf_weight(surface.rock_coverage(Vec3::from_array(root.position))),
+            garden_data: pack_garden(surface.garden(Vec3::from_array(root.position)))
+                | (individual_variation(root.packed_normal_seed) << 24),
         })
         .collect()
+}
+
+fn pack_garden(values: [f32; 3]) -> u32 {
+    let [tone, shape, cavity] = values.map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u32);
+    tone | (shape << 8) | (cavity << 16)
+}
+
+fn individual_variation(packed_normal_seed: u32) -> u32 {
+    // This stable variation is shared by all 24 vertices. Prepare it in the
+    // unused byte instead of repeating the hash in every vertex invocation.
+    let mut value = (packed_normal_seed >> 20).wrapping_mul(1_597_334_677);
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^= value >> 16;
+    (value as f32 / u32::MAX as f32 * 255.0).round() as u32
 }
 
 #[cfg(test)]
@@ -74,6 +95,14 @@ mod tests {
             assert_eq!(core.position, rendered.position);
             assert_eq!(core.packed_normal_seed, rendered.packed_normal_seed);
             assert!((0.0..=1.0).contains(&rendered.turf_weight));
+            for (channel, value) in surface
+                .garden(Vec3::from_array(core.position))
+                .into_iter()
+                .enumerate()
+            {
+                let cached = ((rendered.garden_data >> (channel * 8)) & 255) as f32 / 255.0;
+                assert!((cached - value).abs() <= 0.5 / 255.0 + f32::EPSILON);
+            }
             let coverage = surface.rock_coverage(Vec3::from_array(core.position));
             if coverage >= 0.5 {
                 assert_eq!(
@@ -97,5 +126,6 @@ mod tests {
         );
         assert_eq!(planet.grass_roots, original);
         assert_eq!(std::mem::size_of::<GrassRootGpu>(), 16);
+        assert_eq!(std::mem::size_of::<RenderGrassRoot>(), 24);
     }
 }

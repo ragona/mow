@@ -187,6 +187,7 @@ pub struct Renderer {
     quality: QualityPreset,
     high_contrast: bool,
     reduced_particles: bool,
+    reduced_motion: bool,
     grass_height_multiplier: f32,
     render_scale: f32,
     last_visual_frame: Instant,
@@ -411,8 +412,13 @@ impl Renderer {
             vehicle_vertices,
             vehicle_indices,
             vehicle_index_count: 0,
-            vehicle_mesh_vertices: Vec::with_capacity(1_024),
-            vehicle_mesh_indices: Vec::with_capacity(4_096),
+            vehicle_mesh_vertices: Vec::with_capacity(
+                (mesh::VEHICLE_VERTEX_BUFFER_SIZE / std::mem::size_of::<MeshVertex>() as u64)
+                    as usize,
+            ),
+            vehicle_mesh_indices: Vec::with_capacity(
+                (mesh::VEHICLE_INDEX_BUFFER_SIZE / 4) as usize,
+            ),
             vehicle_presentation: VehiclePresentation::new(
                 run.vehicle.state.transform,
                 run.vehicle.state.linear_velocity,
@@ -421,6 +427,7 @@ impl Renderer {
             quality,
             high_contrast,
             reduced_particles,
+            reduced_motion: false,
             grass_height_multiplier: grass_height_multiplier.clamp(0.4, 1.6),
             render_scale,
             last_visual_frame: Instant::now(),
@@ -503,6 +510,12 @@ impl Renderer {
         self.scene_left_inset = fraction.clamp(0.0, 0.8);
     }
 
+    /// Keeps physical motion readable while holding decorative oscillation
+    /// still, including the grass breeze, canopy bob and emitter pulses.
+    pub fn set_motion_reduction(&mut self, reduced: bool) {
+        self.reduced_motion = reduced;
+    }
+
     pub fn upload_planet(&mut self, run: &RunState) {
         self.planet = create_planet_resources(&self.device, &self.queue, run);
         self.interaction = GrassInteraction::new(&self.device, run.planet.config.base_radius);
@@ -562,10 +575,15 @@ impl Renderer {
         let deck_transform = run.vehicle.interpolated_transform(interpolation_alpha);
         let visual_seconds =
             (run.simulation_seconds - FIXED_DT + interpolation_alpha * FIXED_DT).max(0.0);
+        let decorative_seconds = if self.reduced_motion {
+            0.0
+        } else {
+            visual_seconds
+        };
         let chassis_transform = self.vehicle_presentation.update(
             deck_transform,
             run.vehicle.interpolated_velocity(interpolation_alpha),
-            visual_seconds,
+            decorative_seconds,
             if run.paused || !run.active {
                 0.0
             } else {
@@ -578,7 +596,7 @@ impl Renderer {
             chassis_transform,
             deck_transform,
             run.vehicle.state.mower_enabled,
-            visual_seconds,
+            decorative_seconds,
         );
         self.queue.write_buffer(
             &self.vehicle_vertices,
@@ -1035,7 +1053,11 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
             camera.position.x,
             camera.position.y,
             camera.position.z,
-            renderer.started.elapsed().as_secs_f32(),
+            if renderer.reduced_motion {
+                0.0
+            } else {
+                renderer.started.elapsed().as_secs_f32()
+            },
         ],
         light_epoch: [
             light_direction.x,

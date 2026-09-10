@@ -54,8 +54,9 @@ impl TuftVertex {
     }
 }
 
-pub const VEHICLE_VERTEX_BUFFER_SIZE: u64 = 48 * 1024;
-pub const VEHICLE_INDEX_BUFFER_SIZE: u64 = 16 * 1024;
+pub const VEHICLE_VERTEX_BUFFER_SIZE: u64 = 64 * 1024;
+pub const VEHICLE_INDEX_BUFFER_SIZE: u64 = 20 * 1024;
+pub(crate) const HOVER_PAD_OFFSET: f32 = 0.82;
 
 pub fn build_terrain(planet: &Planet, surface: &TerrainSurface) -> (Vec<MeshVertex>, Vec<u32>) {
     let resolution = terrain_render_resolution(planet.terrain.resolution());
@@ -194,8 +195,12 @@ pub fn build_vehicle(
     mower_enabled: bool,
     elapsed_seconds: f32,
 ) {
-    const HOVER_PADS: [(f32, f32); 4] =
-        [(-0.72, -0.72), (0.72, -0.72), (-0.72, 0.72), (0.72, 0.72)];
+    const HOVER_PADS: [(f32, f32); 4] = [
+        (-HOVER_PAD_OFFSET, -HOVER_PAD_OFFSET),
+        (HOVER_PAD_OFFSET, -HOVER_PAD_OFFSET),
+        (-HOVER_PAD_OFFSET, HOVER_PAD_OFFSET),
+        (HOVER_PAD_OFFSET, HOVER_PAD_OFFSET),
+    ];
 
     vertices.clear();
     indices.clear();
@@ -235,6 +240,18 @@ pub fn build_vehicle(
         0.28,
         2,
     );
+    // A pine gasket separates the cream canopy from the coral enamel. Its
+    // broad material edge remains legible in the overhead playing camera.
+    add_cylinder(
+        vertices,
+        indices,
+        chassis_transform,
+        Vec3::new(0.0, 0.52, 0.0),
+        0.575,
+        0.03,
+        14,
+        8,
+    );
     add_ellipsoid(
         vertices,
         indices,
@@ -247,12 +264,38 @@ pub fn build_vehicle(
         vertices,
         indices,
         chassis_transform,
-        Vec3::new(0.0, 0.835, 0.0),
-        0.19,
-        0.025,
-        10,
-        2,
+        Vec3::new(0.0, 0.845, 0.0),
+        0.245,
+        0.018,
+        14,
+        9,
     );
+    add_cylinder(
+        vertices,
+        indices,
+        chassis_transform,
+        Vec3::new(0.0, 0.869, 0.0),
+        0.218,
+        0.006,
+        14,
+        8,
+    );
+    // Four cream leaves form a small garden emblem, readable as a single mark
+    // at play distance. Rotational symmetry suits the omnidirectional machine.
+    for axis in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
+        let side = axis.cross(Vec3::Y);
+        let center = Vec3::Y * 0.881 + axis * 0.107;
+        let start = vertices.len() as u32;
+        for local in [
+            center - axis * 0.072,
+            center + side * 0.043,
+            center + axis * 0.077,
+            center - side * 0.043,
+        ] {
+            push_model_vertex(vertices, chassis_transform, local, Vec3::Y, 3);
+        }
+        indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
 
     // The antenna bends against the springy chassis lean. Its small idle sway
     // uses simulation time, so the whole silhouette holds still when paused.
@@ -334,6 +377,17 @@ pub fn build_vehicle(
             10,
             4,
         );
+        // The lower emitter remains visible from the side; this slim upper
+        // annulus exposes the same cyan light to the normal overhead camera.
+        add_annulus(
+            vertices,
+            indices,
+            chassis_transform,
+            Vec3::new(side, -0.098, longitudinal),
+            0.225,
+            0.285,
+            5,
+        );
         let pulse = 1.0 + (elapsed_seconds * 5.0 + index as f32 * 1.7).sin() * 0.025;
         add_cylinder(
             vertices,
@@ -345,6 +399,37 @@ pub fn build_vehicle(
             10,
             5,
         );
+    }
+}
+
+fn add_annulus(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    transform: VehicleTransform,
+    center: Vec3,
+    inner: f32,
+    outer: f32,
+    material: u32,
+) {
+    const SEGMENTS: u32 = 12;
+    let start = vertices.len() as u32;
+    for segment in 0..SEGMENTS {
+        let angle = segment as f32 * std::f32::consts::TAU / SEGMENTS as f32;
+        let direction = Vec3::new(angle.cos(), 0.0, angle.sin());
+        for radius in [inner, outer] {
+            push_model_vertex(
+                vertices,
+                transform,
+                center + direction * radius,
+                Vec3::Y,
+                material,
+            );
+        }
+    }
+    for segment in 0..SEGMENTS {
+        let a = start + segment * 2;
+        let b = start + ((segment + 1) % SEGMENTS) * 2;
+        indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
     }
 }
 
@@ -710,6 +795,24 @@ mod tests {
                     mask | (1 << (x * 2 + z))
                 });
         assert_eq!(glowing_pad_quadrants, 0b1111);
+        let top_lights = vertices.iter().filter(|vertex| {
+            vertex.material == 5 && vertex.normal[1] > 0.99 && vertex.position[1] > -0.11
+        });
+        let top_light_quadrants = top_lights.fold(0_u8, |mask, vertex| {
+            let x = usize::from(vertex.position[0] >= 0.0);
+            let z = usize::from(vertex.position[2] >= 0.0);
+            mask | (1 << (x * 2 + z))
+        });
+        assert_eq!(
+            top_light_quadrants, 0b1111,
+            "each pad must expose light to the overhead camera"
+        );
+        assert!(
+            vertices
+                .iter()
+                .any(|vertex| vertex.material == 8 && vertex.position[1] > 0.85)
+        );
+        assert!(vertices.iter().any(|vertex| vertex.material == 9));
         assert!(vertices.iter().any(|vertex| vertex.material == 7));
     }
 
@@ -790,7 +893,10 @@ mod tests {
                     displacement.abs() < 1.0e-4,
                     "craters moved the grass surface: {displacement}"
                 );
-                assert_eq!(vertex.detail, [0.0; 4]);
+                assert_eq!(&vertex.detail[..2], &[0.0; 2]);
+                let garden = surface.garden(direction);
+                assert!((vertex.detail[2] - garden[0]).abs() < 1.0e-5);
+                assert!((vertex.detail[3] - garden[2]).abs() < 1.0e-5);
             }
             assert!(
                 positions.insert(vertex.position.map(f32::to_bits)),

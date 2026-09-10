@@ -259,8 +259,14 @@ fn force_sources(planet: &Planet, vehicle: &VehicleState, mower_width: f32) -> [
     let travel_bias = tangent_velocity / speed.max(WASH_DIRECTION_SPEED);
     let mut result = [ForceSourceGpu::zeroed(); 7];
     let mut wheel_index = 0;
-    for forward_offset in [-0.72_f32, 0.72] {
-        for side_offset in [-0.72_f32, 0.72] {
+    for forward_offset in [
+        -crate::mesh::HOVER_PAD_OFFSET,
+        crate::mesh::HOVER_PAD_OFFSET,
+    ] {
+        for side_offset in [
+            -crate::mesh::HOVER_PAD_OFFSET,
+            crate::mesh::HOVER_PAD_OFFSET,
+        ] {
             let position =
                 transform.position + transform.forward * forward_offset + right * side_offset
                     - transform.up * 0.45;

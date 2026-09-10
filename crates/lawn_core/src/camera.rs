@@ -139,8 +139,11 @@ impl CameraRig {
             .mul_vec3(base_screen_up)
             .normalize();
         let speed_shake = (velocity.length() / 17.0).clamp(0.0, 1.0);
-        let shake_angle =
-            settings.camera_shake * speed_shake * (self.elapsed_seconds * 31.0).sin() * 0.008;
+        let shake_angle = if settings.reduced_motion {
+            0.0
+        } else {
+            settings.camera_shake * speed_shake * (self.elapsed_seconds * 31.0).sin() * 0.008
+        };
         screen_up = Quat::from_axis_angle(local_up, shake_angle).mul_vec3(screen_up);
 
         let scale = chase_scale(planet.config.base_radius);

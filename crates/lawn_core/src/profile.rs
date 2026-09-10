@@ -33,6 +33,7 @@ pub struct AccessibilitySettings {
     pub boost_enabled: bool,
     pub high_contrast_grass: bool,
     pub reduced_particles: bool,
+    pub reduced_motion: bool,
     pub enlarged_locator: bool,
 }
 
@@ -50,6 +51,7 @@ impl Default for AccessibilitySettings {
             boost_enabled: true,
             high_contrast_grass: false,
             reduced_particles: false,
+            reduced_motion: false,
             enlarged_locator: false,
         }
     }
