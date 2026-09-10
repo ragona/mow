@@ -294,3 +294,34 @@ contact, coasting, unchanged normal cuts, airborne/recovery exclusions and exact
 Validation: all 175 ordinary workspace tests, strict workspace Clippy, formatting
 and the release build passed. Local reproduction logs are
 `/tmp/lawn-boost-before.txt` and `/tmp/lawn-boost-final-vehicle.txt`.
+
+## AI turf race and bumper play
+
+The editor now offers Turf Race by default and retains Free Mow. A blue rival
+drives the same hover physics and competes for fresh grass. First-cut ownership
+is permanent and area weighted; the first mower strictly past half of the
+mowable lawn wins. The shared bar, subtle owned-turf colors, and near/far-side
+rival marker show the state of the match. Results offer a same-world rematch,
+the editor, or a new planet, without writing legacy job ratings.
+
+A seam-connected surface graph guides the AI around rock toward fresh patches.
+Swept bumper contacts transfer momentum between the real vehicles and separate
+them along the surface. A brief reduction in drive response lets shoves carry
+through before full steering returns; impacts do not deliberately launch a
+mower, remove turf, or inflict damage. Both mowers get hover wash and clippings,
+with localized bumper dust and controller feedback.
+
+Validation: all 198 ordinary workspace tests, strict workspace Clippy, formatting,
+and the release build pass. All nine explicit renderer GPU checks and all 24 UI
+references pass on Apple M2. Headless AI matches reach a majority on flat and
+rocky worlds, including a shipping-resolution endurance run. A player chase from
+separate starts produces 26 bumps in 12 seconds with identical physics, claims,
+scores, and events at 30/60/120/240 display Hz. Tests also cover exact-half draws,
+both winners, terminal freezing, pause/restart/mode changes, ownership snapshots,
+and swept contacts across arbitrary hemispheres. Details, commands, bounded
+resource costs, and tuning limits are in [TURF_RACE.md](TURF_RACE.md).
+
+Native release inspection confirmed the shared HUD at 960×540 and 1280×720,
+near/far-side rival markers, pause/resume, an AI victory at 02:37.0, a clean
+same-world rematch, and returning to Free Mow with its solo HUD. The editor is
+left ready for a new Turf Race.

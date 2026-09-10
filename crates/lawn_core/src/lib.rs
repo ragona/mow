@@ -12,6 +12,7 @@ pub mod mowing;
 pub mod physics;
 pub mod planet;
 pub mod profile;
+pub mod race;
 pub mod run;
 pub mod score;
 pub mod simulation;

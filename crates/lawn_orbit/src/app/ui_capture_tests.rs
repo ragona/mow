@@ -37,6 +37,11 @@ fn gpu_capture_garden_ui_references() {
                 "settings",
                 "settings-bottom",
                 "results",
+                "race",
+                "race-pause",
+                "race-result-win",
+                "race-result-loss",
+                "race-result-draw",
             ] {
                 capture_scene(&device, &queue, &directory, size, scene);
             }
@@ -73,11 +78,32 @@ fn reference_app(scene: &str) -> LawnOrbitApp {
     app.run.vehicle.state.linear_velocity = app.run.vehicle.state.transform.forward * 8.5;
     app.run.metrics.elapsed_seconds = 92.4;
     app.run.tutorial_enabled = true;
+    if scene.starts_with("race") {
+        app.run.start_race(&app.profile.settings.accessibility);
+        app.selected_mode = GameMode::TurfRace;
+        app.run.simulation_seconds = 72.4;
+        app.run.tutorial_enabled = false;
+        app.run.vehicle.state.boost_charge = app.run.vehicle_tuning.boost_capacity_seconds * 0.65;
+        let race = app.run.race.as_mut().unwrap();
+        race.bumps = 3;
+        (race.player_coverage, race.rival_coverage, race.outcome) = match scene {
+            "race-result-win" => (0.511, 0.413, Some(RaceOutcome::PlayerWon)),
+            "race-result-loss" => (0.427, 0.501, Some(RaceOutcome::RivalWon)),
+            "race-result-draw" => (0.5, 0.5, Some(RaceOutcome::Draw)),
+            _ => (0.342, 0.299, None),
+        };
+        app.run.active = race.outcome.is_none();
+        if scene == "race" {
+            app.run.rival.as_mut().unwrap().state.transform.position =
+                -app.run.vehicle.state.transform.position;
+        }
+    }
     app.state = match scene {
         "title" => GameState::Title,
         "editor" => GameState::WorldEditor,
-        "gameplay" => GameState::Playing,
-        "pause" => GameState::Paused,
+        "gameplay" | "race" => GameState::Playing,
+        "pause" | "race-pause" => GameState::Paused,
+        "race-result-win" | "race-result-loss" | "race-result-draw" => GameState::Results,
         "settings" | "settings-bottom" => {
             app.settings_open = true;
             GameState::Title
@@ -197,12 +223,17 @@ fn capture_scene(
         let last_frame = frame + 1 == frame_count;
         let required_labels: &[&str] = match scene {
             "title" => &["Lawn Orbit", "Create a Planet"],
-            "editor" => &["Shape a tiny planet", "Start Mowing", "Inspect"],
+            "editor" => &["Shape a tiny planet", "Start Race", "Inspect"],
             "gameplay" => &["A little tidier."],
             "pause" => &["The lawn can wait.", "Resume"],
             "settings" => &["Make yourself at home.", "Camera & controls"],
             "settings-bottom" => &["Make yourself at home.", "Done"],
             "results" => &["A lovely day's work.", "Retry seed", "World editor"],
+            "race" => &["YOU  34.2%", "29.9%  RIVAL", "Rival · far side"],
+            "race-pause" => &["The race can wait.", "Resume", "Restart race"],
+            "race-result-win" => &["The lawn is yours!", "Rematch", "World editor"],
+            "race-result-loss" => &["A rematch, perhaps?", "Rematch", "World editor"],
+            "race-result-draw" => &["An evenly shared lawn.", "Rematch", "World editor"],
             _ => unreachable!(),
         };
         let missing_labels: Vec<_> = if last_frame {

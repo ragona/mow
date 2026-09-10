@@ -160,17 +160,22 @@ impl GrassInteraction {
         encoder: &mut wgpu::CommandEncoder,
         planet: &Planet,
         vehicle: &VehicleState,
+        rival: Option<&VehicleState>,
         mower_width: f32,
         elapsed_seconds: f32,
         frame_dt: f32,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let sources = force_sources(planet, vehicle, mower_width);
-        queue.write_buffer(&self.source_buffer, 0, bytemuck::cast_slice(&sources));
+        let (sources, source_count) = paired_force_sources(planet, vehicle, rival, mower_width);
+        queue.write_buffer(
+            &self.source_buffer,
+            0,
+            bytemuck::cast_slice(&sources[..source_count]),
+        );
         let params = InteractionParamsGpu {
             dt: frame_dt.clamp(0.0, 1.0 / 30.0),
             time: elapsed_seconds,
-            source_count: sources.len() as u32,
+            source_count: source_count as u32,
             resolution: INTERACTION_RESOLUTION,
             // Critical damping lets the rotor pressure roll through the grass
             // and settle without springing backwards as the mower stops.
@@ -297,6 +302,23 @@ fn force_sources(planet: &Planet, vehicle: &VehicleState, mower_width: f32) -> [
     result
 }
 
+fn paired_force_sources(
+    planet: &Planet,
+    vehicle: &VehicleState,
+    rival: Option<&VehicleState>,
+    mower_width: f32,
+) -> ([ForceSourceGpu; MAX_FORCE_SOURCES], usize) {
+    let mut sources = [ForceSourceGpu::zeroed(); MAX_FORCE_SOURCES];
+    sources[..7].copy_from_slice(&force_sources(planet, vehicle, mower_width));
+    let count = if let Some(rival) = rival {
+        sources[7..14].copy_from_slice(&force_sources(planet, rival, mower_width));
+        14
+    } else {
+        7
+    };
+    (sources, count)
+}
+
 fn source(position: Vec3, radius: f32, direction: Vec3, strength: f32) -> ForceSourceGpu {
     ForceSourceGpu {
         position_radius: [position.x, position.y, position.z, radius],
@@ -400,6 +422,32 @@ mod tests {
                     assert!((a - b).abs() < 1.0e-5);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn rival_adds_independent_sources_within_existing_compute_capacity() {
+        let planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(WorldSeed(21), false)
+                .unwrap();
+        let player = VehicleState::at_spawn(planet.spawn, &VehicleTuning::default());
+        let mut rival = player.clone();
+        rival.transform.position = -player.transform.position;
+        rival.transform.up = -player.transform.up;
+        let (single, single_count) = paired_force_sources(&planet, &player, None, 2.2);
+        let (paired, paired_count) = paired_force_sources(&planet, &player, Some(&rival), 2.2);
+        assert_eq!(single_count, 7);
+        assert_eq!(paired_count, 14);
+        assert!(paired_count <= MAX_FORCE_SOURCES);
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&single[..7]),
+            bytemuck::cast_slice::<_, u8>(&paired[..7])
+        );
+        for source in &paired[7..14] {
+            let point = Vec3::from_slice(&source.position_radius[..3]);
+            assert!(point.dot(rival.transform.up) > 0.0);
+            assert!(point.dot(player.transform.up) < 0.0);
         }
     }
 }

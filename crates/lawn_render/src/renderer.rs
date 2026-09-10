@@ -101,6 +101,8 @@ struct FrameUniformGpu {
     locator: [f32; 4],
     mower_position: [f32; 4],
     mower_forward: [f32; 4],
+    rival_position: [f32; 4],
+    rival_forward: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -178,11 +180,15 @@ pub struct Renderer {
     tuft_indices: wgpu::Buffer,
     tuft_index_count: u32,
     vehicle_vertices: wgpu::Buffer,
+    rival_vertices: wgpu::Buffer,
+    rival_visible: bool,
     vehicle_indices: wgpu::Buffer,
     vehicle_index_count: u32,
     vehicle_mesh_vertices: Vec<MeshVertex>,
     vehicle_mesh_indices: Vec<u32>,
     vehicle_presentation: VehiclePresentation,
+    rival_presentation: Option<VehiclePresentation>,
+    mowing_owner_staging: Vec<u32>,
     started: Instant,
     quality: QualityPreset,
     high_contrast: bool,
@@ -352,6 +358,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let rival_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dynamic rival vehicle vertices"),
+            size: mesh::VEHICLE_VERTEX_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let vehicle_indices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dynamic vehicle indices"),
             size: mesh::VEHICLE_INDEX_BUFFER_SIZE,
@@ -410,6 +422,8 @@ impl Renderer {
             tuft_indices,
             tuft_index_count: tuft_indices_data.len() as u32,
             vehicle_vertices,
+            rival_vertices,
+            rival_visible: false,
             vehicle_indices,
             vehicle_index_count: 0,
             vehicle_mesh_vertices: Vec::with_capacity(
@@ -423,6 +437,10 @@ impl Renderer {
                 run.vehicle.state.transform,
                 run.vehicle.state.linear_velocity,
             ),
+            rival_presentation: run.rival.as_ref().map(|rival| {
+                VehiclePresentation::new(rival.state.transform, rival.state.linear_velocity)
+            }),
+            mowing_owner_staging: Vec::with_capacity(256),
             started: Instant::now(),
             quality,
             high_contrast,
@@ -520,6 +538,11 @@ impl Renderer {
         self.planet = create_planet_resources(&self.device, &self.queue, run);
         self.interaction = GrassInteraction::new(&self.device, run.planet.config.base_radius);
         self.particles.clear();
+        self.rival_visible = false;
+        self.rival_presentation = run.rival.as_ref().map(|rival| {
+            VehiclePresentation::new(rival.state.transform, rival.state.linear_velocity)
+        });
+        self.mowing_owner_staging.clear();
         self.vehicle_presentation.reset(
             run.vehicle.state.transform,
             run.vehicle.state.linear_velocity,
@@ -613,12 +636,52 @@ impl Renderer {
             );
             self.vehicle_index_count = self.vehicle_mesh_indices.len() as u32;
         }
+        self.rival_visible = run.rival.is_some();
+        let rival_deck = run.rival.as_ref().map(|rival| {
+            let deck = rival.interpolated_transform(interpolation_alpha);
+            let presentation = self
+                .rival_presentation
+                .get_or_insert_with(|| VehiclePresentation::new(deck, rival.state.linear_velocity));
+            let chassis = presentation.update(
+                deck,
+                rival.interpolated_velocity(interpolation_alpha),
+                decorative_seconds,
+                if run.paused || !run.active {
+                    0.0
+                } else {
+                    visual_dt
+                },
+            );
+            // Both models use the same immutable indices and reuse this CPU
+            // staging allocation. Each has its own fixed-capacity GPU buffer.
+            mesh::build_rival_vehicle(
+                &mut self.vehicle_mesh_vertices,
+                &mut self.vehicle_mesh_indices,
+                chassis,
+                deck,
+                rival.state.mower_enabled,
+                decorative_seconds,
+            );
+            self.queue.write_buffer(
+                &self.rival_vertices,
+                0,
+                bytemuck::cast_slice(&self.vehicle_mesh_vertices),
+            );
+            deck
+        });
         self.particles
             .update(&self.queue, run, self.reduced_particles);
         let mut mowing_tile_uploads = 0;
         // Queue writes copy the borrowed cells before the callback returns;
         // every tile reuses the mowing field's persistent staging allocation.
+        let race = run.rival.is_some();
         run.mowing.visit_dirty_tiles(|tile| {
+            let cells = if race {
+                pack_owned_cells(&mut self.mowing_owner_staging, tile.cells, tile.owners);
+                bytemuck::cast_slice(&self.mowing_owner_staging)
+            } else {
+                bytemuck::cast_slice(tile.cells)
+            };
             mowing_tile_uploads += 1;
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -631,7 +694,7 @@ impl Renderer {
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                bytemuck::cast_slice(tile.cells),
+                cells,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(tile.width * 4),
@@ -658,6 +721,16 @@ impl Renderer {
                 0.0
             })
             .to_array();
+        if let (Some(deck), Some(rival)) = (rival_deck, run.rival.as_ref()) {
+            frame_uniform.rival_position = deck
+                .position
+                .extend(f32::from(rival.state.grounded))
+                .to_array();
+            frame_uniform.rival_forward = deck
+                .forward
+                .extend(f32::from(rival.state.boost_active))
+                .to_array();
+        }
         self.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&frame_uniform));
         let composite_uniform = CompositeUniformGpu {
@@ -701,6 +774,7 @@ impl Renderer {
             &mut encoder,
             &run.planet,
             &run.vehicle.state,
+            run.rival.as_ref().map(|rival| &rival.state),
             run.vehicle_tuning.mower_width,
             run.simulation_seconds,
             visual_dt,
@@ -723,7 +797,7 @@ impl Renderer {
             .map(GpuProfiler::latest)
             .unwrap_or_default();
         let generated_triangles = self.planet.terrain_index_count / 3
-            + self.vehicle_index_count / 3
+            + self.vehicle_index_count / 3 * (1 + u32::from(self.rival_visible))
             + visible_tufts * (self.tuft_index_count / 3)
             + self.particles.len() * 2;
         Ok(RenderFrame {
@@ -788,6 +862,10 @@ impl Renderer {
         pass.set_vertex_buffer(0, self.vehicle_vertices.slice(..));
         pass.set_index_buffer(self.vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.vehicle_index_count, 0, 0..1);
+        if self.rival_visible {
+            pass.set_vertex_buffer(0, self.rival_vertices.slice(..));
+            pass.draw_indexed(0..self.vehicle_index_count, 0, 0..1);
+        }
     }
 
     fn encode_world(
@@ -853,6 +931,10 @@ impl Renderer {
         pass.set_vertex_buffer(0, self.vehicle_vertices.slice(..));
         pass.set_index_buffer(self.vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.vehicle_index_count, 0, 0..1);
+        if self.rival_visible {
+            pass.set_vertex_buffer(0, self.rival_vertices.slice(..));
+            pass.draw_indexed(0..self.vehicle_index_count, 0, 0..1);
+        }
 
         pass.set_pipeline(&self.grass_pipeline);
         pass.set_bind_group(0, &self.frame_bind_group, &[]);
@@ -1066,7 +1148,9 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
             (run.metrics.elapsed_seconds * 30.0) % 256.0,
         ],
         options: [
-            quality_density(renderer.quality),
+            // Density selection is CPU-side. Its sign reserves the existing
+            // uniform channel for interpreting the mowing mirror's owner byte.
+            quality_density(renderer.quality) * if run.rival.is_some() { -1.0 } else { 1.0 },
             INTERACTION_RESOLUTION as f32,
             if renderer.high_contrast { 1.0 } else { 0.0 },
             run.planet.config.grass_height_scale * renderer.grass_height_multiplier,
@@ -1079,6 +1163,8 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
         ],
         mower_position: [0.0; 4],
         mower_forward: [0.0; 4],
+        rival_position: [0.0; 4],
+        rival_forward: [0.0; 4],
     }
 }
 
@@ -1197,7 +1283,19 @@ fn create_planet_resources(
         view_formats: &[],
     });
     let face_area = (resolution * resolution) as usize;
-    let packed = run.mowing.packed_cells();
+    let mut owned_cells = Vec::new();
+    if run.rival.is_some() {
+        pack_owned_cells(
+            &mut owned_cells,
+            run.mowing.packed_cells(),
+            run.mowing.packed_owners(),
+        );
+    }
+    let packed: &[u8] = if run.rival.is_some() {
+        bytemuck::cast_slice(&owned_cells)
+    } else {
+        bytemuck::cast_slice(run.mowing.packed_cells())
+    };
     for face in CubeFace::ALL {
         let start = face.index() * face_area;
         queue.write_texture(
@@ -1211,7 +1309,7 @@ fn create_planet_resources(
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            bytemuck::cast_slice(&packed[start..start + face_area]),
+            &packed[start * 4..(start + face_area) * 4],
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(resolution * 4),
@@ -1839,3 +1937,16 @@ fn create_init_buffer(
 
 #[cfg(test)]
 mod tests;
+
+/// Race ownership occupies the renderer-only fourth byte. Cut and comb stay
+/// bit-for-bit authoritative; Free Mow keeps its original epoch representation.
+fn pack_owned_cells(
+    target: &mut Vec<u32>,
+    cells: &[lawn_core::mowing::PackedMowingCell],
+    owners: &[u8],
+) {
+    target.clear();
+    target.extend(cells.iter().enumerate().map(|(index, cell)| {
+        (cell.0 & 0x00ff_ffff) | (u32::from(owners.get(index).copied().unwrap_or(0)) << 24)
+    }));
+}

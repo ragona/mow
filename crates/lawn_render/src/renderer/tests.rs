@@ -67,6 +67,73 @@ fn prepare_mowing_reference(run: &mut RunState, view: &str) -> (Vec3, Vec3) {
     (normal * 40.0, up)
 }
 
+/// Keep the offscreen race reference deterministic while using real mower
+/// geometry and authoritative owned stamps for both trails.
+fn prepare_race_reference(run: &mut RunState, bumper: bool) {
+    use lawn_core::{mowing::MowingStamp, vehicle::VehicleTransform};
+    let normal = Vec3::new(0.42, 0.81, 0.38).normalize();
+    let forward = (Vec3::Z - normal * normal.z).normalize();
+    let right = forward.cross(normal).normalize();
+    let radius = run.planet.config.base_radius;
+    let separation = if bumper { 1.10 } else { 2.35 };
+    let mut poses = Vec::new();
+    for (x, owner) in [(-separation, 1), (separation, 2)] {
+        let point = |distance: f32| {
+            run.planet
+                .surface_point((normal * radius + right * x + forward * distance).normalize())
+        };
+        for step in 0..40 {
+            let from = point(-6.0 + step as f32 * 0.15);
+            let to = point(-6.0 + (step + 1) as f32 * 0.15);
+            run.mowing.stamp_owned(
+                MowingStamp {
+                    from,
+                    to,
+                    comb_direction: (to - from).normalize(),
+                    deck_width: run.vehicle_tuning.mower_width,
+                    cut_delta: 1.0,
+                    recent_epoch: 0,
+                },
+                owner,
+            );
+        }
+        let surface = point(0.0);
+        let up = surface.normalize();
+        let forward = (forward - up * forward.dot(up)).normalize();
+        poses.push(VehicleTransform {
+            position: surface + up * run.vehicle_tuning.hover_height,
+            rotation: glam::Quat::from_mat3(&glam::Mat3::from_cols(
+                forward.cross(up),
+                up,
+                -forward,
+            )),
+            forward,
+            up,
+        });
+    }
+    run.vehicle.state.transform = poses[0];
+    run.vehicle.state.grounded = true;
+    let rival = run.rival.as_mut().expect("race must create a rival");
+    rival.state.transform = poses[1];
+    rival.state.grounded = true;
+}
+
+#[test]
+fn ownership_mirror_preserves_cut_and_comb_and_reuses_tile_storage() {
+    use lawn_core::mowing::PackedMowingCell;
+    let cells = [
+        PackedMowingCell(0x91_34_56_fa),
+        PackedMowingCell(0xb3_cd_ef_ff),
+    ];
+    let mut staging = Vec::with_capacity(256);
+    let address = staging.as_ptr();
+    pack_owned_cells(&mut staging, &cells, &[1, 2]);
+    assert_eq!(staging, [0x01_34_56_fa, 0x02_cd_ef_ff]);
+    pack_owned_cells(&mut staging, &cells, &[]);
+    assert_eq!(staging, [0x00_34_56_fa, 0x00_cd_ef_ff]);
+    assert_eq!(staging.as_ptr(), address);
+}
+
 #[test]
 fn msaa_selection_requires_color_depth_and_resolve_support() {
     use wgpu::TextureFormatFeatureFlags as Flags;
@@ -117,12 +184,23 @@ fn grass_horizon_retains_elevated_roots_and_blades() {
 #[test]
 #[ignore = "requires a working wgpu graphics adapter"]
 fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
+    run_gpu_smoke(false);
+}
+
+#[test]
+#[ignore = "requires a working wgpu graphics adapter"]
+fn gpu_smoke_race_renders_both_mowers_at_supported_sample_counts() {
+    run_gpu_smoke(true);
+}
+
+fn run_gpu_smoke(force_race: bool) {
     pollster::block_on(async {
         // Optional art references use the same real render passes as the smoke
         // check, with shipping density and a repeatable camera/planet recipe.
         let capture_dir = std::env::var_os("LAWN_CAPTURE_DIR").map(std::path::PathBuf::from);
         let capture_view = std::env::var("LAWN_CAPTURE_VIEW").unwrap_or_else(|_| "day".into());
         let capture = capture_dir.is_some();
+        let race = force_race || matches!(capture_view.as_str(), "race" | "bumper");
         let mowing_reference = capture
             && ["stripes", "crosscut", "curve"]
                 .iter()
@@ -231,7 +309,7 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                 ..GeneratorConfig::test_quality()
             }
         };
-        if (benchmark && scene == "meadow") || mowing_reference {
+        if (benchmark && scene == "meadow") || mowing_reference || (capture && race) {
             planet_config = GeneratorConfig {
                 mountain_count_min: 0,
                 mountain_count_max: 0,
@@ -251,7 +329,11 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         println!("GPU smoke grass roots: {}", planet.grass_roots.len());
         let mut run = RunState::new(
             planet,
-            GameMode::FreeMow,
+            if race {
+                GameMode::TurfRace
+            } else {
+                GameMode::FreeMow
+            },
             VehicleTuning::default(),
             JobConfig::default(),
             &accessibility,
@@ -266,6 +348,9 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             {
                 break;
             }
+        }
+        if race {
+            prepare_race_reference(&mut run, capture_view == "bumper");
         }
         let mowing_camera =
             mowing_reference.then(|| prepare_mowing_reference(&mut run, &capture_view));
@@ -283,6 +368,12 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         if capture {
             use lawn_core::run::RunEvent;
             let event = match capture_view.as_str() {
+                "bumper" => Some(RunEvent::MowerBump {
+                    impulse: 8.0,
+                    position: (run.vehicle.state.transform.position
+                        + run.rival.as_ref().unwrap().state.transform.position)
+                        * 0.5,
+                }),
                 "recovery" => Some(RunEvent::Recovered),
                 "impact" => Some(RunEvent::SubstantialCollision { impulse: 8.0 }),
                 "milestone" => Some(RunEvent::CoverageMilestone(25)),
@@ -312,6 +403,25 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             bytemuck::cast_slice(&vehicle_vertices),
             wgpu::BufferUsages::VERTEX,
         );
+        let rival_vertices = run.rival.as_ref().map(|rival| {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            mesh::build_rival_vehicle(
+                &mut vertices,
+                &mut indices,
+                rival.state.transform,
+                rival.state.transform,
+                true,
+                0.0,
+            );
+            assert_eq!(indices, vehicle_indices, "rival must share player topology");
+            create_init_buffer(
+                &device,
+                "smoke rival vertices",
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            )
+        });
         let vehicle_index_count = vehicle_indices.len() as u32;
         let vehicle_indices = create_init_buffer(
             &device,
@@ -333,7 +443,16 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             bytemuck::cast_slice(&tuft_indices),
             wgpu::BufferUsages::INDEX,
         );
-        let (camera, look_at) = if let Some((camera, _)) = mowing_camera {
+        let (camera, look_at) = if race {
+            let player = run.vehicle.state.transform;
+            let rival = run.rival.as_ref().unwrap().state.transform;
+            let center = (player.position + rival.position) * 0.5;
+            let up = center.normalize();
+            (
+                center + up * 9.0 - player.forward * 5.5,
+                center - player.forward * 1.3,
+            )
+        } else if let Some((camera, _)) = mowing_camera {
             (camera, Vec3::ZERO)
         } else if benchmark {
             (run.camera.state.position, run.camera.state.target)
@@ -373,7 +492,9 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
         } else {
             (Vec3::new(0.0, 25.0, 32.0), Vec3::ZERO)
         };
-        let camera_up = if let Some((_, up)) = mowing_camera {
+        let camera_up = if race {
+            run.vehicle.state.transform.forward
+        } else if let Some((_, up)) = mowing_camera {
             up
         } else if ["vehicle", "recovery", "impact", "milestone"].contains(&capture_view.as_str()) {
             run.vehicle.state.transform.forward
@@ -399,7 +520,7 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             camera_time: [camera.x, camera.y, camera.z, 1.0],
             light_epoch: [-0.42, -0.81, -0.38, 0.0],
             options: [
-                quality_density(quality),
+                quality_density(quality) * if race { -1.0 } else { 1.0 },
                 INTERACTION_RESOLUTION as f32,
                 0.0,
                 if capture || benchmark {
@@ -411,7 +532,14 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
             locator: [0.0; 4],
             mower_position: run.vehicle.state.transform.position.extend(1.0).to_array(),
             mower_forward: run.vehicle.state.transform.forward.extend(0.0).to_array(),
+            rival_position: run.rival.as_ref().map_or([0.0; 4], |rival| {
+                rival.state.transform.position.extend(1.0).to_array()
+            }),
+            rival_forward: run.rival.as_ref().map_or([0.0; 4], |rival| {
+                rival.state.transform.forward.extend(0.0).to_array()
+            }),
         };
+        let camera_projection = Mat4::from_cols_array_2d(&uniform.view_proj);
         let mut visibility = GrassVisibility::new(
             &run,
             CameraState {
@@ -547,6 +675,7 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                     &mut encoder,
                     &run.planet,
                     &run.vehicle.state,
+                    run.rival.as_ref().map(|rival| &rival.state),
                     2.2,
                     frame_index as f32 / 60.0,
                     1.0 / 60.0,
@@ -586,6 +715,10 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                     pass.set_vertex_buffer(0, vehicle_vertices.slice(..));
                     pass.set_index_buffer(vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
+                    if let Some(rival_vertices) = &rival_vertices {
+                        pass.set_vertex_buffer(0, rival_vertices.slice(..));
+                        pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
+                    }
                 }
                 {
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -636,6 +769,10 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                     pass.set_vertex_buffer(0, vehicle_vertices.slice(..));
                     pass.set_index_buffer(vehicle_indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
+                    if let Some(rival_vertices) = &rival_vertices {
+                        pass.set_vertex_buffer(0, rival_vertices.slice(..));
+                        pass.draw_indexed(0..vehicle_index_count, 0, 0..1);
+                    }
                     pass.set_pipeline(&grass_pipeline);
                     let parity = usize::from(!std::ptr::eq(
                         interaction.current_displacement(),
@@ -744,6 +881,39 @@ fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
                         );
                     }
                     assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+                    if race {
+                        for (position, blue) in [
+                            (run.vehicle.state.transform.position, false),
+                            (run.rival.as_ref().unwrap().state.transform.position, true),
+                        ] {
+                            let ndc = camera_projection.project_point3(position);
+                            let center_x = (ndc.x * 0.5 + 0.5) * width as f32;
+                            let center_y = (-ndc.y * 0.5 + 0.5) * height as f32;
+                            let radius = height as f32 * 0.13;
+                            let matching = pixels
+                                .chunks_exact(4)
+                                .enumerate()
+                                .filter(|(index, pixel)| {
+                                    let x = (*index % width as usize) as f32;
+                                    let y = (*index / width as usize) as f32;
+                                    let color = if blue {
+                                        f32::from(pixel[2]) > f32::from(pixel[0]) * 1.25
+                                            && f32::from(pixel[2]) > f32::from(pixel[1]) * 1.10
+                                    } else {
+                                        f32::from(pixel[0]) > f32::from(pixel[2]) * 1.25
+                                            && f32::from(pixel[0]) > f32::from(pixel[1]) * 1.25
+                                    };
+                                    (x - center_x).abs() < radius
+                                        && (y - center_y).abs() < radius
+                                        && color
+                                })
+                                .count();
+                            assert!(
+                                matching >= 2,
+                                "both mower palettes must reach the GPU image; blue={blue}, pixels={matching}"
+                            );
+                        }
+                    }
                     if let Some(directory) = &capture_dir {
                         use std::io::Write;
                         std::fs::create_dir_all(directory).unwrap();

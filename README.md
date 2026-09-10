@@ -1,10 +1,10 @@
 # Lawn Orbit
 
-Lawn Orbit is a tiny-planet hover-mowing sandbox built directly in Rust,
+Lawn Orbit is a tiny-planet hover-mowing race and sandbox built directly in Rust,
 `wgpu`, WGSL, Rapier, winit, and egui. It implements
 [`spec/game.md`](spec/game.md): deterministic fuzzy spherical worlds, seam-safe
-authoritative mowing, nimble omnidirectional hover driving, a world editor, an
-unscored mowing sandbox, a first-play tutorial, accessibility settings, and
+authoritative mowing, nimble omnidirectional hover driving, a world editor,
+Turf Race against an AI mower, unscored Free Mow, accessibility settings, and
 keyboard/gamepad input. Planets can range from compact meadows to larger rocky
 worlds and are viewed from an undistorted, mostly top-down chase camera.
 
@@ -47,18 +47,42 @@ preset or tune planet size, rockiness, peak count, peak height, and rolling terr
 The planet updates beside the controls as you edit, including when you change its
 seed. Rockiness can be set to 0% for a fully grassy world without outcroppings;
 the Meadow preset starts there. Enter a hexadecimal, decimal, or phrase seed,
-then choose Start Mowing to enter the exact planet shown in the preview.
+then choose Turf Race (the default) or Free Mow. Start Race / Start Mowing enters
+the exact planet shown in the preview.
 Illustrated preset cards and the Inspect zoom/rotation controls help compare
 worlds; zoom keeps a common scale when the shape controls change. A brief camera
 arrival carries the preview into play and can be skipped with movement, boost,
 Enter, or Start now. The garden interface uses a bundled, licensed display
-typeface, a coverage dial, a segmented boost meter, and remapping-aware hints.
+typeface, a shared race scoreboard, a Free Mow coverage dial, a segmented boost
+meter, and remapping-aware hints.
 Settings plus favorite and recent seeds are saved atomically in the operating
 system's per-user application-data directory.
 
 On Linux, the platform libraries required by winit and gilrs must be installed;
 package names vary by distribution and commonly include Wayland or X11 and udev
 development packages.
+
+## Turf Race and Free Mow
+
+In **Turf Race**, race the blue mower to claim strictly more than 50% of the
+planet's area-weighted mowable grass. The first mower to cut a patch past its
+coverage threshold owns it for the rest of the race; crossing an existing trail
+cannot steal it. Exposed rock never counts toward either score. There is no time
+limit; exhausting the lawn without a majority is a draw.
+
+The rival routes toward fresh grass around traversable terrain and uses the same
+driving, cutting, boost, and recovery rules. Harmless bumper contacts shove both
+mowers along the surface, so a timely bump can disrupt a route without damage or
+lost territory. Coral and blue shares grow across a shared top bar, with unclaimed
+grass between them; a marker helps locate the rival on the far side of the globe.
+The result card opens automatically and offers a rematch on the same planet,
+the world editor, or a new random planet. Pausing freezes both racers, and
+restarting clears both scores and regrows the lawn.
+
+**Free Mow** keeps the relaxed, solo sandbox and first-play tutorial. There is no
+rival, timer, rating, required completion, or forced result screen. Mow as much as
+you like, regrow the same lawn, or try another planet. Job ratings, online play,
+and leaderboards remain deferred.
 
 ## Default controls
 
@@ -87,7 +111,7 @@ oscillation, disables speed shake, and reduces particle motion and HUD animation
 
 | Crate | Responsibility |
 | --- | --- |
-| `lawn_core` | Versioned generation, cube-sphere math, validation, fixed-step simulation, Rapier vehicle, camera, mowing state, sandbox flow, and profiles |
+| `lawn_core` | Versioned generation, cube-sphere math, validation, fixed-step simulation, Rapier vehicles, camera, mowing ownership, rival routing, race/Free Mow flow, and profiles |
 | `lawn_render` | `wgpu` terrain/vehicle/grass rendering, interaction compute field, shadows, clipping particles, HDR composite, culling, dirty texture uploads, and diagnostics |
 | `lawn_orbit` | Desktop lifecycle, world editor, menus/HUD, input and rumble, and atomic persistence |
 | `lawn_tools` | Headless seed inspection, generation timing, and deterministic validation batches |
@@ -120,15 +144,16 @@ cargo test -p lawn_render gpu_ -- --ignored --nocapture
 # curve-day, or curve-night. Captures draw all roots,
 # so their one-frame GPU timings are not representative gameplay benchmarks.
 LAWN_CAPTURE_DIR=/tmp/lawn-art LAWN_CAPTURE_VIEW=day cargo test -p lawn_render gpu_smoke -- --ignored --nocapture
-# Real UI reference images at 960×540 and 1280×720, including scrolled settings.
+# Real UI references at 960×540 and 1280×720: race HUD/results and scrolled settings.
 # Writes PPMs without opening a window or saving a user profile.
 LAWN_UI_CAPTURE_DIR=/tmp/lawn-ui cargo test -p lawn_orbit gpu_capture_garden_ui_references -- --ignored --nocapture
 ```
 
 The test suite exercises deterministic generation (including compact grass-root
 records), arbitrary coordinate poles, cube-face seams and corners, maximum-speed
-mowing sweeps, weighted coverage, hover stability, circumnavigation, recovery,
-fixed-step equivalence at 30/60/120/240 Hz, tutorial flow, scoring, persistence,
+mowing sweeps, weighted ownership, rival routing, bumper contacts, race outcomes
+and resets, hover stability, circumnavigation, recovery, fixed-step equivalence
+at 30/60/120/240 Hz, tutorial flow, scoring, persistence,
 input behavior, and parse/validation of every shipping WGSL module. The default
 suite runs without opening a window or creating a GPU device. The explicitly
 requested GPU smoke test requires a graphics adapter but no window server.
@@ -166,7 +191,8 @@ seed, and deterministic planet hash. GPU pass spans can overlap and must not be
 added together.
 
 The latest correctness/performance findings and validation results are recorded
-in [`REVIEW.md`](REVIEW.md). The subsequent measured performance investigation,
+in [`REVIEW.md`](REVIEW.md). Race rules, implementation notes, and acceptance
+evidence are in [`TURF_RACE.md`](TURF_RACE.md). The measured performance investigation,
 including before/after results and rejected experiments, is in
 [`PERFORMANCE.md`](PERFORMANCE.md).
 The current visual pass and its acceptance evidence are tracked in

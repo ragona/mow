@@ -88,18 +88,25 @@ pub struct HoverVehicle {
     previous_transform: VehicleTransform,
     previous_linear_velocity: Vec3,
     physics: PhysicsWorld,
+    bump_control_seconds: f32,
 }
 
 impl HoverVehicle {
     #[must_use]
     pub fn new(planet: &Planet, tuning: &VehicleTuning) -> Self {
-        let state = VehicleState::at_spawn(planet.spawn, tuning);
-        let physics = PhysicsWorld::new(planet, planet.spawn, tuning);
+        Self::from_spawn(planet, planet.spawn, tuning)
+    }
+
+    #[must_use]
+    pub fn from_spawn(planet: &Planet, spawn: SpawnPoint, tuning: &VehicleTuning) -> Self {
+        let state = VehicleState::at_spawn(spawn, tuning);
+        let physics = PhysicsWorld::new(planet, spawn, tuning);
         Self {
             previous_transform: state.transform,
             previous_linear_velocity: state.linear_velocity,
             state,
             physics,
+            bump_control_seconds: 0.0,
         }
     }
 
@@ -130,6 +137,7 @@ impl HoverVehicle {
         dt: f32,
     ) -> VehicleTickResult {
         let input = input.sanitized();
+        self.bump_control_seconds = (self.bump_control_seconds - dt).max(0.0);
         self.previous_transform = self.state.transform;
         self.previous_linear_velocity = self.state.linear_velocity;
         let old_deck = self.deck_position(tuning);
@@ -223,7 +231,8 @@ impl HoverVehicle {
         } else {
             tuning.acceleration_time_90_percent
         };
-        let drive_response = std::f32::consts::LN_10 / response_time.max(0.01)
+        let contact_control = 1.0 - 0.78 * (self.bump_control_seconds / 0.28).clamp(0.0, 1.0);
+        let drive_response = contact_control * std::f32::consts::LN_10 / response_time.max(0.01)
             * if self.state.boost_active {
                 tuning.boost_acceleration_multiplier
             } else {
@@ -284,6 +293,7 @@ impl HoverVehicle {
     }
 
     pub fn recover(&mut self, planet: &Planet, tuning: &VehicleTuning) {
+        self.bump_control_seconds = 0.0;
         let safe = planet.nearest_safe_point(self.state.transform.position.normalize_or(Vec3::Y));
         self.state.transform = make_transform(safe.position, self.state.transform.forward, safe.up);
         self.previous_transform = self.state.transform;
@@ -302,9 +312,79 @@ impl HoverVehicle {
     pub fn deck_position(&self, tuning: &VehicleTuning) -> Vec3 {
         self.state.transform.position - self.state.transform.up * (tuning.hover_height * 0.72)
     }
+
+    /// Apply a tangent bumper impulse without changing authoritative cut history.
+    pub(crate) fn bumper_contact(&mut self, planet: &Planet, correction: Vec3, impulse: Vec3) {
+        let old_position = self.state.transform.position;
+        let old_up = old_position.normalize();
+        let new_up = (old_position + correction).normalize_or(old_up);
+        let altitude = old_position.length() - planet.surface_radius(old_up);
+        let rotation = Quat::from_rotation_arc(old_up, new_up);
+        let transform = &mut self.state.transform;
+        transform.position = new_up * (planet.surface_radius(new_up) + altitude);
+        transform.rotation = (rotation * transform.rotation).normalize();
+        transform.up = transform.rotation * Vec3::Y;
+        transform.forward = transform.rotation * Vec3::NEG_Z;
+        let tangent_impulse = impulse - new_up * impulse.dot(new_up);
+        self.state.linear_velocity = rotation * self.state.linear_velocity + tangent_impulse;
+        if impulse.length_squared() > 1.0 {
+            self.bump_control_seconds = 0.28;
+        }
+        self.physics
+            .correct_contact(*transform, self.state.linear_velocity);
+    }
 }
 
-fn surface_distance(from: Vec3, to: Vec3, radius: f32) -> f32 {
+/// Equal-mass rounded bumpers. Swept contact catches two mowers crossing during
+/// one fixed tick; separation and impulses stay tangent to the planet.
+pub(crate) fn resolve_mower_contact(
+    planet: &Planet,
+    player: &mut HoverVehicle,
+    rival: &mut HoverVehicle,
+    player_before: Vec3,
+    rival_before: Vec3,
+) -> Option<(f32, Vec3)> {
+    const DIAMETER: f32 = 2.18;
+    let p = player.state.transform.position;
+    let r = rival.state.transform.position;
+    if (p.length() - r.length()).abs() > 0.9 {
+        return None;
+    }
+    let from = rival_before - player_before;
+    let to = r - p;
+    let delta = to - from;
+    let t = (-from.dot(delta) / delta.length_squared().max(1.0e-8)).clamp(0.0, 1.0);
+    let closest = from + delta * t;
+    if closest.length_squared() >= DIAMETER * DIAMETER {
+        return None;
+    }
+    let up = (p + r).normalize_or(player.state.transform.up);
+    let relative_velocity = rival.state.linear_velocity - player.state.linear_velocity;
+    let direction = if closest.length_squared() > 0.0001 {
+        closest
+    } else {
+        from
+    };
+    let normal = (direction - up * direction.dot(up))
+        .try_normalize()
+        .unwrap_or_else(|| {
+            (player.state.transform.forward - up * player.state.transform.forward.dot(up))
+                .normalize()
+        });
+    let closing = (-relative_velocity.dot(normal)).max(0.0);
+    let impulse = (closing * 0.825).min(30.0);
+    let separation = if to.dot(normal) < 0.0 {
+        // The pair crossed between samples; place each back on its own side.
+        (DIAMETER - to.dot(normal)).max(0.0) * 0.5
+    } else {
+        (DIAMETER - to.length()).max(0.0) * 0.5
+    };
+    player.bumper_contact(planet, -normal * separation, -normal * impulse);
+    rival.bumper_contact(planet, normal * separation, normal * impulse);
+    (closing > 1.0).then_some((impulse, (p + r) * 0.5))
+}
+
+pub(crate) fn surface_distance(from: Vec3, to: Vec3, radius: f32) -> f32 {
     let from = from.normalize_or_zero();
     let to = to.normalize_or_zero();
     // atan2 retains sub-texel movement; acos(dot) rounds slow movement to zero.
@@ -356,6 +436,150 @@ mod tests {
         PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
             .generate_with_roots(WorldSeed(123), false)
             .unwrap()
+    }
+
+    fn bumper_pair(
+        up: Vec3,
+        speed_player: f32,
+        speed_rival: f32,
+    ) -> (Planet, HoverVehicle, HoverVehicle, Vec3) {
+        let config = GeneratorConfig {
+            rolling_amplitude: 0.0,
+            mountain_count_min: 0,
+            mountain_count_max: 0,
+            mowable_ratio_min: 1.0,
+            mowable_ratio_max: 1.0,
+            ..GeneratorConfig::test_quality()
+        };
+        let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config)
+            .generate_with_roots(WorldSeed(7), false)
+            .unwrap();
+        let tuning = VehicleTuning::default();
+        let right = tangent_frame(up).0;
+        let spawn = |side: f32| {
+            let normal = (up * planet.config.base_radius + right * side).normalize();
+            let forward = (right - normal * right.dot(normal)).normalize();
+            SpawnPoint {
+                position: normal * (planet.config.base_radius + 0.8),
+                up: normal,
+                forward,
+                clearance: 0.0,
+            }
+        };
+        let mut player = HoverVehicle::from_spawn(&planet, spawn(-0.95), &tuning);
+        let mut rival = HoverVehicle::from_spawn(&planet, spawn(0.95), &tuning);
+        player.state.linear_velocity = player.state.transform.forward * speed_player;
+        rival.state.linear_velocity = rival.state.transform.forward * speed_rival;
+        player
+            .physics
+            .teleport(player.state.transform, player.state.linear_velocity);
+        rival
+            .physics
+            .teleport(rival.state.transform, rival.state.linear_velocity);
+        (planet, player, rival, right)
+    }
+
+    #[test]
+    fn mower_bumpers_exchange_momentum_and_separate_on_any_hemisphere() {
+        for up in [Vec3::Y, Vec3::NEG_X, Vec3::new(1.0, -1.0, 1.0).normalize()] {
+            for (player_speed, rival_speed) in [(8.0, -8.0), (12.0, 0.0)] {
+                let (planet, mut player, mut rival, right) =
+                    bumper_pair(up, player_speed, rival_speed);
+                let before_player = player.state.transform.position;
+                let before_rival = rival.state.transform.position;
+                let momentum_before = player.state.linear_velocity + rival.state.linear_velocity;
+                let (impulse, _) = resolve_mower_contact(
+                    &planet,
+                    &mut player,
+                    &mut rival,
+                    before_player,
+                    before_rival,
+                )
+                .unwrap();
+                assert!(impulse > 5.0);
+                assert!(
+                    player
+                        .state
+                        .transform
+                        .position
+                        .distance(rival.state.transform.position)
+                        >= 2.175
+                );
+                assert!(
+                    rival.state.linear_velocity.dot(right) > 4.0,
+                    "contact must move the opponent"
+                );
+                if rival_speed < 0.0 {
+                    assert!(player.state.linear_velocity.dot(right) < -3.0);
+                }
+                let momentum_after = player.state.linear_velocity + rival.state.linear_velocity;
+                assert!((momentum_after - momentum_before).dot(right).abs() < 0.12);
+                for vehicle in [&player, &rival] {
+                    let normal = vehicle.state.transform.position.normalize();
+                    assert!(
+                        (vehicle.state.transform.position.length()
+                            - planet.config.base_radius
+                            - 0.8)
+                            .abs()
+                            < 0.001
+                    );
+                    assert!(vehicle.state.linear_velocity.dot(normal).abs() < 0.001);
+                    assert!(vehicle.state.transform.rotation.is_finite());
+                }
+                // Resting/separating contact cannot repeatedly kick either car.
+                assert!(
+                    resolve_mower_contact(
+                        &planet,
+                        &mut player,
+                        &mut rival,
+                        before_player,
+                        before_rival
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bumper_collision_is_swept_and_steering_control_returns() {
+        let (planet, mut player, mut rival, right) = bumper_pair(Vec3::Y, 12.0, -12.0);
+        let player_before = player.state.transform.position - right * 2.0;
+        let rival_before = rival.state.transform.position + right * 2.0;
+        let p = player.state.transform.position;
+        let r = rival.state.transform.position;
+        // Deliberately cross both centers in one sample to exercise sweep handling.
+        player.state.transform.position = r;
+        rival.state.transform.position = p;
+        assert!(
+            resolve_mower_contact(
+                &planet,
+                &mut player,
+                &mut rival,
+                player_before,
+                rival_before
+            )
+            .is_some()
+        );
+        assert!(
+            (rival.state.transform.position - player.state.transform.position).dot(right) > 2.1
+        );
+        let tuning = VehicleTuning::default();
+        for _ in 0..90 {
+            tick(
+                &mut player,
+                &planet,
+                &tuning,
+                InputSnapshot {
+                    accelerate: 1.0,
+                    ..InputSnapshot::default()
+                },
+                crate::FIXED_DT,
+            );
+        }
+        assert_eq!(player.bump_control_seconds, 0.0);
+        assert!(player.state.speed() > tuning.max_speed * 0.9);
+        assert!(player.state.grounded);
     }
 
     fn tick(

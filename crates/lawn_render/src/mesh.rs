@@ -402,6 +402,35 @@ pub fn build_vehicle(
     }
 }
 
+/// The rival shares the player's collision-scale silhouette and index topology,
+/// while a blue shell, pale lavender canopy and violet lights identify it.
+pub fn build_rival_vehicle(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    chassis_transform: VehicleTransform,
+    deck_transform: VehicleTransform,
+    mower_enabled: bool,
+    elapsed_seconds: f32,
+) {
+    build_vehicle(
+        vertices,
+        indices,
+        chassis_transform,
+        deck_transform,
+        mower_enabled,
+        elapsed_seconds,
+    );
+    for vertex in vertices {
+        vertex.material = match vertex.material {
+            2 => 10,
+            3 => 11,
+            5 => 12,
+            8 => 13,
+            _ => vertex.material,
+        };
+    }
+}
+
 fn add_annulus(
     vertices: &mut Vec<MeshVertex>,
     indices: &mut Vec<u32>,
@@ -1011,5 +1040,43 @@ mod tests {
             assert_eq!((vertices.as_ptr(), indices.as_ptr()), pointers);
             assert_outward_triangles(&vertices, &indices);
         }
+    }
+
+    #[test]
+    fn rival_palette_preserves_geometry_topology_and_bounded_storage() {
+        let pose = identity_transform();
+        let mut player = Vec::new();
+        let mut topology = Vec::new();
+        build_vehicle(&mut player, &mut topology, pose, pose, true, 2.0);
+        let mut rival = Vec::with_capacity(
+            VEHICLE_VERTEX_BUFFER_SIZE as usize / std::mem::size_of::<MeshVertex>(),
+        );
+        let mut indices = Vec::with_capacity(VEHICLE_INDEX_BUFFER_SIZE as usize / 4);
+        let pointers = (rival.as_ptr(), indices.as_ptr());
+        build_rival_vehicle(&mut rival, &mut indices, pose, pose, true, 2.0);
+        assert_eq!(indices, topology);
+        assert_eq!(rival.len(), player.len());
+        assert_eq!((rival.as_ptr(), indices.as_ptr()), pointers);
+        for (a, b) in player.iter().zip(&rival) {
+            assert_eq!(a.position, b.position);
+            assert_eq!(a.normal, b.normal);
+            assert_eq!(a.detail, b.detail);
+            assert_eq!(a.variation, b.variation);
+        }
+        for material in [10, 11, 12, 13] {
+            assert!(rival.iter().any(|vertex| vertex.material == material));
+        }
+        assert!(
+            !rival
+                .iter()
+                .any(|vertex| matches!(vertex.material, 2 | 3 | 5 | 8))
+        );
+        assert_eq!(
+            player.iter().filter(|vertex| vertex.material == 5).count(),
+            rival.iter().filter(|vertex| vertex.material == 12).count()
+        );
+        build_rival_vehicle(&mut rival, &mut indices, pose, pose, false, 10.0);
+        assert_eq!(indices, topology);
+        assert_eq!((rival.as_ptr(), indices.as_ptr()), pointers);
     }
 }

@@ -233,9 +233,9 @@ fn test_sample(@builtin(global_invocation_id) id: vec3<u32>) {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
-        // FrameUniform has two matrices followed by six vec4s; options.y is
+        // FrameUniform has two matrices followed by eight vec4s; options.y is
         // the interaction resolution. The sampler uses no other frame fields.
-        let mut frame = [0.0_f32; 56];
+        let mut frame = [0.0_f32; 64];
         frame[41] = RESOLUTION as f32;
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("grass interpolation frame"),

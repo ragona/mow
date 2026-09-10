@@ -16,6 +16,7 @@ use lawn_core::{
     input::Action,
     planet::TUTORIAL_SEED,
     profile::{Profile, QualityPreset, RecordKey},
+    race::RaceOutcome,
     run::{GameMode, RunEvent, RunState, TutorialStage},
     score::Results,
     simulation::FixedStepClock,
@@ -32,6 +33,7 @@ use winit::{
 use crate::{input_adapter::InputAdapter, profile_store::ProfileStore};
 
 mod garden_ui;
+mod race_ui;
 #[cfg(test)]
 mod ui_capture_tests;
 use garden_ui::{
@@ -72,6 +74,7 @@ const GARDEN_PINE: Color32 = Color32::from_rgb(34, 66, 57);
 const GARDEN_MUTED: Color32 = Color32::from_rgb(93, 108, 91);
 const GARDEN_SAGE: Color32 = Color32::from_rgb(206, 222, 182);
 const GARDEN_CORAL: Color32 = Color32::from_rgb(248, 147, 111);
+const GARDEN_RIVAL: Color32 = Color32::from_rgb(105, 155, 215);
 const GARDEN_ERROR: Color32 = Color32::from_rgb(161, 57, 42);
 const ARRIVAL_SECONDS: f32 = 0.9;
 
@@ -250,6 +253,7 @@ pub struct LawnOrbitApp {
     run: RunState,
     game_config: GameConfig,
     world_editor: WorldEditorSettings,
+    selected_mode: GameMode,
     state: GameState,
     settings_return_state: GameState,
     settings_open: bool,
@@ -339,6 +343,7 @@ impl LawnOrbitApp {
             run,
             game_config,
             world_editor,
+            selected_mode: GameMode::TurfRace,
             state: GameState::Title,
             settings_return_state: GameState::Title,
             settings_open: false,
@@ -492,6 +497,16 @@ impl LawnOrbitApp {
             run.tick(snapshot, accessibility);
             submit |= snapshot.submit_pressed;
         });
+        if self.run.mode == GameMode::TurfRace
+            && self
+                .run
+                .race
+                .as_ref()
+                .is_some_and(|race| race.outcome.is_some())
+        {
+            self.finish_run();
+            return;
+        }
         if self.run.tutorial_enabled
             && self.run.tutorial_stage == TutorialStage::Complete
             && !self.profile.tutorial_completed
@@ -535,6 +550,22 @@ impl LawnOrbitApp {
     }
 
     fn finish_run(&mut self) {
+        if self.run.mode == GameMode::TurfRace {
+            if self
+                .run
+                .race
+                .as_ref()
+                .is_some_and(|race| race.outcome.is_some())
+            {
+                self.run.paused = true;
+                self.results = None;
+                self.state = GameState::Results;
+                self.scene_transition = None;
+                self.clock = FixedStepClock::default();
+                self.input.clear();
+            }
+            return;
+        }
         if self.run.tutorial_enabled && self.run.tutorial_stage == TutorialStage::Submit {
             self.run.tutorial_stage = TutorialStage::Complete;
             self.profile.tutorial_completed = true;
@@ -570,15 +601,15 @@ impl LawnOrbitApp {
         match result {
             Ok(run) => {
                 self.run = run;
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.upload_planet(&self.run);
-                }
                 self.results = None;
                 self.clock = FixedStepClock::default();
                 self.status_message = None;
                 if purpose == GenerationPurpose::Play {
-                    self.enter_sandbox();
+                    self.begin_selected_game();
                 } else {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.upload_planet(&self.run);
+                    }
                     self.run.paused = true;
                     self.preview_recipe = Some(recipe);
                 }
@@ -635,7 +666,7 @@ impl LawnOrbitApp {
         if self.preview_recipe == Some(recipe) && self.pending_generation.is_none() {
             // The visible world already has full grass, mowing, and collision
             // data. Enter that exact world without another generation or upload.
-            self.enter_sandbox();
+            self.begin_selected_game();
             return;
         }
         self.spawn_generation(recipe, GenerationPurpose::Play);
@@ -690,6 +721,28 @@ impl LawnOrbitApp {
         self.status_message = None;
     }
 
+    fn begin_selected_game(&mut self) {
+        // Mode changes reset claims and vehicles on the exact previewed planet.
+        // Keep the preview camera as the start of the arrival animation.
+        let camera = self.run.camera.state;
+        match self.selected_mode {
+            GameMode::TurfRace => self.run.start_race(&self.profile.settings.accessibility),
+            GameMode::FreeMow => self
+                .run
+                .start_free_mow(&self.profile.settings.accessibility),
+            GameMode::Standard => self.run.restart(&self.profile.settings.accessibility),
+        }
+        self.run
+            .camera
+            .snap_to_pose(camera.position, camera.target, camera.up);
+        self.run.camera.state.field_of_view_degrees = camera.field_of_view_degrees;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.upload_planet(&self.run);
+        }
+        self.results = None;
+        self.enter_sandbox();
+    }
+
     fn enter_sandbox(&mut self) {
         let from = self.run.camera.state;
         let from_inset = if self.state == GameState::WorldEditor {
@@ -722,7 +775,8 @@ impl LawnOrbitApp {
         );
         self.seed_text = self.run.planet.world_seed.to_string();
         self.run.paused = false;
-        self.run.tutorial_enabled = !self.profile.tutorial_completed;
+        self.run.tutorial_enabled =
+            self.run.mode != GameMode::TurfRace && !self.profile.tutorial_completed;
         self.state = GameState::Playing;
         self.preview_recipe = None;
         self.preview_attempt = None;
@@ -884,11 +938,11 @@ impl LawnOrbitApp {
                             .font(display(48.0))
                             .color(GARDEN_PINE),
                     );
-                    ui.label(RichText::new("A little world. A lovely lawn.").size(18.0));
+                    ui.label(RichText::new("A little world. A friendly rivalry.").size(18.0));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
-                            "Grow a tiny planet, hop on your mower,\nand make yourself a little patch of happy.",
+                            "Grow a tiny planet, race a rival for the lawn,\nor take your time and mow in peace.",
                         )
                         .color(GARDEN_MUTED),
                     );
@@ -938,7 +992,7 @@ impl LawnOrbitApp {
                 ui.label("A little more meadow? A few more peaks?");
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
-                    .max_height((context.content_rect().height() - 270.0).max(160.0))
+                    .max_height((context.content_rect().height() - 286.0).max(140.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -1056,13 +1110,23 @@ impl LawnOrbitApp {
                         ui.label("Updating planet…");
                     }
                 });
-                let circumference = std::f32::consts::TAU * self.world_editor.planet_radius;
-                ui.small(format!(
-                    "≈ {circumference:.0} m around · mow at your own pace"
-                ));
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.selected_mode, GameMode::TurfRace, "Turf race");
+                    ui.selectable_value(&mut self.selected_mode, GameMode::FreeMow, "Free mow");
+                });
+                ui.small(if self.selected_mode == GameMode::TurfRace {
+                    "Fresh grass is yours. First past 50% wins."
+                } else {
+                    "Just you and a lovely lawn. Take your time."
+                });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if garden_button(ui, "Start Mowing", [200.0, 34.0], ready).clicked() {
+                    let label = if self.selected_mode == GameMode::TurfRace {
+                        "Start Race"
+                    } else {
+                        "Start Mowing"
+                    };
+                    if garden_button(ui, label, [200.0, 34.0], ready).clicked() {
                         commands.push(UiCommand::Start(recipe.unwrap().seed));
                     }
                     if ui.button("Back").clicked() {
@@ -1151,7 +1215,11 @@ impl LawnOrbitApp {
             .show(context, |ui| {
                 ui.set_opacity(hud_opacity);
                 garden_card().inner_margin(12).show(ui, |ui| {
-                    coverage_dial(ui, coverage, accent);
+                    if self.run.mode == GameMode::TurfRace {
+                        ui.label(RichText::new("YOUR MOWER").size(11.0).color(GARDEN_MUTED));
+                    } else {
+                        coverage_dial(ui, coverage, accent);
+                    }
                     if self.profile.settings.accessibility.boost_enabled {
                         let flash = if reduced_motion {
                             0.0
@@ -1216,7 +1284,9 @@ impl LawnOrbitApp {
                         });
                     });
             });
-        if let Some((percent, age)) = self.hud_milestone {
+        if self.run.mode == GameMode::TurfRace {
+            self.draw_race_hud(context, hud_opacity);
+        } else if let Some((percent, age)) = self.hud_milestone {
             egui::Area::new("milestone".into())
                 .anchor(Align2::CENTER_TOP, [0.0, 24.0])
                 .show(context, |ui| {
@@ -1280,7 +1350,12 @@ impl LawnOrbitApp {
                     garden_card().inner_margin(12).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("Your little patch awaits.").font(display(21.0)),
+                                RichText::new(if self.run.mode == GameMode::TurfRace {
+                                    "A little friendly competition."
+                                } else {
+                                    "Your little patch awaits."
+                                })
+                                .font(display(21.0)),
                             );
                             if ui.button("Start now").clicked() {
                                 commands.push(UiCommand::SkipArrival);
@@ -1329,17 +1404,37 @@ impl LawnOrbitApp {
                         .size(11.0)
                         .color(GARDEN_MUTED),
                 );
-                ui.label(RichText::new("The lawn can wait.").font(display(32.0)));
                 ui.label(
-                    RichText::new(format!(
-                        "{:.1}% mown · {} impacts · {} recoveries",
-                        self.run.mowing.display_coverage_percent(),
-                        self.run.metrics.substantial_collision_count(),
-                        self.run.metrics.recoveries,
-                    ))
-                    .size(12.0)
-                    .color(GARDEN_MUTED),
+                    RichText::new(if self.run.mode == GameMode::TurfRace {
+                        "The race can wait."
+                    } else {
+                        "The lawn can wait."
+                    })
+                    .font(display(32.0)),
                 );
+                if let Some(race) = &self.run.race {
+                    ui.label(
+                        RichText::new(format!(
+                            "You {:.1}% · Rival {:.1}% · {} bumps",
+                            race.player_coverage * 100.0,
+                            race.rival_coverage * 100.0,
+                            race.bumps
+                        ))
+                        .size(12.0)
+                        .color(GARDEN_MUTED),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.1}% mown · {} impacts · {} recoveries",
+                            self.run.mowing.display_coverage_percent(),
+                            self.run.metrics.substantial_collision_count(),
+                            self.run.metrics.recoveries,
+                        ))
+                        .size(12.0)
+                        .color(GARDEN_MUTED),
+                    );
+                }
                 ui.add_space(8.0);
                 ui.label("Hold Recover at any time if the mower is stuck or overturned.");
                 if garden_button(ui, "Resume", [300.0, 38.0], true).clicked() {
@@ -1348,7 +1443,14 @@ impl LawnOrbitApp {
                 if ui.button("Settings & Accessibility").clicked() {
                     commands.push(UiCommand::OpenSettings);
                 }
-                if ui.button("Regrow this planet").clicked() {
+                if ui
+                    .button(if self.run.mode == GameMode::TurfRace {
+                        "Restart race"
+                    } else {
+                        "Regrow this planet"
+                    })
+                    .clicked()
+                {
                     self.confirmation = Some(ConfirmAction::Restart);
                 }
                 if ui.button("New random planet").clicked() {
@@ -1361,6 +1463,10 @@ impl LawnOrbitApp {
     }
 
     fn draw_results(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
+        if self.run.mode == GameMode::TurfRace {
+            self.draw_race_results(context, commands);
+            return;
+        }
         let Some(results) = &self.results else { return };
         egui::Window::new("Job complete")
             .anchor(Align2::RIGHT_CENTER, [-54.0, 0.0])
@@ -1592,10 +1698,22 @@ impl LawnOrbitApp {
             return;
         };
         egui::Modal::new(egui::Id::new("discard-current-mowing")).show(context, |ui| {
-            ui.heading("Discard current mowing?");
-            ui.label("Current mowing progress will be lost.");
+            let racing = self.run.mode == GameMode::TurfRace;
+            ui.heading(if racing {
+                "Leave this race?"
+            } else {
+                "Discard current mowing?"
+            });
+            ui.label(if racing {
+                "Both mowers' claims in this race will be cleared."
+            } else {
+                "Current mowing progress will be lost."
+            });
             ui.horizontal(|ui| {
-                if ui.button("Keep mowing").clicked() {
+                if ui
+                    .button(if racing { "Keep racing" } else { "Keep mowing" })
+                    .clicked()
+                {
                     self.confirmation = None;
                 }
                 if ui.button("Discard progress").clicked() {
@@ -1735,8 +1853,8 @@ impl LawnOrbitApp {
                 UiCommand::Pause => self.pause(),
                 UiCommand::SkipArrival => self.finish_arrival(),
                 UiCommand::Restart => {
-                    self.run.restart(&self.profile.settings.accessibility);
-                    self.enter_sandbox();
+                    self.selected_mode = self.run.mode;
+                    self.begin_selected_game();
                 }
                 UiCommand::Submit => self.finish_run(),
                 UiCommand::Retry => {
@@ -2428,6 +2546,7 @@ mod tests {
     #[test]
     fn live_preview_coalesces_edits_and_enters_the_displayed_planet() {
         let mut app = preview_app();
+        app.selected_mode = GameMode::FreeMow;
         request_preview(&mut app);
         let first = app.pending_generation.as_ref().unwrap().recipe;
         for seed in 40..50 {
@@ -2557,6 +2676,61 @@ mod tests {
                     assert_eq!(run.tutorial_stage, TutorialStage::WaitForLocator);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn race_is_default_and_mode_changes_reset_only_the_current_planet() {
+        let mut app = preview_app();
+        app.profile_write_enabled = false;
+        app.profile.settings.accessibility.reduced_motion = true;
+        assert_eq!(app.selected_mode, GameMode::TurfRace);
+        let planet_hash = app.run.planet.deterministic_hash;
+        app.begin_selected_game();
+        assert_eq!(app.run.mode, GameMode::TurfRace);
+        assert!(app.run.rival.is_some());
+        assert!(app.run.race.is_some());
+        assert_eq!(app.state, GameState::Playing);
+        assert!(!app.run.tutorial_enabled);
+        app.run.race.as_mut().unwrap().bumps = 7;
+        app.run.simulation_seconds = 18.0;
+        app.begin_selected_game();
+        assert_eq!(app.run.race.as_ref().unwrap().bumps, 0);
+        assert_eq!(app.run.simulation_seconds, 0.0);
+        assert_eq!(app.run.planet.deterministic_hash, planet_hash);
+        app.selected_mode = GameMode::FreeMow;
+        app.begin_selected_game();
+        assert_eq!(app.run.mode, GameMode::FreeMow);
+        assert!(app.run.rival.is_none());
+        assert!(app.run.race.is_none());
+        assert!(app.run.tutorial_enabled);
+        assert_eq!(app.run.planet.deterministic_hash, planet_hash);
+    }
+
+    #[test]
+    fn every_race_outcome_opens_results_without_job_ratings() {
+        for outcome in [
+            RaceOutcome::PlayerWon,
+            RaceOutcome::RivalWon,
+            RaceOutcome::Draw,
+        ] {
+            let mut app = preview_app();
+            app.profile_write_enabled = false;
+            app.profile.settings.accessibility.reduced_motion = true;
+            app.begin_selected_game();
+            app.run.race.as_mut().unwrap().outcome = Some(outcome);
+            app.run.active = false;
+            app.update_simulation(Duration::from_millis(17));
+            assert_eq!(app.state, GameState::Results);
+            assert!(app.run.paused);
+            assert_eq!(app.run.race.as_ref().unwrap().outcome, Some(outcome));
+            assert!(app.results.is_none());
+            assert!(app.profile.records.is_empty());
+            assert!(!app.profile.tutorial_completed);
+            app.begin_selected_game();
+            assert_eq!(app.state, GameState::Playing);
+            assert_eq!(app.run.race.as_ref().unwrap().outcome, None);
+            assert!(app.run.active);
         }
     }
 
@@ -2802,7 +2976,8 @@ mod tests {
         fn play_text_rect(shape: &egui::epaint::Shape) -> Option<egui::Rect> {
             match shape {
                 egui::epaint::Shape::Text(text) => {
-                    (text.galley.text() == "Start Mowing").then_some(text.visual_bounding_rect())
+                    matches!(text.galley.text(), "Start Race" | "Start Mowing")
+                        .then_some(text.visual_bounding_rect())
                 }
                 egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(play_text_rect),
                 _ => None,

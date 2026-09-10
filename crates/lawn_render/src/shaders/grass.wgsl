@@ -7,6 +7,8 @@ struct FrameUniform {
     locator: vec4<f32>,
     mower_position: vec4<f32>,
     mower_forward: vec4<f32>,
+    rival_position: vec4<f32>,
+    rival_forward: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
@@ -166,6 +168,18 @@ fn garden_breeze(direction: vec3<f32>, normal: vec3<f32>, time: f32) -> vec3<f32
     return tangent_flow * pressure + cross(normal, flow) * sin(phase * 0.67 + time * 0.30) * 0.014;
 }
 
+fn mower_contact(root_position: vec3<f32>, position: vec4<f32>, forward: vec4<f32>) -> f32 {
+    let up = normalize(position.xyz + vec3<f32>(0.0, 0.0001, 0.0));
+    let delta = root_position - position.xyz;
+    let height = dot(delta, up);
+    let planar = delta - up * height;
+    let along = dot(planar, forward.xyz);
+    let ellipse = max(dot(planar, planar) - along * along * 0.16, 0.0) / 2.9;
+    let contact = (1.0 - smoothstep(0.02, 1.0, ellipse))
+        * (1.0 - smoothstep(1.6, 3.2, abs(height))) * position.w;
+    return 1.0 - contact * 0.32;
+}
+
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
@@ -269,20 +283,21 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let brush_light = normalize(-frame.light_epoch.xyz);
     let brush_response = clamp(dot(comb_tangent, view) * 1.65 + dot(comb_tangent, brush_light) * 0.35, -1.0, 1.0);
     let brushed = 0.5 + 0.5 * brush_response;
-    let short_color = mix(vec3<f32>(0.055, 0.215, 0.087), vec3<f32>(0.175, 0.365, 0.135), brushed)
+    var short_color = mix(vec3<f32>(0.055, 0.215, 0.087), vec3<f32>(0.175, 0.365, 0.135), brushed)
         * mix(0.92, 1.07, regional_variation);
+    // Claims keep living grass green: only cut turf gains a warm player or
+    // cool rival bias, carried in the unused epoch byte of the race mirror.
+    if (frame.options.x < 0.0) {
+        if (state.w == 1u) { short_color *= vec3<f32>(1.20, 1.02, 0.78); }
+        if (state.w == 2u) { short_color *= vec3<f32>(0.83, 0.98, 1.36); }
+    }
     output.color = mix(tall_color, short_color * mix(1.0, 1.35, high_contrast), cut);
     // Evaluate the broad contact shade per vertex; grass fragments keep a
     // single hardware-filtered shadow lookup and no procedural color noise.
-    let mower_up = normalize(frame.mower_position.xyz + vec3<f32>(0.0, 0.0001, 0.0));
-    let mower_delta = input.root_position - frame.mower_position.xyz;
-    let mower_height = dot(mower_delta, mower_up);
-    let mower_planar = mower_delta - mower_up * mower_height;
-    let along = dot(mower_planar, frame.mower_forward.xyz);
-    let ellipse = max(dot(mower_planar, mower_planar) - along * along * 0.16, 0.0) / 2.9;
-    let contact = (1.0 - smoothstep(0.02, 1.0, ellipse))
-        * (1.0 - smoothstep(1.6, 3.2, abs(mower_height))) * frame.mower_position.w;
-    output.color *= 1.0 - contact * 0.32;
+    output.color *= mower_contact(input.root_position, frame.mower_position, frame.mower_forward);
+    if (frame.rival_position.w > 0.0) {
+        output.color *= mower_contact(input.root_position, frame.rival_position, frame.rival_forward);
+    }
     output.shadow_position = frame.light_view_proj * vec4<f32>(world_position, 1.0);
     output.normalized_height = tip;
     output.cut = cut;

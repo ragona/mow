@@ -75,6 +75,8 @@ pub struct DirtyTileUpdate {
     pub width: u32,
     pub height: u32,
     pub cells: Vec<u32>,
+    /// Aligned ownership bytes, or empty when competitive ownership is disabled.
+    pub owners: Vec<u8>,
 }
 
 /// A compact tile whose packed cells are valid for the duration of an upload
@@ -87,6 +89,8 @@ pub struct DirtyTileView<'a> {
     pub width: u32,
     pub height: u32,
     pub cells: &'a [PackedMowingCell],
+    /// Aligned ownership bytes, or empty when competitive ownership is disabled.
+    pub owners: &'a [u8],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,6 +100,9 @@ pub struct MowingFieldSnapshot {
     /// Sub-byte cut progress; absent in snapshots from older builds.
     #[serde(default)]
     pub cut_residuals: Vec<f32>,
+    /// Optional race ownership, aligned with `cells`; absent means unclaimed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<u8>,
     pub cut_weight: f64,
 }
 
@@ -112,10 +119,14 @@ pub struct MowingField {
     weights: Vec<f32>,
     total_mowable_weight: f64,
     cut_weight: f64,
+    // Allocated only for competitive mowing; keep PackedMowingCell unchanged.
+    owners: Vec<u8>,
+    owned_weights: [f64; 2],
     dirty_tile_size: u32,
     dirty_tiles: Vec<u32>,
     dirty_flags: Vec<bool>,
     dirty_staging: Vec<PackedMowingCell>,
+    dirty_owner_staging: Vec<u8>,
     locator_cache: OnceLock<Option<Vec3>>,
     nominal_radius: f32,
 }
@@ -157,6 +168,8 @@ impl MowingField {
             weights,
             total_mowable_weight,
             cut_weight: 0.0,
+            owners: Vec::new(),
+            owned_weights: [0.0; 2],
             dirty_tile_size: DEFAULT_DIRTY_TILE_SIZE,
             dirty_tiles: Vec::new(),
             dirty_flags: vec![
@@ -164,6 +177,7 @@ impl MowingField {
                 6 * resolution.div_ceil(DEFAULT_DIRTY_TILE_SIZE).pow(2) as usize
             ],
             dirty_staging: Vec::with_capacity(DEFAULT_DIRTY_TILE_SIZE.pow(2) as usize),
+            dirty_owner_staging: Vec::new(),
             locator_cache: OnceLock::new(),
             nominal_radius: planet.config.base_radius,
         }
@@ -214,12 +228,52 @@ impl MowingField {
         &self.cells
     }
 
+    /// Allocate race ownership before the first competitive tick. Repeated
+    /// calls preserve existing claims. Ordinary mowing requires no allocation.
+    pub fn enable_ownership(&mut self) {
+        if self.owners.is_empty() {
+            self.owners.resize(self.cells.len(), 0);
+        }
+        let tile_capacity = self.dirty_tile_size.pow(2) as usize;
+        if self.dirty_owner_staging.capacity() < tile_capacity {
+            self.dirty_owner_staging
+                .reserve_exact(tile_capacity - self.dirty_owner_staging.len());
+        }
+    }
+
+    /// Permanent owner: 0 is unclaimed, 1 is the player, and 2 is the rival.
+    #[must_use]
+    pub fn owner(&self, cell: CubeCell) -> u8 {
+        self.owners
+            .get(flat_index(cell, self.resolution))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// One owner byte per packed cell when enabled. An empty slice means every
+    /// cell is unclaimed. Owner changes use the same dirty tiles as mowing.
+    #[must_use]
+    pub fn packed_owners(&self) -> &[u8] {
+        &self.owners
+    }
+
+    /// Fraction of all mowable surface area permanently claimed by team 1 or
+    /// 2. Unclaimed (0) and unsupported owner codes return zero.
+    #[must_use]
+    pub fn owned_coverage(&self, owner: u8) -> f64 {
+        if !(1..=2).contains(&owner) || self.total_mowable_weight <= f64::EPSILON {
+            return 0.0;
+        }
+        (self.owned_weights[usize::from(owner - 1)] / self.total_mowable_weight).clamp(0.0, 1.0)
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> MowingFieldSnapshot {
         MowingFieldSnapshot {
             resolution: self.resolution,
             cells: self.cells.clone(),
             cut_residuals: self.cut_residuals.clone(),
+            owners: self.owners.clone(),
             cut_weight: self.cut_weight,
         }
     }
@@ -231,6 +285,8 @@ impl MowingField {
     /// Returns [`SnapshotError::ResolutionMismatch`] if the snapshot dimensions
     /// do not exactly match this field, or [`SnapshotError::InvalidCutResiduals`]
     /// if optional fractional progress has the wrong shape or numeric domain.
+    /// Returns [`SnapshotError::InvalidOwners`] for malformed ownership or a
+    /// claim on a cell that is not fully cut grass. Invalid restores are atomic.
     pub fn restore(&mut self, snapshot: &MowingFieldSnapshot) -> Result<(), SnapshotError> {
         if snapshot.resolution != self.resolution || snapshot.cells.len() != self.cells.len() {
             return Err(SnapshotError::ResolutionMismatch);
@@ -244,11 +300,32 @@ impl MowingField {
         {
             return Err(SnapshotError::InvalidCutResiduals);
         }
+        if !snapshot.owners.is_empty()
+            && (snapshot.owners.len() != self.cells.len()
+                || snapshot.owners.iter().enumerate().any(|(index, &owner)| {
+                    owner > 2
+                        || (owner != 0
+                            && (!self.mowable[index]
+                                || snapshot.cells[index].cut_amount() < CUT_COVERAGE_THRESHOLD))
+                }))
+        {
+            return Err(SnapshotError::InvalidOwners);
+        }
         self.cells.clone_from(&snapshot.cells);
         if snapshot.cut_residuals.is_empty() {
             self.cut_residuals.fill(0.0);
         } else {
             self.cut_residuals.clone_from(&snapshot.cut_residuals);
+        }
+        self.owners.clone_from(&snapshot.owners);
+        if !self.owners.is_empty() {
+            self.enable_ownership();
+        }
+        self.owned_weights = [0.0; 2];
+        for (index, &owner) in self.owners.iter().enumerate() {
+            if owner != 0 {
+                self.owned_weights[usize::from(owner - 1)] += f64::from(self.weights[index]);
+            }
         }
         self.cut_weight = self
             .cells
@@ -281,7 +358,16 @@ impl MowingField {
     /// Apply a swept circular deck footprint. Subdivide at quarter deck width,
     /// with a half-texel lower bound, and share elapsed cut time among samples.
     pub fn stamp(&mut self, stamp: MowingStamp) -> StampResult {
-        if !stamp.deck_width.is_finite()
+        self.stamp_owned(stamp, 0)
+    }
+
+    /// Apply the same mowing footprint and award fresh coverage to its first
+    /// owner at the coverage threshold. Claims are permanent: partial cutting
+    /// earns nothing, and revisiting fully cut grass cannot steal or add score.
+    /// Owner 0 performs ordinary mowing; unsupported codes are a no-op.
+    pub fn stamp_owned(&mut self, stamp: MowingStamp, owner: u8) -> StampResult {
+        if owner > 2
+            || !stamp.deck_width.is_finite()
             || !stamp.cut_delta.is_finite()
             || !stamp.from.is_finite()
             || !stamp.to.is_finite()
@@ -295,6 +381,9 @@ impl MowingField {
         let to_direction = stamp.to.normalize_or_zero();
         if from_direction == Vec3::ZERO || to_direction == Vec3::ZERO {
             return StampResult::default();
+        }
+        if owner != 0 {
+            self.enable_ownership();
         }
         let angle = from_direction.dot(to_direction).clamp(-1.0, 1.0).acos();
         let distance = angle * self.nominal_radius;
@@ -314,6 +403,7 @@ impl MowingField {
                 stamp.deck_width * 0.5,
                 cut_delta,
                 stamp.recent_epoch,
+                owner,
                 &mut result,
             );
         }
@@ -327,6 +417,7 @@ impl MowingField {
         radius: f32,
         cut_delta: f32,
         recent_epoch: u8,
+        owner: u8,
         result: &mut StampResult,
     ) {
         let angular_radius =
@@ -382,6 +473,10 @@ impl MowingField {
                         let weight = f64::from(self.weights[index]);
                         result.newly_cut_weight += weight;
                         self.cut_weight += weight;
+                        if owner != 0 && self.owners[index] == 0 {
+                            self.owners[index] = owner;
+                            self.owned_weights[usize::from(owner - 1)] += weight;
+                        }
                         self.locator_cache.take();
                     }
                 }
@@ -413,6 +508,7 @@ impl MowingField {
                 width: tile.width,
                 height: tile.height,
                 cells: tile.cells.iter().map(|cell| cell.0).collect(),
+                owners: tile.owners.to_vec(),
             });
         });
         updates
@@ -433,6 +529,7 @@ impl MowingField {
             let width = self.dirty_tile_size.min(self.resolution - origin_x);
             let height = self.dirty_tile_size.min(self.resolution - origin_y);
             self.dirty_staging.clear();
+            self.dirty_owner_staging.clear();
             for y in origin_y..origin_y + height {
                 let start = flat_index(
                     CubeCell {
@@ -444,6 +541,10 @@ impl MowingField {
                 );
                 self.dirty_staging
                     .extend_from_slice(&self.cells[start..start + width as usize]);
+                if !self.owners.is_empty() {
+                    self.dirty_owner_staging
+                        .extend_from_slice(&self.owners[start..start + width as usize]);
+                }
             }
             visit(DirtyTileView {
                 face,
@@ -452,6 +553,7 @@ impl MowingField {
                 width,
                 height,
                 cells: &self.dirty_staging,
+                owners: &self.dirty_owner_staging,
             });
         }
         self.dirty_tiles.clear();
@@ -577,6 +679,10 @@ pub enum SnapshotError {
         "mowing snapshot fractional progress must match the field and contain finite values in [0, 1)"
     )]
     InvalidCutResiduals,
+    #[error(
+        "mowing snapshot owners must match the field, use codes 0 to 2, and claim only fully cut grass"
+    )]
+    InvalidOwners,
 }
 
 fn slerp_direction(from: Vec3, to: Vec3, t: f32) -> Vec3 {
@@ -655,6 +761,285 @@ mod tests {
         MowingField::from_planet(&planet)
     }
 
+    fn grass_stamp(field: &MowingField) -> MowingStamp {
+        let index = field.mowable.iter().position(|&grass| grass).unwrap();
+        let center =
+            cell_center_direction(cell_from_index(index, field.resolution), field.resolution)
+                * field.nominal_radius;
+        MowingStamp {
+            from: center,
+            to: center,
+            comb_direction: Vec3::Y,
+            deck_width: 2.2,
+            cut_delta: 1.0,
+            recent_epoch: 17,
+        }
+    }
+
+    #[test]
+    fn ownership_claims_only_the_first_threshold_crossing_and_never_steals() {
+        let mut field = field();
+        let stamp = grass_stamp(&field);
+        for _ in 0..2 {
+            let result = field.stamp_owned(
+                MowingStamp {
+                    cut_delta: 0.45,
+                    ..stamp
+                },
+                1,
+            );
+            assert!(result.touched_grass_cells > 0);
+            assert_eq!(result.newly_covered_cells, 0);
+            assert_eq!(field.owned_coverage(1), 0.0);
+            assert!(field.packed_owners().iter().all(|&owner| owner == 0));
+        }
+        field.take_dirty_tiles();
+        let result = field.stamp_owned(
+            MowingStamp {
+                cut_delta: 0.01,
+                ..stamp
+            },
+            2,
+        );
+        assert!(result.newly_covered_cells > 0);
+        assert_eq!(field.owned_coverage(1), 0.0);
+        assert_eq!(
+            field.owned_coverage(2),
+            result.newly_cut_weight / field.total_mowable_weight()
+        );
+        let claimed_owners = field.packed_owners().to_vec();
+        let claimed_weight = field.owned_weights;
+        let dirty_tiles = field.take_dirty_tiles();
+        for (index, &owner) in claimed_owners.iter().enumerate() {
+            let cell = cell_from_index(index, field.resolution);
+            assert_eq!(field.owner(cell), owner);
+            if owner != 0 {
+                assert!(dirty_tiles.iter().any(|tile| {
+                    tile.face == cell.face
+                        && (tile.origin_x..tile.origin_x + tile.width).contains(&cell.x)
+                        && (tile.origin_y..tile.origin_y + tile.height).contains(&cell.y)
+                }));
+            }
+        }
+        field.enable_ownership();
+        for owner in [1, 2, 0, 1, 2] {
+            let result = field.stamp_owned(stamp, owner);
+            assert_eq!(result.newly_covered_cells, 0);
+            assert_eq!(result.newly_cut_weight, 0.0);
+            assert_eq!(field.packed_owners(), claimed_owners);
+            assert_eq!(field.owned_weights, claimed_weight);
+        }
+    }
+
+    #[test]
+    fn ownership_scores_surface_area_across_seams_and_excludes_rocks() {
+        let template = field();
+        assert!(template.mowable.iter().any(|&grass| !grass));
+        for center in [Vec3::new(1.0, 0.0, 1.0).normalize(), Vec3::ONE.normalize()] {
+            let mut field = template.clone();
+            let stamp = MowingStamp {
+                from: center * field.nominal_radius,
+                to: center * field.nominal_radius,
+                deck_width: 4.0,
+                ..grass_stamp(&field)
+            };
+            // Independent spherical-cap oracle decides the first owner's area;
+            // the second deck then covers the entire remaining mowable planet.
+            let minimum_dot = (stamp.deck_width * 0.5 / field.nominal_radius
+                + 1.5 / field.resolution as f32)
+                .cos();
+            let mut expected_weights = [0.0; 2];
+            let expected_owners: Vec<u8> = (0..field.cells.len())
+                .map(|index| {
+                    if !field.mowable[index] {
+                        return 0;
+                    }
+                    let direction = cell_center_direction(
+                        cell_from_index(index, field.resolution),
+                        field.resolution,
+                    );
+                    let owner = if center.dot(direction) >= minimum_dot {
+                        1
+                    } else {
+                        2
+                    };
+                    expected_weights[usize::from(owner - 1)] += f64::from(field.weights[index]);
+                    owner
+                })
+                .collect();
+            assert!(expected_weights.iter().all(|&weight| weight > 0.0));
+            field.stamp_owned(stamp, 1);
+            let result = field.stamp_owned(
+                MowingStamp {
+                    deck_width: std::f32::consts::TAU * field.nominal_radius,
+                    ..stamp
+                },
+                2,
+            );
+            assert!(result.touched_rock);
+            assert_eq!(field.packed_owners(), expected_owners);
+            for owner in [1_u8, 2] {
+                let expected =
+                    expected_weights[usize::from(owner - 1)] / field.total_mowable_weight();
+                assert!((field.owned_coverage(owner) - expected).abs() < 1.0e-12);
+            }
+            let total_score = field.owned_coverage(1) + field.owned_coverage(2);
+            assert!(total_score <= field.coverage() + 1.0e-12);
+            assert!((total_score - 1.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn ordinary_mowing_keeps_packed_semantics_and_cannot_be_claimed_later() {
+        let mut ordinary = field();
+        let mut competitive = ordinary.clone();
+        let stamp = grass_stamp(&ordinary);
+        let expected = ordinary.stamp(stamp);
+        let actual = competitive.stamp_owned(stamp, 1);
+        assert_eq!(actual, expected);
+        assert_eq!(ordinary.packed_cells(), competitive.packed_cells());
+        assert_eq!(ordinary.cut_residuals, competitive.cut_residuals);
+        assert_eq!(ordinary.coverage(), competitive.coverage());
+        assert!(ordinary.packed_owners().is_empty());
+        assert_eq!(std::mem::size_of::<PackedMowingCell>(), 4);
+
+        let result = ordinary.stamp_owned(stamp, 2);
+        assert_eq!(result.newly_covered_cells, 0);
+        assert_eq!(ordinary.owned_coverage(2), 0.0);
+        assert!(ordinary.packed_owners().iter().all(|&owner| owner == 0));
+        for owner in [0, 3, u8::MAX] {
+            assert_eq!(ordinary.owned_coverage(owner), 0.0);
+        }
+
+        let mut fresh = field();
+        for owner in [3, u8::MAX] {
+            assert_eq!(fresh.stamp_owned(stamp, owner), StampResult::default());
+        }
+        assert!(fresh.packed_owners().is_empty());
+        assert!(fresh.packed_cells().iter().all(|cell| cell.0 == 0));
+        assert!(fresh.take_dirty_tiles().is_empty());
+    }
+
+    #[test]
+    fn ownership_snapshots_round_trip_and_legacy_snapshots_clear_claims() {
+        let mut original = field();
+        let stamp = grass_stamp(&original);
+        original.stamp_owned(stamp, 1);
+        let snapshot = original.snapshot();
+        let json = serde_json::to_value(&snapshot).unwrap();
+        let decoded: MowingFieldSnapshot = serde_json::from_value(json.clone()).unwrap();
+        let mut restored = field();
+        restored.restore(&decoded).unwrap();
+        assert_eq!(restored.packed_cells(), original.packed_cells());
+        assert_eq!(restored.packed_owners(), original.packed_owners());
+        assert_eq!(restored.owned_coverage(1), original.owned_coverage(1));
+        assert_eq!(restored.owned_coverage(2), 0.0);
+        assert!(!restored.take_dirty_tiles().is_empty());
+
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("owners");
+        let decoded: MowingFieldSnapshot = serde_json::from_value(legacy).unwrap();
+        restored.restore(&decoded).unwrap();
+        assert!(restored.packed_owners().is_empty());
+        assert_eq!(restored.owned_coverage(1), 0.0);
+        restored.stamp_owned(stamp, 2);
+        assert_eq!(restored.owned_coverage(2), 0.0);
+
+        restored.restore(&field().snapshot()).unwrap();
+        assert_eq!(restored.coverage(), 0.0);
+        assert_eq!(restored.owned_coverage(1), 0.0);
+        assert_eq!(restored.owned_coverage(2), 0.0);
+        assert!(restored.packed_owners().is_empty());
+    }
+
+    #[test]
+    fn invalid_ownership_snapshots_do_not_mutate_authoritative_state() {
+        let mut field = field();
+        field.stamp_owned(grass_stamp(&field), 1);
+        let before = field.snapshot();
+        let before_json = serde_json::to_value(&before).unwrap();
+        let before_dirty = field.dirty_tiles.clone();
+        let before_weights = field.owned_weights;
+        let claimed_index = before.owners.iter().position(|&owner| owner == 1).unwrap();
+        let rock_index = field.mowable.iter().position(|&grass| !grass).unwrap();
+        let uncut_index = field
+            .mowable
+            .iter()
+            .enumerate()
+            .position(|(index, &grass)| grass && before.cells[index].cut_amount() == 0)
+            .unwrap();
+        let mut malformed = vec![vec![0]];
+        for (index, owner) in [(claimed_index, 3), (rock_index, 1), (uncut_index, 2)] {
+            let mut owners = before.owners.clone();
+            owners[index] = owner;
+            malformed.push(owners);
+        }
+        for owners in malformed {
+            let snapshot = MowingFieldSnapshot {
+                owners,
+                ..before.clone()
+            };
+            assert_eq!(field.restore(&snapshot), Err(SnapshotError::InvalidOwners));
+            assert_eq!(serde_json::to_value(field.snapshot()).unwrap(), before_json);
+            assert_eq!(field.owned_weights, before_weights);
+            assert_eq!(field.dirty_tiles, before_dirty);
+        }
+    }
+
+    #[test]
+    fn ownership_dirty_tiles_align_with_packed_cells_and_reuse_staging() {
+        let mut planet =
+            PlanetGenerator::new(CURRENT_GENERATOR_VERSION, GeneratorConfig::test_quality())
+                .generate_with_roots(crate::WorldSeed(7), false)
+                .unwrap();
+        // Deliberately include partial edge tiles on every cube face.
+        planet.config.mowing_resolution = 19;
+        let mut field = MowingField::from_planet(&planet);
+        field.enable_ownership();
+        let staging_address = field.dirty_owner_staging.as_ptr();
+        let staging_capacity = field.dirty_owner_staging.capacity();
+        let stamp = grass_stamp(&field);
+        field.stamp_owned(stamp, 1);
+        field.stamp_owned(
+            MowingStamp {
+                deck_width: std::f32::consts::TAU * field.nominal_radius,
+                ..stamp
+            },
+            2,
+        );
+        let expected = field.packed_owners().to_vec();
+        let mut mirror = vec![0; expected.len()];
+        let resolution = field.resolution;
+        let mut saw_partial = false;
+        field.visit_dirty_tiles(|tile| {
+            assert_eq!(tile.owners.as_ptr(), staging_address);
+            assert_eq!(tile.owners.len(), tile.cells.len());
+            saw_partial |= tile.width < DEFAULT_DIRTY_TILE_SIZE;
+            for y in 0..tile.height {
+                let target = flat_index(
+                    CubeCell {
+                        face: tile.face,
+                        x: tile.origin_x,
+                        y: tile.origin_y + y,
+                    },
+                    resolution,
+                );
+                let source = (y * tile.width) as usize;
+                mirror[target..target + tile.width as usize]
+                    .copy_from_slice(&tile.owners[source..source + tile.width as usize]);
+            }
+        });
+        assert!(saw_partial);
+        assert_eq!(mirror, expected);
+        assert_eq!(field.dirty_owner_staging.capacity(), staging_capacity);
+        field.visit_dirty_tiles(|_| panic!("clean field produced an ownership upload"));
+
+        let mut legacy = field.snapshot();
+        legacy.owners.clear();
+        field.restore(&legacy).unwrap();
+        field.visit_dirty_tiles(|tile| assert!(tile.owners.is_empty()));
+    }
+
     #[test]
     fn borrowed_dirty_tiles_reconstruct_exact_cells_and_reuse_storage() {
         let mut planet =
@@ -681,6 +1066,7 @@ mod tests {
                 let mut previous = None;
                 let mut tile_count = 0;
                 field.visit_dirty_tiles(|tile| {
+                    assert!(tile.owners.is_empty());
                     let address = (tile.face as u8, tile.origin_y, tile.origin_x);
                     assert!(previous.is_none_or(|previous| previous < address));
                     previous = Some(address);

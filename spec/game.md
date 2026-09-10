@@ -3,8 +3,8 @@
 ## Game Design and Implementation Specification
 
 **Status:** Revised implementation specification
-**Genre:** Cozy hover-driving / lawn-mowing sandbox
-**Mode:** Single-player
+**Genre:** Cozy hover-mowing race and sandbox
+**Mode:** Single-player against an AI rival; optional Free Mow
 **Target platform:** Desktop, landscape display
 **Primary input:** Gamepad; keyboard supported
 **Implementation language:** Rust
@@ -24,7 +24,7 @@ The game combines:
 - the tactile satisfaction of leaving clean mowing stripes;
 - the momentum and expressiveness of an arcade driving game;
 - the toy-like spectacle of navigating a complete miniature world; and
-- a relaxed optimization challenge: cover the lawn efficiently while navigating the generated terrain.
+- a race to claim fresh lawn before a rival, with relaxed solo mowing available in Free Mow.
 
 The initial release should be a polished, replayable single-biome game with deterministic planet generation. Its central promise is simple: driving over real, visibly tall grass physically shortens it and permanently records the route.
 
@@ -42,14 +42,14 @@ Drive a hover mower around a fuzzy, pocket-sized planet, carving clean paths thr
 2. Make mowing immediately satisfying by physically shortening that geometry with strong visual and controller feedback.
 3. Generate deterministic planets whose mountains create distinct but always viable mowing routes.
 4. Make spherical traversal feel natural within the first 30 seconds.
-5. Let players choose between relaxed completion and mastery through speed, precision, and route planning.
+5. Let players choose between a friendly turf race and relaxed solo mowing, with mastery through speed, precision, and route planning.
 6. Keep the first implementation tightly scoped enough for a small team or coding agent to complete.
 
 ### Non-goals for the initial release
 
 - Realistic vehicle or lawn-care simulation
 - Open-world exploration beyond the planet
-- Combat, enemies, or survival systems
+- Weapons, damage, or survival systems
 - Character dialogue trees or a narrative campaign
 - Vehicle construction or deep part customization
 - Online multiplayer
@@ -83,7 +83,7 @@ The mower should accelerate quickly and slide freely in any direction, but the p
 
 ### 3.5 Cozy stakes, meaningful mastery
 
-A player may finish slowly without failing. Skilled play is rewarded with better ratings for speed, coverage, clean lines, efficient routing, and avoiding collisions.
+Turf Race rewards routes through fresh grass, well-timed boost, and harmless bumps that disrupt the rival's line. Claimed grass is never lost. Free Mow lets players take as long as they like without an opponent or failure condition. Job ratings are deferred.
 
 ---
 
@@ -99,13 +99,11 @@ There is no death. Falling away from the surface, becoming stuck, or overturning
 
 ## 5. Core Game Loop
 
-1. **Generate and survey:** A seed produces the planet. The editor's rotating preview and inspection controls reveal its mountain groups, open lawns, and routes. Starting play makes a brief, skippable camera approach to the mower.
-2. **Mow:** The player drives freely and cuts tall grass beneath the active mower deck.
-3. **Route:** The player chooses efficient paths around rock faces, through passes, and across already-cut areas while cleaning up missed patches.
-4. **Explore:** The player can continue refining the cut pattern, revisit terrain, or simply drive.
-5. **Reset or regenerate:** The player can regrow the current lawn or return to the world editor for a different planet.
-
-The player is never forced to stop at the completion threshold. They may continue to 100% coverage before submitting the job.
+1. **Generate and survey:** A seed produces the planet. The editor reveals its mountain groups, open lawns, and routes. Choose Turf Race (the default) or Free Mow, then enter through a brief, skippable camera approach.
+2. **Mow and claim:** Drive freely with an always-active deck. In Turf Race, the first counted cut claims each patch permanently for that mower.
+3. **Route and contest:** Seek fresh grass around rock faces and through passes. Boost toward productive patches or bump the rival off its line; recutting either mower's trail earns nothing.
+4. **Finish or explore:** The first racer past half of the mowable area wins and opens the result card. Free Mow has no forced ending or submission action.
+5. **Replay:** Rematch on the same planet, regrow a Free Mow lawn, generate a new seed, or return to the world editor.
 
 ---
 
@@ -192,9 +190,9 @@ The minimum shippable version includes:
 
 - one deterministic planet generator and one grassland/rock biome;
 - a fixed tutorial seed plus the ability to enter, copy, replay, and randomly generate seeds;
-- one hover mower;
+- a player hover mower and an AI rival using the same vehicle rules;
 - a world editor for planet size, rock coverage, peak count and scale, terrain roll, and seed;
-- one unscored mowing sandbox;
+- Turf Race and an unscored Free Mow sandbox;
 - keyboard and gamepad input;
 - pause, settings, world-editor return, and restart flows; and
 - a short first-play tutorial delivered through contextual prompts.
@@ -266,7 +264,7 @@ Boost is optional for completion and can be disabled in accessibility settings.
 
 The player can hold the recovery input at any time. Recovery fades the screen briefly and places the car at the nearest safe surface point, facing roughly along its prior direction. Automatic recovery triggers if the car remains outside a valid distance band, upside-down, or nearly motionless against an obstacle for several seconds.
 
-Recovery adds a small time penalty in rated modes but never removes progress.
+Recovery never removes mowing progress or claimed territory and has no added time penalty in Turf Race or Free Mow. Penalties for future rated jobs are deferred.
 
 ---
 
@@ -315,7 +313,7 @@ Each point on mowable terrain has a persistent cut state from 0 to 1:
 - intermediate values: partially cut or visually transitioning; and
 - `1.0`: fully mowed.
 
-Gameplay coverage calculations may treat a cell as cut when it reaches at least `0.9`.
+The implementation counts a cell as cut at `230/255` (approximately `0.9`). In Turf Race, the mower that first crosses this threshold receives the cell's area weight; a partial cut alone does not claim it.
 
 Exposed rock and other non-grass surfaces are represented separately and do not count toward the denominator for required lawn coverage.
 
@@ -350,6 +348,7 @@ The field should retain at least:
 | Cut amount | Authoritative uncut-to-stubble state and coverage calculation |
 | Tangent comb direction | Direction surviving blades lean after the mower passes |
 | Recent-cut time | Brief clipping, settling, and color-response animation |
+| Owner, in Turf Race | Unclaimed, player, or rival; permanent after the first counted cut |
 
 Store comb direction as a world-space tangent vector, using a compact encoding such as octahedral encoding, or explicitly transform face-local directions at cube boundaries. The field needs enough effective resolution that a 2.2-meter mower deck spans at least 6–8 samples. For a 15-meter-radius sphere, a **512×512 field per cube face** provides ample upper-quality headroom; a lower resolution may be used during prototyping. Sampling and stamping across cube-face boundaries must be seamless.
 
@@ -357,29 +356,41 @@ Store comb direction as a world-space tangent vector, using a compact encoding s
 
 Coverage must be calculated from actual mowable surface area, not raw texture pixels if those pixels represent unequal areas. The generator should precompute a weighted sample table for each planet.
 
-Display coverage rounded down to one decimal place so the HUD never announces completion before the authoritative value reaches the target.
+The Free Mow coverage dial rounds down to one decimal place. Race shares display one decimal place, but outcomes use full-precision weighted values and require strictly more than half of the total mowable area.
 
 ### 9.6 Rock interaction
 
 Exposed rock cannot be mowed and does not contribute to coverage. The mower should harmlessly spark if its footprint crosses rock, while the vehicle body responds to mountain collisions normally.
 
-Rated modes record substantial rock collisions, but glancing contact should not stop the run or destroy the vehicle. Collision feedback should be clear without turning the game punitive.
+Substantial rock collisions produce feedback and telemetry without score penalties in the current modes. Glancing contact should not stop the run or destroy the vehicle. Collision ratings belong to deferred jobs.
 
 ---
 
-## 10. Sandbox and Future Objectives
+## 10. Turf Race, Free Mow, and Future Objectives
 
-### 10.1 Current sandbox
+### 10.1 Turf Race
 
-The current prototype has one play experience rather than a mode selection: an unscored planet sandbox. Coverage remains visible because it makes mowing progress legible, but there is no required completion threshold, timer, rating, penalty, submission action, or forced results flow. The player may regrow the current lawn, generate a new seed, or return to the world editor at any time.
+Turf Race is the default editor choice. The player and a blue AI mower compete for permanent first-cut ownership of the lawn. The first mower to own **strictly more than 50% of the total area-weighted mowable grass** wins. Rock is excluded from the denominator. Crossing a previously claimed patch cannot steal it or award additional coverage. There is no race timer; if all mowable area is claimed without a strict majority, the race ends in a draw.
+
+The rival periodically plans routes through a seam-safe graph of traversable surface patches, weighing remaining fresh grass against travel distance. It steers around terrain, slows for turns, boosts on suitable clear stretches, and recovers when stuck. It uses the same movement, mowing, and boost settings as the player rather than receiving grass or speed bonuses.
+
+Swept bumper contacts keep the mowers from passing through each other. Separation and shoves follow the local tangent surface and preserve grounded movement. Bumping causes no damage, time penalty, or loss of claimed territory; its value is changing the rival's route.
+
+A majority immediately freezes the simulation and opens a win/loss result card; exhaustion can open a draw card. Results show both shares, active time, and bump count, with Rematch, World editor, and New random planet actions. Rematching preserves the generated planet and resets both mowers, ownership, and grass. Pausing freezes both racers. Race results do not submit legacy jobs or save star ratings.
+
+### 10.2 Free Mow
+
+Free Mow retains the unscored solo sandbox. Coverage makes progress legible, but there is no rival, required completion threshold, timer, rating, penalty, submission action, or forced results flow. The player may regrow the current lawn, generate a new seed, or return to the world editor at any time.
+
+### 10.3 World editor and replay
 
 The world editor is the primary pre-play screen. It exposes friendly, bounded controls for planet radius, approximate rock coverage, peak clusters, peak height, rolling-terrain amplitude, and seed. Meadow, Classic, and Craggy presets provide useful starting points. Rockiness ranges from 0% to 24%; at 0% both outcroppings and rock material disappear, peak controls are disabled, and rolling terrain remains adjustable. Meadow starts at 0% rockiness. Edited planets still pass the same connectivity, clearance, and deterministic-generation validation as default planets.
 
-The planet updates live beside the controls as settings or the seed change. Generation and gameplay preparation run in one background worker, with rapid edits coalesced into the latest requested world. The current preview stays visible while the next is prepared. Previewing does not advance simulation, tutorial progress, or seed history. Start Mowing becomes available once the preview matches the controls and enters that same prepared planet without regenerating it.
+The planet updates live beside the controls as settings or the seed change. Generation and gameplay preparation run in one background worker, with rapid edits coalesced into the latest requested world. The current preview stays visible while the next is prepared. Previewing does not advance simulation, tutorial progress, or seed history. Start Race or Start Mowing becomes available once the preview matches the controls and enters that same prepared planet without regenerating its shape. The selected mode determines whether the rival and ownership state are initialized.
 
-### 10.2 Deferred objectives
+### 10.4 Deferred objectives
 
-Scored jobs, ratings, medals, curated challenges, and results playback are deferred until the mowing loop has a coherent objective structure worth measuring. The existing authoritative coverage and telemetry systems may remain internally, but they must not imply a competitive mode in the current player flow.
+Rated jobs, star ratings, medals, curated challenges, online competition, and results playback remain deferred. Existing job-scoring and profile records may remain internally for compatibility; Turf Race uses its own ownership and outcome rules without presenting those legacy systems.
 
 ---
 
@@ -422,26 +433,23 @@ The camera must offer:
 
 ### 12.1 In-game HUD
 
-Keep the HUD small and readable. It contains:
+Keep the HUD small and readable. Turf Race has one slim shared top bar: coral
+player coverage grows from the left, blue rival coverage from the right, and
+unclaimed grass remains between them. YOU/RIVAL percentages sit above a thin
+track with a halfway tick. A labeled marker identifies the visible rival;
+a direction marker locates it when it is offscreen or behind the globe.
 
-- lawn coverage percentage;
-- active cutting feedback;
-- boost meter;
-- optional collision telemetry; and
-- contextual prompts during the tutorial.
-
-A miniature globe map is not required during ordinary play. After 95% coverage, an optional locator can point toward the largest nearby uncut region.
-
-The garden instrument combines a leaf-marked coverage dial and segmented boost
-meter with a remapping-aware keycap. A small speed display is secondary;
-collision counts appear with paused statistics. Boost readiness and coverage
-milestones receive brief, restrained accents. The locator uses a drawn arrow in
-the actual camera's screen basis. Display headings use bundled DM Serif Display;
-body text and settings retain a clear proportional face.
+Both modes retain active cutting feedback and a segmented boost instrument with
+a remapping-aware keycap. Free Mow also shows a leaf-marked coverage dial and, after
+95%, a locator toward remaining grass. A miniature globe map is not required.
+Speed is secondary; collision or bump counts appear with paused statistics.
+Boost readiness and coverage milestones receive brief, restrained accents.
+Direction markers use the actual camera's screen basis. Display headings use
+bundled DM Serif Display; body text and settings retain a clear proportional face.
 
 ### 12.2 World editor
 
-The world editor replaces mode selection in the current prototype. A narrow panel on the left presents illustrated terrain presets, bounded shape controls, seed entry and history, preview status, and Start Mowing. Controls scroll on smaller windows while preview status and the play action remain accessible. The rotating planet is centered in the remaining space. Inspect controls provide zoom, reset, and manual rotation while keeping a common distance across shape edits, so changes in planet radius remain visible. A roughly 0.9-second camera/HUD arrival can be skipped with movement or an explicit action; it never advances simulation or mowing. Returning to the editor transports the camera around the planet and interpolates roll without crossing through the globe or flipping at opposite orientations.
+The world editor includes the Turf Race / Free Mow choice. A narrow panel on the left presents illustrated terrain presets, bounded shape controls, seed entry and history, preview status, and Start Race / Start Mowing. Controls scroll on smaller windows while preview status and the play action remain accessible. The rotating planet is centered in the remaining space. Inspect controls provide zoom, reset, and manual rotation while keeping a common distance across shape edits, so changes in planet radius remain visible. A roughly 0.9-second camera/HUD arrival can be skipped with movement or an explicit action; it never advances either mower's simulation or mowing. Returning to the editor transports the camera around the planet and interpolates roll without crossing through the globe or flipping at opposite orientations.
 
 ### 12.3 Menus
 
@@ -451,13 +459,16 @@ Required menus:
 - world editor;
 - pause;
 - settings;
+- race results with rematch, editor, and new-planet actions;
 - confirmation for reset or return-to-menu actions that discard an active run.
 
 ---
 
 ## 13. Tutorial and Onboarding
 
-The tutorial occurs inside the first standard job and does not require a separate level.
+Turf Race introduces its rules through brief contextual hints: claim fresh grass, bump the rival off its line, and use boost or recovery with the current input bindings. Claimed grass stays claimed.
+
+Free Mow retains the first-play tutorial without a separate level:
 
 1. Prompt the player to move in any direction.
 2. Once moving, call attention to the active mower and rising coverage value.
@@ -465,9 +476,9 @@ The tutorial occurs inside the first standard job and does not require a separat
 4. Guide the player around a rocky mountain and explain which slopes and surfaces are not mowable.
 5. Explain recovery only after the player becomes stuck or opens the pause menu.
 6. At 95% coverage, introduce the uncut-grass locator.
-7. At 98%, explain that the player can submit or continue to 100%.
+7. At 98%, finish the tutorial while leaving the player free to keep mowing.
 
-Prompts disappear immediately after the corresponding action and do not repeat on later runs unless tutorials are reset in settings.
+Free Mow prompts disappear after the corresponding action and do not repeat on later runs unless tutorials are reset in settings. The brief race introduction appears at the start of each race.
 
 ---
 
@@ -477,7 +488,7 @@ Prompts disappear immediately after the corresponding action and do not repeat o
 
 Use a stylized, storybook miniature aesthetic with simplified forms, soft lighting, and strong material separation between tall grass, cut grass, and exposed rock. The sphere should look deliberately tiny rather than like a distant realistic planet.
 
-The shipping presentation is a cozy garden growing on a weathered meteor. Warm directional sunlight meets cool ambient shadows; exposed stone is dusty blue-violet with shallow craters, chipped rims, pale fractures, occasional copper inclusions, and moss in sheltered crevices. Mower bodywork is coral enamel and cream, and hover pads have concentrated cyan emission. A textured indigo, violet, and teal nebula sky with varied stars, a small cratered companion moon, and a soft camera-correct atmospheric rim frame the globe. The sky is anchored in world direction, so orbiting reveals the surrounding cosmos naturally. Menus and the compact HUD use cream cards, pine text, sage controls, and coral primary actions.
+The shipping presentation is a cozy garden growing on a weathered meteor. Warm directional sunlight meets cool ambient shadows; exposed stone is dusty blue-violet with shallow craters, chipped rims, pale fractures, occasional copper inclusions, and moss in sheltered crevices. Player bodywork is coral enamel and cream; the rival uses blue enamel, with matching restrained territory accents on cut grass. Hover pads have concentrated cyan emission. A textured indigo, violet, and teal nebula sky with varied stars, a small cratered companion moon, and a soft camera-correct atmospheric rim frame the globe. The sky is anchored in world direction, so orbiting reveals the surrounding cosmos naturally. Menus and the compact HUD use cream cards, pine text, sage controls, and coral primary actions.
 
 Ambient fill increases smoothly in shade, reaching 1.85 times the base ambient on the fully unlit side. Full sunlight retains its original contrast and warm highlights, while grass and rock remain readable around the whole globe.
 The fill is directional, and a bounded static local-horizon cache adds sheltered
@@ -567,7 +578,7 @@ Required options:
 - hold/toggle options where applicable;
 - high-contrast cut-grass mode;
 - reduced particle mode;
-- relaxed completion mode with no timer or penalties; and
+- Free Mow with no rival, timer, or penalties; and
 - an enlarged uncut-grass locator.
 
 Avoid communicating mower state, grass state, or rock boundaries through color alone.
@@ -579,9 +590,9 @@ Avoid communicating mower state, grass state, or rock boundaries through color a
 ### 17.1 Top-level game states
 
 ```text
-Boot -> Title -> World Editor -> Loading -> Sandbox
-                                        |-> Paused -> Sandbox
-                                        |-> Paused -> World Editor
+Boot -> Title -> World Editor -> Playing (Turf Race or Free Mow)
+                                    |-> Paused -> Playing / World Editor
+                                    |-> Race Results -> Rematch / World Editor / New Planet
 ```
 
 ### 17.2 Run state
@@ -590,10 +601,13 @@ A run contains at least:
 
 - generator version and world seed;
 - selected world-editor parameters;
+- selected play mode;
 - elapsed active time;
 - current mowing field;
 - weighted coverage value;
 - vehicle transform and velocity;
+- rival transform, velocity, and routing state in Turf Race;
+- permanent ownership, both weighted shares, bump count, and race outcome;
 - mower and boost state;
 - substantial collision events;
 - recovery count;
@@ -611,7 +625,7 @@ Persist:
 - recently played and favorited seeds; and
 - visual and control settings.
 
-An active run may be saved on clean exit, but mid-run persistence is not required for MVP because sessions are short.
+Active grass ownership, rival state, and race outcomes are session state and are not persisted. Mid-run persistence is not required for MVP because sessions are short. Legacy job records may remain in profiles, but Turf Race does not write job ratings.
 
 ---
 
@@ -634,7 +648,7 @@ This hybrid boundary exists to maximize control over the unusual systems without
 | Windows and events | `winit` | Desktop window, keyboard, mouse, resize, focus, and event loop |
 | Gamepads | `gilrs` | Unified controls, hot-plugging, mappings, and rumble |
 | Math | `glam` | Vectors, matrices, quaternions, and transforms |
-| Collision and rigid bodies | `rapier3d` | Static terrain collision, one dynamic vehicle, queries, contact impulses, and CCD |
+| Collision and rigid bodies | `rapier3d` | Static terrain collision, dynamic mower bodies, queries, contact impulses, and CCD |
 | Development UI | `egui` with `egui_wgpu` | Runtime tuning, seed tools, render inspection, and profiling overlays |
 | Data | `serde` with RON or JSON | Tunable configuration, profile data, seeds, and diagnostic captures |
 | Diagnostics | `tracing` plus GPU timestamp queries | Structured logs, CPU spans, and GPU pass timing |
@@ -703,6 +717,8 @@ Each simulation tick should:
 9. update mower sampling from the deck's swept path.
 
 Use a simple convex hull or small compound collider for the vehicle and a lower-frequency static triangle mesh for the generated planet. Do not use Rapier's character controller: its translation-oriented abstraction cannot supply the rotational dynamics required here.
+
+Turf Race advances both hover vehicles through the same controller. Game-owned swept bumper contact resolves their relative motion, applies tangent separation and shoves, and preserves valid surface attachment before subsequent mowing stamps.
 
 Keep Rapier behind a narrow `PhysicsWorld` and `VehiclePhysics` interface. If full rigid-body behavior later proves too difficult to tune, this boundary permits replacing vehicle integration with custom kinematics plus Parry shape queries without disturbing gameplay or rendering code.
 
@@ -831,6 +847,8 @@ If the baseline adapter cannot use the preferred storage texture format, provide
 
 The CPU owns a six-face mowing grid, initially **512×512 cells per face**. A four-byte packed cell occupies approximately 6 MiB for the entire planet and should encode cut amount, tangent comb direction, and a compact recent-cut value. Coverage, save data, and results are derived from this CPU representation; the game must never require GPU readback to know what has been mowed.
 
+Turf Race adds an aligned owner byte per cell. The first stamp to cross the counted-cut threshold assigns unclaimed cells and adds their precomputed mowable area weights to that mower's share. Ownership cannot change before reset. The renderer mirrors ownership for presentation; it never decides who owns grass or who won.
+
 Every fixed simulation tick stamps the mower deck's swept capsule between its previous and current poses. Stamping resolves samples from normalized three-dimensional directions so a pass crossing a cube boundary remains continuous. Track modified cells in dirty tiles and upload only those tiles to the matching GPU texture before rendering.
 
 Grass roots sample the GPU mirror using their normalized planet-centered direction. At minimum, the vertex shader maps cut amount to blade height:
@@ -935,12 +953,13 @@ Instrument named CPU spans and GPU passes from the first visual prototype. Recor
 | `PhysicsWorld` | Rapier ownership, static terrain collider, fixed stepping, queries, contacts, and interpolation state |
 | `HoverVehicle` | Input interpretation, radial attraction, hover forces, propulsion, grip, stabilization, and recovery |
 | `MowerDeck` | Activation, valid-cut checks, and swept cutting footprint |
-| `MowingField` | Persistent cut amount, comb direction, timestamps, weighted coverage, and seam-safe stamps |
+| `MowingField` | Persistent cut amount, comb direction, timestamps, first-cut ownership, weighted coverage, and seam-safe stamps |
+| `RaceState` | Rival routing, both owned-area shares, bumper count, and strict-majority outcome |
 | `GrassRootField` | Deterministic per-patch root placement and compact tuft attributes |
 | `GrassInteraction` | GPU displacement/velocity fields, force-source upload, spring integration, and fallback path |
 | `Renderer` | `wgpu` ownership, resources, explicit passes, instanced grass, culling, LOD, lighting, effects, and presentation |
 | `ObjectiveSystem` | Completion rules and optional job objectives |
-| `ScoreSystem` | Time, coverage, collisions, efficiency, recoveries, ratings, and per-seed records |
+| `ScoreSystem` | Legacy job telemetry, ratings, and per-seed records; rated jobs are deferred |
 | `CameraRig` | Mostly top-down chase camera, local-up tracking, tilt, rotation, zoom, and comfort options |
 | `SaveProfile` | Settings, bindings, tutorial flags, unlocks, and records |
 | `RunRecorder` | Optional compact mowing-stamp history for result playback |
@@ -1016,12 +1035,18 @@ The MVP is complete when all of the following are true:
 - Coverage is independent of render frame rate.
 - Exposed rock never contributes to the required coverage denominator.
 
-### Sandbox
+### Turf Race and Free Mow
 
 - The world editor generates valid planets throughout every exposed parameter range.
+- Turf Race is the default choice, and Free Mow starts without a rival or forced result flow.
+- Race shares use weighted mowable area; rock and repeat cuts add no score, and claimed grass cannot be stolen.
+- Exactly 50% does not win; a strict majority ends the race automatically, with a draw only on exhausted grass without a majority.
+- The rival routes through traversable terrain toward fresh grass using the same movement and cutting rules.
+- Harmless swept bumper shoves keep contacts grounded without damage or lost ownership.
+- A shared scoreboard, rival direction marker, and win/loss/draw results explain the race and offer a rematch.
 - Substantial collisions with mountain terrain are detected and reported as feedback, not penalties.
-- Restarting resets all run state and grass state.
-- Regrowing preserves the seed and world shape; generating a new planet changes the seed.
+- Pausing freezes both racers; restarting resets both mowers, all ownership, and grass state.
+- Rematching or regrowing preserves the seed and world shape; generating a new planet changes the seed and retains the selected mode.
 
 ### User experience
 
@@ -1088,10 +1113,12 @@ The MVP is complete when all of the following are true:
 - Coverage percentage
 - Mountain collision accounting
 - World editor, seed tools, pause, and restart
-- Unscored sandbox flow with visible coverage
+- Turf Race ownership, rival routing, and harmless bumper interaction
+- Shared race HUD, automatic results, and same-planet rematch
+- Unscored Free Mow with visible coverage
 - Persistent visual and control settings
 
-**Exit condition:** A fresh launch supports editing, generating, mowing, resetting, and same-seed replay without seam artifacts or persistent false gaps.
+**Exit condition:** A fresh launch supports editing, generating, racing to a majority, viewing results, rematching, and solo mowing without seam artifacts or persistent false gaps.
 
 ### Milestone 5: Feel and presentation
 
@@ -1148,6 +1175,11 @@ At minimum, test:
 - entering and leaving the surface over a bump;
 - switching input devices during a run;
 - pausing during boost, collision, completion, and recovery;
+- first-cut ownership across seams, partial cuts, repeat passes, and contested patches;
+- strict-majority outcomes at and just above 50%, with weighted rather than raw-cell scores;
+- rival routing around rocks, fresh-grass selection, and recovery;
+- swept bumper contact at boost speed, grounded separation, and recovery-adjacent contact;
+- race/Free Mow switching, both-mower pause, result transitions, and complete rematch resets;
 - coverage near 98%, 99.5%, and 100%;
 - resetting after a completed and an incomplete run;
 - replaying the same seed and generating a different one;
@@ -1164,7 +1196,7 @@ At minimum, test:
 | GPU backend capabilities diverge | Maintain a conservative baseline path, inspect capabilities at startup, and treat indirect draws and mesh shaders as optional optimization tiers |
 | Dependency upgrades destabilize performance | Pin the lockfile, upgrade deliberately, and run visual, generator, physics, and frame-time regression suites before accepting changes |
 | Spherical driving causes disorientation | Strong local-up camera, visible landmarks, adjustable follow behavior, fixed-horizon accessibility option |
-| Coverage seams create impossible final patches | Cube-map representation, swept stamps, explicit seam tests, 98% completion tolerance |
+| Coverage seams create impossible final patches | Cube-map representation, swept stamps, and explicit seam and ownership tests |
 | Dense geometric grass is too expensive | Surface-patch and horizon culling, instancing or indirect draws, stable stochastic thinning, measured visible-tuft budget |
 | Thin blades shimmer or disappear | Opaque tapered geometry, minimum projected width, stable thinning, modest LOD widening, and 2×/4× MSAA; add TAA only after validating animated motion |
 | LOD destroys the fuzzy silhouette | Preserve blade height at the limb, thin rather than flatten, and keep real geometry in every ordinary gameplay view |
@@ -1173,7 +1205,8 @@ At minimum, test:
 | Generated terrain contains inaccessible grass | Connectivity and clearance validation, deterministic repair, reclassification of tiny islands, deterministic regeneration fallback |
 | Generated planets feel interchangeable | Correlated regional variation, distinct mountain silhouettes, constrained parameter families, seed replay and favorites |
 | Hover physics feels floaty and imprecise | Strong lateral grip at low speed, damped orientation, limited air time, data-driven tuning |
-| Cleanup at 95% becomes tedious | Completion tolerance and locator for the largest nearby uncut region |
+| Cleanup at 95% becomes tedious | Turf Race ends at a majority; Free Mow offers a locator with no mandatory completion |
+| Rival feels unfair or merely decorative | Shared movement/cutting rules, fresh-grass routing, readable ownership, visible direction hints, and playtested bumper strength |
 | Seed difficulty makes records incomparable | Store records per seed; reserve cross-player competition for curated or daily shared seeds |
 | Cute presentation obscures mower width or hazards | Strong deck silhouette, ground projection, contrast, and multimodal feedback |
 
@@ -1214,7 +1247,8 @@ The following should remain tunable rather than settled on paper:
 - cube-sphere versus subdivided-icosphere terrain patches;
 - whether arbitrary seeds are always exposed or primarily selected through a curated flow;
 - final acceleration, braking, direction-change, and air-control response;
-- exact completion and rating thresholds;
+- rival route preferences, boost choices, and bumper strength;
+- completion and rating thresholds for future rated jobs;
 - the need for a fixed-horizon camera mode; and
 - whether results playback is worth its storage and implementation cost.
 

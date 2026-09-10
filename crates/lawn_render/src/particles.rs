@@ -100,10 +100,12 @@ struct EmissionBatch {
     impact: usize,
     recovery: usize,
     milestone: usize,
+    bump: Option<(Vec3, usize)>,
 }
 
 #[derive(Debug, Default)]
 struct ParticleEmission {
+    rival: bool,
     last_seconds: Option<f32>,
     fractional_clippings: f32,
     fractional_dust: f32,
@@ -136,19 +138,39 @@ impl ParticleEmission {
         let mut scraping = false;
         for event in events {
             match *event {
-                RunEvent::GrassCut { weight } if weight.is_finite() && weight > 0.0 => {
+                RunEvent::GrassCut { weight }
+                    if !self.rival && weight.is_finite() && weight > 0.0 =>
+                {
                     cut_area = (cut_area + weight).min(8.0);
                 }
-                RunEvent::RockScrape => scraping = true,
-                RunEvent::SubstantialCollision { impulse } => {
+                RunEvent::RivalGrassCut { weight }
+                    if self.rival && weight.is_finite() && weight > 0.0 =>
+                {
+                    cut_area = (cut_area + weight).min(8.0);
+                }
+                RunEvent::RockScrape if !self.rival => scraping = true,
+                RunEvent::SubstantialCollision { impulse } if !self.rival => {
                     batch.impact = batch.impact.max(if reduced {
                         3
                     } else {
                         (6.0 + impulse.clamp(0.0, 12.0) * 0.7) as usize
                     });
                 }
-                RunEvent::Recovered => batch.recovery = if reduced { 8 } else { 24 },
-                RunEvent::CoverageMilestone(_) => {
+                RunEvent::Recovered if !self.rival => batch.recovery = if reduced { 8 } else { 24 },
+                RunEvent::RivalRecovered if self.rival => {
+                    batch.recovery = if reduced { 8 } else { 24 }
+                }
+                RunEvent::MowerBump { impulse, position }
+                    if !self.rival && position.is_finite() =>
+                {
+                    let count = if reduced {
+                        4
+                    } else {
+                        (8.0 + impulse.clamp(0.0, 12.0) * 0.5) as usize
+                    };
+                    batch.bump = Some((position, count));
+                }
+                RunEvent::CoverageMilestone(_) if !self.rival => {
                     batch.milestone = if reduced { 4 } else { 10 };
                 }
                 _ => {}
@@ -182,6 +204,7 @@ impl ParticleEmission {
             batch.dust = 0;
             batch.impact = 0;
             batch.milestone = 0;
+            batch.bump = None;
         }
         batch
     }
@@ -196,6 +219,7 @@ pub struct ClippingParticles {
     index_buffer: wgpu::Buffer,
     spawn_counter: u32,
     emission: ParticleEmission,
+    rival_emission: ParticleEmission,
     last_update: Instant,
 }
 
@@ -232,6 +256,10 @@ impl ClippingParticles {
             index_buffer,
             spawn_counter: 0,
             emission: ParticleEmission::default(),
+            rival_emission: ParticleEmission {
+                rival: true,
+                ..ParticleEmission::default()
+            },
             last_update: Instant::now(),
         }
     }
@@ -248,6 +276,16 @@ impl ClippingParticles {
             run.vehicle.state.speed(),
             run.vehicle_tuning.mower_width,
         );
+        let rival_batch = run.rival.as_ref().map(|rival| {
+            self.rival_emission.sample(
+                run.simulation_seconds,
+                run.events(),
+                active,
+                reduced,
+                rival.state.speed(),
+                run.vehicle_tuning.mower_width,
+            )
+        });
         if !active {
             return;
         }
@@ -261,6 +299,9 @@ impl ClippingParticles {
             self.particles.clear();
         }
         self.spawn(&run.vehicle.state, &batch, reduced);
+        if let (Some(rival), Some(batch)) = (&run.rival, rival_batch) {
+            self.spawn(&rival.state, &batch, reduced);
+        }
 
         self.upload(queue);
     }
@@ -320,6 +361,10 @@ impl ClippingParticles {
     pub fn clear(&mut self) {
         self.particles.clear();
         self.emission = ParticleEmission::default();
+        self.rival_emission = ParticleEmission {
+            rival: true,
+            ..ParticleEmission::default()
+        };
         self.last_update = Instant::now();
     }
 
@@ -349,9 +394,22 @@ impl ClippingParticles {
             (ParticleKind::Recovery, batch.recovery),
             (ParticleKind::Milestone, batch.milestone),
         ];
-        let count = groups.iter().map(|(_, count)| count).sum::<usize>();
+        let count = groups.iter().map(|(_, count)| count).sum::<usize>()
+            + batch.bump.map_or(0, |(_, count)| count);
         let overflow = (self.particles.len() + count).saturating_sub(MAX_PARTICLES);
         self.particles.drain(..overflow.min(self.particles.len()));
+        if let Some((position, count)) = batch.bump {
+            for index in 0..count {
+                self.spawn_counter = self.spawn_counter.wrapping_add(1);
+                self.particles.push(make_bump_particle(
+                    position,
+                    vehicle,
+                    self.spawn_counter,
+                    index as f32 / count as f32,
+                    reduced,
+                ));
+            }
+        }
         for (kind, count) in groups {
             for index in 0..count {
                 self.spawn_counter = self.spawn_counter.wrapping_add(1);
@@ -366,6 +424,32 @@ impl ClippingParticles {
                 ));
             }
         }
+    }
+}
+
+fn make_bump_particle(
+    position: Vec3,
+    vehicle: &VehicleState,
+    seed: u32,
+    fraction: f32,
+    reduced: bool,
+) -> Particle {
+    let up = position.normalize_or(vehicle.transform.up);
+    let forward =
+        (vehicle.transform.forward - up * vehicle.transform.forward.dot(up)).normalize_or(Vec3::X);
+    let right = forward.cross(up).normalize_or(Vec3::Z);
+    let angle = fraction * std::f32::consts::TAU;
+    let direction = right * angle.cos() + forward * angle.sin();
+    let variation = hash01(seed);
+    Particle {
+        position: position + direction * 0.12,
+        velocity: (direction * (1.3 + variation) + up * 0.45) * if reduced { 0.45 } else { 1.0 },
+        size: 0.16 + variation * 0.10,
+        age: 0.0,
+        lifetime: 0.35 + variation * 0.16,
+        kind: ParticleKind::Dust,
+        variation,
+        opacity: if reduced { 0.40 } else { 0.55 },
     }
 }
 
@@ -628,6 +712,76 @@ mod tests {
                 assert!(full.position.is_finite() && full.velocity.is_finite());
             }
             assert!(full.age > full.lifetime);
+        }
+    }
+
+    #[test]
+    fn rival_events_emit_only_from_their_own_mower_and_bumps_are_once_only() {
+        let mut player = ParticleEmission::default();
+        let mut rival = ParticleEmission {
+            rival: true,
+            ..ParticleEmission::default()
+        };
+        let position = Vec3::new(4.0, 16.0, -3.0);
+        let events = [
+            RunEvent::GrassCut { weight: 1.0 },
+            RunEvent::RivalGrassCut { weight: 2.0 },
+            RunEvent::MowerBump {
+                position,
+                impulse: 6.0,
+            },
+        ];
+        let a = player.sample(1.0, &events, true, false, 12.0, 2.2);
+        let b = rival.sample(1.0, &events, true, false, 12.0, 2.2);
+        assert_eq!(a.clippings, 12);
+        assert_eq!(b.clippings, 24);
+        assert_eq!(a.bump, Some((position, 11)));
+        assert_eq!(b.bump, None);
+        assert_eq!(
+            player.sample(1.0, &events, true, false, 12.0, 2.2),
+            EmissionBatch::default()
+        );
+        assert_eq!(
+            rival.sample(1.0, &events, true, false, 12.0, 2.2),
+            EmissionBatch::default()
+        );
+        let recovery = [RunEvent::RivalRecovered];
+        assert_eq!(
+            player
+                .sample(1.1, &recovery, true, false, 12.0, 2.2)
+                .recovery,
+            0
+        );
+        assert_eq!(
+            rival
+                .sample(1.1, &recovery, true, false, 12.0, 2.2)
+                .recovery,
+            24
+        );
+    }
+
+    #[test]
+    fn bumper_particles_are_local_to_contact_and_respect_reduction() {
+        use lawn_core::{config::VehicleTuning, planet::SpawnPoint};
+        let vehicle = VehicleState::at_spawn(
+            SpawnPoint {
+                position: Vec3::Y * 16.0,
+                forward: Vec3::NEG_Z,
+                up: Vec3::Y,
+                clearance: 3.0,
+            },
+            &VehicleTuning::default(),
+        );
+        // Contact can be far away from the player's body; event position is
+        // authoritative, so an offscreen collision cannot burst at the camera.
+        let contact = Vec3::new(12.0, 8.0, -3.0);
+        for index in 0..14 {
+            let full = make_bump_particle(contact, &vehicle, index, index as f32 / 14.0, false);
+            let reduced = make_bump_particle(contact, &vehicle, index, index as f32 / 14.0, true);
+            assert!(full.position.distance(contact) <= 0.121);
+            assert!(full.velocity.is_finite());
+            assert!(reduced.velocity.length() < full.velocity.length());
+            assert!(reduced.opacity < full.opacity);
         }
     }
 }

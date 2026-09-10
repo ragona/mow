@@ -267,6 +267,13 @@ impl PhysicsWorld {
         body.reset_torques(true);
     }
 
+    /// Arcade mower contact correction; preserve orientation/angular motion.
+    pub(crate) fn correct_contact(&mut self, transform: VehicleTransform, velocity: Vec3) {
+        let body = &mut self.world.bodies[self.vehicle_body];
+        body.set_position(glam_pose(transform.position, transform.rotation), true);
+        body.set_linvel(glam_vector(velocity), true);
+    }
+
     #[must_use]
     pub fn body_count(&self) -> usize {
         self.world.bodies.len()

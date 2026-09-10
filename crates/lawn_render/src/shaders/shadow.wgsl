@@ -7,6 +7,8 @@ struct FrameUniform {
     locator: vec4<f32>,
     mower_position: vec4<f32>,
     mower_forward: vec4<f32>,
+    rival_position: vec4<f32>,
+    rival_forward: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 

@@ -7,6 +7,8 @@ struct FrameUniform {
     locator: vec4<f32>,
     mower_position: vec4<f32>,
     mower_forward: vec4<f32>,
+    rival_position: vec4<f32>,
+    rival_forward: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
@@ -63,18 +65,18 @@ fn shadow_factor(position: vec4<f32>) -> f32 {
     ) * 0.25;
 }
 
-fn mower_contact(world_position: vec3<f32>) -> f32 {
-    let up = normalize(frame.mower_position.xyz + vec3<f32>(0.0, 0.0001, 0.0));
-    let delta = world_position - frame.mower_position.xyz;
+fn mower_contact(world_position: vec3<f32>, mower_position: vec4<f32>, mower_forward: vec4<f32>) -> f32 {
+    let up = normalize(mower_position.xyz + vec3<f32>(0.0, 0.0001, 0.0));
+    let delta = world_position - mower_position.xyz;
     let height = dot(delta, up);
     let planar = delta - up * height;
-    let forward = frame.mower_forward.xyz;
+    let forward = mower_forward.xyz;
     let along = dot(planar, forward);
     let ellipse = max(dot(planar, planar) - along * along * 0.16, 0.0) / 2.9;
     let footprint = 1.0 - smoothstep(0.02, 1.0, ellipse);
     // The radial gate also excludes terrain on the far side of the planet.
     let nearby = 1.0 - smoothstep(1.6, 3.2, abs(height));
-    return 1.0 - footprint * nearby * frame.mower_position.w * 0.43;
+    return 1.0 - footprint * nearby * mower_position.w * 0.43;
 }
 
 struct StoneSurface {
@@ -231,6 +233,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             gloss = 0.60;
             gloss_power = 54.0;
         }
+        case 10u: {
+            base = vec3<f32>(0.105, 0.20, 0.66);
+            gloss = 0.85;
+            gloss_power = 72.0;
+        }
+        case 11u: {
+            base = vec3<f32>(0.73, 0.77, 0.93);
+            gloss = 0.45;
+            gloss_power = 48.0;
+        }
+        case 12u: {
+            return vec4<f32>(vec3<f32>(0.68, 0.30, 1.45) * (1.3 + frame.rival_forward.w * 0.75), 1.0);
+        }
+        case 13u: {
+            base = vec3<f32>(0.040, 0.045, 0.15);
+            gloss = 0.32;
+            gloss_power = 42.0;
+        }
         default: { base = vec3<f32>(0.12, 0.20, 0.23); }
     }
     let light = normalize(-frame.light_epoch.xyz);
@@ -261,7 +281,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sunshine = vec3<f32>(1.22, 1.04, 0.76);
     var color = base * (ambient + sunshine * diffuse * shadow);
     color += sunshine * highlight;
-    if (input.material == 2u || input.material == 3u || input.material == 8u || input.material == 9u) {
+    if (input.material == 2u || input.material == 3u || input.material == 8u || input.material == 9u || input.material == 10u || input.material == 11u || input.material == 13u) {
         // Broad, fixed environment lobes bend across glossy shells even on the
         // night hemisphere. Their soft reflection reveals canopy curvature
         // without adding point lights, texture fetches, or gloss to the stone.
@@ -274,7 +294,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     color += vec3<f32>(0.12, 0.19, 0.23) * rim * mix(0.22, 0.65, gloss);
     if (input.material <= 1u) {
-        color *= mower_contact(input.world_position);
+        color *= mower_contact(input.world_position, frame.mower_position, frame.mower_forward);
+        if (frame.rival_position.w > 0.0) {
+            color *= mower_contact(input.world_position, frame.rival_position, frame.rival_forward);
+        }
     }
     return vec4<f32>(color, 1.0);
 }

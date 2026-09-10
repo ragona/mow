@@ -66,7 +66,7 @@ fn probe_vertex(@builtin(vertex_index) index: u32) -> VertexOutput {
             multiview_mask: None,
             cache: None,
         });
-        let mut frame = [0.0_f32; 56];
+        let mut frame = [0.0_f32; 64];
         frame[32..36].copy_from_slice(&[0.0, 24.0, 20.0, 1.0]);
         frame[36..40].copy_from_slice(&[-0.42, -0.81, -0.38, 0.0]);
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

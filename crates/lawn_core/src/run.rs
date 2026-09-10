@@ -13,8 +13,9 @@ use crate::{
     mowing::{MowingField, MowingStamp},
     planet::Planet,
     profile::AccessibilitySettings,
+    race::{RaceState, rival_spawn},
     score::{CollisionEvent, Results, RunMetrics},
-    vehicle::{HoverVehicle, VehicleTickResult},
+    vehicle::{HoverVehicle, VehicleTickResult, resolve_mower_contact, surface_distance},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +23,7 @@ pub enum GameMode {
     #[default]
     Standard,
     FreeMow,
+    TurfRace,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +115,9 @@ pub enum RunEvent {
     CoverageMilestone(u8),
     CompletionAvailable,
     TutorialAdvanced(TutorialStage),
+    RivalGrassCut { weight: f64 },
+    RivalRecovered,
+    MowerBump { impulse: f32, position: Vec3 },
 }
 
 #[derive(Debug)]
@@ -121,6 +126,8 @@ pub struct RunState {
     pub mode: GameMode,
     pub mowing: MowingField,
     pub vehicle: HoverVehicle,
+    pub rival: Option<HoverVehicle>,
+    pub race: Option<RaceState>,
     pub camera: CameraRig,
     pub metrics: RunMetrics,
     /// Always-running active simulation time used by visual epochs and the sandbox.
@@ -159,11 +166,13 @@ impl RunState {
         );
         let ideal_distance =
             planet.validation.mowable_area as f32 / vehicle_tuning.mower_width * 1.18;
-        Self {
+        let mut run = Self {
             planet,
             mode,
             mowing,
             vehicle,
+            rival: None,
+            race: None,
             camera,
             metrics: RunMetrics {
                 estimated_ideal_distance: ideal_distance,
@@ -183,7 +192,11 @@ impl RunState {
             recent_events: Vec::new(),
             simulation_ticks: 0,
             locator_cache: Cell::new((f32::NEG_INFINITY, None)),
+        };
+        if mode == GameMode::TurfRace {
+            run.configure_race();
         }
+        run
     }
 
     pub fn tick(&mut self, input: InputSnapshot, accessibility: &AccessibilitySettings) {
@@ -191,7 +204,29 @@ impl RunState {
             return;
         }
         let input = input.sanitized();
-        let tick = self.vehicle.tick(
+        let player_before = self.vehicle.state.transform.position;
+        let mut rival_tick = None;
+        let mut rival_before = Vec3::ZERO;
+        if let (Some(rival), Some(race)) = (&mut self.rival, &mut self.race) {
+            rival_before = rival.state.transform.position;
+            let rival_input = race.ai.drive(
+                &self.planet,
+                &self.mowing,
+                &rival.state,
+                &self.vehicle.state,
+            );
+            let forward = rival.state.transform.forward;
+            rival_tick = Some(rival.tick(
+                &self.planet,
+                &self.vehicle_tuning,
+                rival_input,
+                forward,
+                accessibility.boost_enabled,
+                FIXED_DT,
+            ));
+            race.bump_cooldown = (race.bump_cooldown - FIXED_DT).max(0.0);
+        }
+        let mut tick = self.vehicle.tick(
             &self.planet,
             &self.vehicle_tuning,
             input,
@@ -199,6 +234,39 @@ impl RunState {
             accessibility.boost_enabled,
             FIXED_DT,
         );
+        if let (Some(rival), Some(other_tick)) = (&mut self.rival, &mut rival_tick)
+            && !tick.recovered
+            && !other_tick.recovered
+        {
+            let impact = resolve_mower_contact(
+                &self.planet,
+                &mut self.vehicle,
+                rival,
+                player_before,
+                rival_before,
+            );
+            tick.deck_to = self.vehicle.deck_position(&self.vehicle_tuning);
+            other_tick.deck_to = rival.deck_position(&self.vehicle_tuning);
+            tick.traveled_distance = surface_distance(
+                player_before,
+                self.vehicle.state.transform.position,
+                self.planet.terrain_cell(player_before.normalize()).radius,
+            );
+            other_tick.traveled_distance = surface_distance(
+                rival_before,
+                rival.state.transform.position,
+                self.planet.terrain_cell(rival_before.normalize()).radius,
+            );
+            if let Some((impulse, position)) = impact
+                && let Some(race) = &mut self.race
+                && race.bump_cooldown <= 0.0
+            {
+                race.bumps += 1;
+                race.bump_cooldown = 0.24;
+                self.recent_events
+                    .push(RunEvent::MowerBump { impulse, position });
+            }
+        }
         self.simulation_ticks += 1;
         self.simulation_seconds = (self.simulation_ticks as f64 / f64::from(SIMULATION_HZ)) as f32;
         if self.tutorial_enabled {
@@ -207,12 +275,33 @@ impl RunState {
         if self.mode == GameMode::Standard {
             self.metrics.elapsed_seconds = self.simulation_seconds
                 + self.metrics.recoveries as f32 * self.job_config.recovery_time_penalty;
+        } else if self.mode == GameMode::TurfRace {
+            self.metrics.elapsed_seconds = self.simulation_seconds;
         }
         self.metrics.distance_traveled += tick.traveled_distance;
         self.record_vehicle_events(tick);
-        self.cut_if_valid(tick);
+        // Swap arbitration order every fixed tick, avoiding a permanent
+        // player-first advantage when both decks finish the same cells.
+        if self.simulation_ticks.is_multiple_of(2) {
+            if let Some(other) = rival_tick {
+                self.cut_rival_if_valid(other);
+            }
+            self.cut_if_valid(tick);
+        } else {
+            self.cut_if_valid(tick);
+            if let Some(other) = rival_tick {
+                self.cut_rival_if_valid(other);
+            }
+        }
         self.metrics.coverage = self.mowing.coverage();
         self.update_objectives();
+        if let Some(race) = &mut self.race {
+            race.update_score(&self.mowing);
+            self.metrics.coverage = race.player_coverage;
+            if race.outcome.is_some() {
+                self.active = false;
+            }
+        }
         self.update_tutorial(input, accessibility);
         self.camera.update(
             &self.planet,
@@ -268,7 +357,11 @@ impl RunState {
             cut_delta: self.vehicle_tuning.cut_rate_per_second * cutter_seconds,
             recent_epoch: ((self.simulation_seconds * 30.0) as u32 & 0xff) as u8,
         };
-        let result = self.mowing.stamp(stamp);
+        let result = if self.mode == GameMode::TurfRace {
+            self.mowing.stamp_owned(stamp, 1)
+        } else {
+            self.mowing.stamp(stamp)
+        };
         if result.newly_cut_weight > 0.0 {
             self.recent_events.push(RunEvent::GrassCut {
                 weight: result.newly_cut_weight,
@@ -287,8 +380,45 @@ impl RunState {
         }
     }
 
+    fn cut_rival_if_valid(&mut self, tick: VehicleTickResult) {
+        let rival = self.rival.as_ref().expect("rival tick requires rival");
+        if tick.recovered {
+            self.recent_events.push(RunEvent::RivalRecovered);
+            return;
+        }
+        if !rival.state.grounded {
+            return;
+        }
+        let result = self.mowing.stamp_owned(
+            MowingStamp {
+                from: tick.deck_from,
+                to: tick.deck_to,
+                comb_direction: rival
+                    .state
+                    .linear_velocity
+                    .try_normalize()
+                    .unwrap_or(rival.state.transform.forward),
+                deck_width: self.vehicle_tuning.mower_width,
+                cut_delta: self.vehicle_tuning.cut_rate_per_second
+                    * FIXED_DT.max(tick.traveled_distance / self.vehicle_tuning.max_speed),
+                recent_epoch: ((self.simulation_seconds * 30.0) as u32 & 0xff) as u8,
+            },
+            2,
+        );
+        if result.newly_cut_weight > 0.0 {
+            self.recent_events.push(RunEvent::RivalGrassCut {
+                weight: result.newly_cut_weight,
+            });
+        }
+    }
+
     fn update_objectives(&mut self) {
-        let coverage_percent = (self.mowing.coverage() * 100.0).floor() as u8;
+        let coverage = if self.mode == GameMode::TurfRace {
+            self.mowing.owned_coverage(1)
+        } else {
+            self.mowing.coverage()
+        };
+        let coverage_percent = (coverage * 100.0).floor() as u8;
         let milestone = match coverage_percent {
             100 => 100,
             95.. => 95,
@@ -400,7 +530,7 @@ impl RunState {
     }
 
     pub fn submit(&mut self) -> Option<Results> {
-        if !self.active || self.mode == GameMode::FreeMow || !self.completion_available {
+        if !self.active || self.mode != GameMode::Standard || !self.completion_available {
             return None;
         }
         self.active = false;
@@ -439,6 +569,35 @@ impl RunState {
         self.active = true;
         self.previous_milestone = 0;
         self.recent_events.clear();
+        self.rival = None;
+        self.race = None;
+        if self.mode == GameMode::TurfRace {
+            self.configure_race();
+        }
+    }
+
+    fn configure_race(&mut self) {
+        self.mowing.enable_ownership();
+        self.rival = Some(HoverVehicle::from_spawn(
+            &self.planet,
+            rival_spawn(&self.planet),
+            &self.vehicle_tuning,
+        ));
+        self.race = Some(RaceState::new(&self.planet));
+        // Race instructions are shown by the race HUD; the completion tutorial
+        // belongs to free mowing and must not ask for 95% personal coverage.
+        self.tutorial_enabled = false;
+        self.tutorial_stage = TutorialStage::Complete;
+    }
+
+    pub fn start_race(&mut self, accessibility: &AccessibilitySettings) {
+        self.mode = GameMode::TurfRace;
+        self.restart(accessibility);
+    }
+
+    pub fn start_free_mow(&mut self, accessibility: &AccessibilitySettings) {
+        self.mode = GameMode::FreeMow;
+        self.restart(accessibility);
     }
 }
 
