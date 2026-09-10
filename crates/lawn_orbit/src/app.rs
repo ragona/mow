@@ -13,7 +13,7 @@ use lawn_core::{
     camera::{CameraRig, CameraState},
     config::GeneratorConfig,
     flow::GameState,
-    input::Action,
+    input::{Action, Binding},
     planet::TUTORIAL_SEED,
     profile::{Profile, QualityPreset, RecordKey},
     race::RaceOutcome,
@@ -27,6 +27,7 @@ use winit::{
     dpi::LogicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow},
+    keyboard::PhysicalKey,
     window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
 
@@ -549,6 +550,62 @@ impl LawnOrbitApp {
         self.input.clear();
     }
 
+    fn resume(&mut self) {
+        self.state = GameState::Playing;
+        self.run.paused = false;
+        self.clock = FixedStepClock::default();
+        self.input.clear_transient();
+        self.confirmation = None;
+        self.clear_ui_keyboard_focus();
+        self.last_frame = Instant::now();
+        if !self.input.is_focused() {
+            self.pause();
+        }
+    }
+
+    fn clear_ui_keyboard_focus(&self) {
+        if let Some(state) = &self.egui_state {
+            release_keyboard_focus(state.egui_ctx());
+        }
+    }
+
+    fn window_focus_changed(&mut self, focused: bool) {
+        tracing::debug!(focused, state = ?self.state, "window focus changed");
+        self.input.handle_window_event(
+            &WindowEvent::Focused(focused),
+            &mut self.profile.settings.controls,
+        );
+        if !focused {
+            self.pause();
+        }
+    }
+
+    fn gameplay_owns_key(&self, key: PhysicalKey, text_edit_focused: bool) -> bool {
+        if self.state != GameState::Playing
+            || self.settings_open
+            || self.confirmation.is_some()
+            || self.input.rebind_action.is_some()
+            || text_edit_focused
+        {
+            return false;
+        }
+        let PhysicalKey::Code(code) = key else {
+            return false;
+        };
+        let binding = Binding::Key(format!("{code:?}"));
+        self.profile
+            .settings
+            .controls
+            .bindings
+            .iter()
+            .any(|(action, bindings)| {
+                !matches!(
+                    action,
+                    Action::Confirm | Action::Cancel | Action::ToggleMower
+                ) && bindings.contains(&binding)
+            })
+    }
+
     fn finish_run(&mut self) {
         if self.run.mode == GameMode::TurfRace {
             if self
@@ -786,6 +843,7 @@ impl LawnOrbitApp {
         self.boost_was_ready = true;
         self.clock = FixedStepClock::default();
         self.input.clear_transient();
+        self.clear_ui_keyboard_focus();
         self.last_frame = Instant::now();
         if !self.input.is_focused() {
             self.pause();
@@ -1842,14 +1900,7 @@ impl LawnOrbitApp {
                 }
                 UiCommand::Start(seed) => self.start_generation(seed),
                 UiCommand::Random => self.start_generation(Self::random_seed()),
-                UiCommand::Resume => {
-                    self.state = GameState::Playing;
-                    self.run.paused = false;
-                    self.clock = FixedStepClock::default();
-                    self.input.clear_transient();
-                    self.confirmation = None;
-                    self.last_frame = Instant::now();
-                }
+                UiCommand::Resume => self.resume(),
                 UiCommand::Pause => self.pause(),
                 UiCommand::SkipArrival => self.finish_arrival(),
                 UiCommand::Restart => {
@@ -2100,24 +2151,46 @@ impl ApplicationHandler for LawnOrbitApp {
         if window.id() != window_id {
             return;
         }
+        // Keep app and egui focus in agreement. winit 0.30 can emit a false
+        // startup notification on macOS even though this is the key window.
+        let native_focus = (cfg!(target_os = "macos") && matches!(&event, WindowEvent::Focused(_)))
+            .then(|| window.has_focus());
+        let event = normalize_focus_event(event, native_focus);
         let rebinding = self.input.rebind_action.is_some();
-        let consumed = !(rebinding
+        let gameplay_key = match &event {
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == winit::event::ElementState::Pressed =>
+            {
+                self.gameplay_owns_key(
+                    event.physical_key,
+                    self.egui_state
+                        .as_ref()
+                        .is_some_and(|state| state.egui_ctx().text_edit_focused()),
+                )
+            }
+            _ => false,
+        };
+        // A focused HUD button must not swallow driving or turn Space/boost
+        // into a click. Tab and unbound Enter still navigate/activate the HUD.
+        // Releases always reach egui and the adapter to clear held state.
+        let rebinding_key = rebinding
             && matches!(&event, WindowEvent::KeyboardInput { event, .. }
-            if event.state == winit::event::ElementState::Pressed))
+                if event.state == winit::event::ElementState::Pressed);
+        let consumed = !(gameplay_key || rebinding_key)
             && self
                 .egui_state
                 .as_mut()
                 .is_some_and(|state| state.on_window_event(window, &event).consumed);
-        let release_or_focus = matches!(&event,
+        let release = matches!(&event,
             WindowEvent::KeyboardInput { event, .. } if event.state == winit::event::ElementState::Released
         ) || matches!(
             &event,
             WindowEvent::MouseInput {
                 state: winit::event::ElementState::Released,
                 ..
-            } | WindowEvent::Focused(_)
+            }
         );
-        if !consumed || rebinding || release_or_focus {
+        if !matches!(&event, WindowEvent::Focused(_)) && (!consumed || rebinding || release) {
             self.input
                 .handle_window_event(&event, &mut self.profile.settings.controls);
         }
@@ -2126,7 +2199,7 @@ impl ApplicationHandler for LawnOrbitApp {
                 self.save_profile();
                 event_loop.exit();
             }
-            WindowEvent::Focused(false) => self.pause(),
+            WindowEvent::Focused(focused) => self.window_focus_changed(focused),
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
                 if occluded {
@@ -2190,6 +2263,31 @@ impl ApplicationHandler for LawnOrbitApp {
         self.pause();
         self.save_profile();
     }
+}
+
+fn normalize_focus_event(event: WindowEvent, native_focus: Option<bool>) -> WindowEvent {
+    match event {
+        WindowEvent::Focused(reported) => {
+            let focused = native_focus.unwrap_or(reported);
+            if focused != reported {
+                tracing::debug!(
+                    reported,
+                    focused,
+                    "corrected native window focus notification"
+                );
+            }
+            WindowEvent::Focused(focused)
+        }
+        event => event,
+    }
+}
+
+fn release_keyboard_focus(context: &egui::Context) {
+    context.memory_mut(|memory| {
+        if let Some(id) = memory.focused() {
+            memory.surrender_focus(id);
+        }
+    });
 }
 
 fn garden_card() -> egui::Frame {
@@ -2475,6 +2573,193 @@ mod tests {
             ),
             InputSnapshot::default()
         );
+    }
+
+    fn egui_key_pulse(key: egui::Key) -> Vec<egui::Event> {
+        [true, false]
+            .into_iter()
+            .map(|pressed| egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            })
+            .collect()
+    }
+
+    fn draw_keyboard_test_frame(
+        app: &mut LawnOrbitApp,
+        context: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Vec<UiCommand> {
+        let mut commands = Vec::new();
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 540.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ui| commands.extend(app.draw_ui(ui.ctx())),
+        );
+        commands
+    }
+
+    #[test]
+    fn focused_hud_keeps_driving_keys_and_boost_out_of_button_activation() {
+        use winit::keyboard::KeyCode;
+
+        let mut app = preview_app();
+        app.state = GameState::Playing;
+        let context = egui::Context::default();
+        configure_egui_style(&context);
+        draw_keyboard_test_frame(&mut app, &context, Vec::new());
+        draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Tab));
+        // The real Pause button owns egui focus. Previously this made
+        // egui-winit consume every driving key until focus was cleared.
+        assert!(context.egui_wants_keyboard_input());
+        assert!(!context.text_edit_focused());
+        for key in [
+            KeyCode::KeyW,
+            KeyCode::ArrowLeft,
+            KeyCode::Space,
+            KeyCode::Escape,
+        ] {
+            assert!(app.gameplay_owns_key(PhysicalKey::Code(key), context.text_edit_focused()));
+        }
+
+        // Reproduce the old second failure: sending boost to egui also
+        // activates the focused Pause button. Owned presses must bypass it.
+        let old_commands =
+            draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Space));
+        assert!(
+            old_commands
+                .iter()
+                .any(|command| matches!(command, UiCommand::Pause))
+        );
+        let events = if app.gameplay_owns_key(PhysicalKey::Code(KeyCode::Space), false) {
+            Vec::new()
+        } else {
+            egui_key_pulse(egui::Key::Space)
+        };
+        let commands = draw_keyboard_test_frame(&mut app, &context, events);
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, UiCommand::Pause))
+        );
+
+        // Keyboard access to the HUD survives: Tab focuses and Enter activates.
+        for key in [KeyCode::Tab, KeyCode::Enter] {
+            assert!(!app.gameplay_owns_key(PhysicalKey::Code(key), false));
+        }
+        let commands =
+            draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Enter));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, UiCommand::Pause))
+        );
+    }
+
+    #[test]
+    fn gameplay_priority_respects_text_menus_modals_and_remapped_controls() {
+        use winit::keyboard::KeyCode;
+
+        let mut app = preview_app();
+        app.state = GameState::Playing;
+        let key = PhysicalKey::Code(KeyCode::KeyW);
+        let context = egui::Context::default();
+        let mut seed = String::from("garden seed");
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            ui.text_edit_singleline(&mut seed).request_focus();
+        });
+        assert!(context.text_edit_focused());
+        assert!(!app.gameplay_owns_key(key, context.text_edit_focused()));
+        release_keyboard_focus(&context);
+        assert!(!context.egui_wants_keyboard_input());
+        assert!(app.gameplay_owns_key(key, context.text_edit_focused()));
+
+        app.settings_open = true;
+        assert!(!app.gameplay_owns_key(key, false));
+        app.settings_open = false;
+        app.confirmation = Some(ConfirmAction::Restart);
+        assert!(!app.gameplay_owns_key(key, false));
+        app.confirmation = None;
+        app.input.rebind_action = Some(Action::Accelerate);
+        assert!(!app.gameplay_owns_key(key, false));
+        app.input.rebind_action = None;
+        for state in [
+            GameState::Paused,
+            GameState::WorldEditor,
+            GameState::Results,
+        ] {
+            app.state = state;
+            assert!(!app.gameplay_owns_key(key, false));
+        }
+        app.state = GameState::Playing;
+        app.profile
+            .settings
+            .controls
+            .bindings
+            .insert(Action::Accelerate, vec![Binding::Key("KeyZ".into())]);
+        assert!(!app.gameplay_owns_key(key, false));
+        assert!(app.gameplay_owns_key(PhysicalKey::Code(KeyCode::KeyZ), false));
+    }
+
+    #[test]
+    fn native_focus_correction_preserves_play_but_real_focus_loss_clears_input() {
+        let mut app = preview_app();
+        app.state = GameState::Playing;
+        app.run.paused = false;
+        drag_camera(&mut app);
+        let apply_focus = |app: &mut LawnOrbitApp, reported, native| {
+            let WindowEvent::Focused(focused) =
+                normalize_focus_event(WindowEvent::Focused(reported), native)
+            else {
+                unreachable!();
+            };
+            app.window_focus_changed(focused);
+        };
+
+        // macOS startup can report false while the native window is key.
+        apply_focus(&mut app, false, Some(true));
+        assert!(app.input.is_focused());
+        assert_eq!(app.state, GameState::Playing);
+        assert!(!app.run.paused);
+        let snapshot = app.input.snapshot(
+            &app.profile.settings.controls,
+            &app.profile.settings.accessibility,
+        );
+        assert_ne!(snapshot.camera_orbit, [0.0; 2]);
+
+        drag_camera(&mut app);
+        apply_focus(&mut app, true, Some(false));
+        assert!(!app.input.is_focused());
+        assert_eq!(app.state, GameState::Paused);
+        assert!(app.run.paused);
+        assert_eq!(
+            app.input.snapshot(
+                &app.profile.settings.controls,
+                &app.profile.settings.accessibility,
+            ),
+            InputSnapshot::default()
+        );
+        app.resume();
+        assert_eq!(app.state, GameState::Paused);
+        apply_focus(&mut app, true, Some(true));
+        assert_eq!(app.state, GameState::Paused);
+        app.resume();
+        assert_eq!(app.state, GameState::Playing);
+
+        // Platforms without the macOS workaround retain their event value.
+        apply_focus(&mut app, false, None);
+        assert!(!app.input.is_focused());
+        assert_eq!(app.state, GameState::Paused);
     }
 
     #[test]

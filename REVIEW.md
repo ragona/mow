@@ -325,3 +325,32 @@ Native release inspection confirmed the shared HUD at 960×540 and 1280×720,
 near/far-side rival markers, pause/resume, an AI victory at 02:37.0, a clean
 same-world rematch, and returning to Free Mow with its solo HUD. The editor is
 left ready for a new Turf Race.
+
+## Window focus and gameplay keyboard routing
+
+The app previously trusted `WindowEvent::Focused` directly, while egui-winit
+already corrected that event from `window.has_focus()` on macOS. winit 0.30
+queues an initial false focus notification, which can leave the input adapter
+unfocused even while the menus remain usable. The app now normalizes focus
+before updating either input or pause state, following the same
+[upstream workaround](https://github.com/rust-windowing/winit/issues/4371).
+Actual focus loss still pauses play and clears held input; resuming while
+unfocused remains paused.
+
+A second path let any focused egui widget consume movement keys. Tabbing to
+the HUD's Pause button could suppress WASD and make Space activate Pause rather
+than boost. During unobstructed play, keys bound to gameplay now go directly to
+the input adapter; text editing, menus, confirmation dialogs, and remapping
+retain their input behavior. Tab and unbound Enter still support HUD keyboard
+navigation. Releases reach both input systems, and starting or resuming play
+clears stale UI keyboard focus.
+
+Validation: all 40 app tests, strict workspace Clippy, formatting, and the release
+build pass. The real-HUD test tabs to Pause and demonstrates the old Space-key
+misactivation; a temporary legacy-routing mutation failed the new regression,
+and restoring the fix passed. Focus tests distinguish an incorrect startup
+notification from real focus loss, including cleared input and safe resumption.
+Text entry, modal/menu handling, remapping, and keyboard HUD activation remain
+covered. The intermittent native startup symptom was not reproduced in a
+controlled run; native keyboard checks were interrupted by concurrent user
+activity, so the automated regressions are the verification for this change.
