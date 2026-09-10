@@ -567,6 +567,10 @@ impl Renderer {
         interpolation_alpha: f32,
     ) -> Result<RenderFrame, FrameAcquireError> {
         let _span = tracing::debug_span!("render_encode").entered();
+        // The app clears run events on its next update even if this redraw
+        // cannot acquire a surface image. Preserve the victory snapshot first;
+        // the particle update emits it only on a later unpaused, acquired frame.
+        self.particles.retain_defeat_event(run.events());
         let acquire_started = Instant::now();
         let visual_dt = self
             .last_visual_frame
@@ -669,12 +673,15 @@ impl Renderer {
             );
             deck
         });
-        self.particles
-            .update(&self.queue, run, self.reduced_particles);
+        self.particles.update(
+            &self.queue,
+            run,
+            self.reduced_particles || self.reduced_motion,
+        );
         let mut mowing_tile_uploads = 0;
         // Queue writes copy the borrowed cells before the callback returns;
         // every tile reuses the mowing field's persistent staging allocation.
-        let race = run.rival.is_some();
+        let race = run.race.is_some();
         run.mowing.visit_dirty_tiles(|tile| {
             let cells = if race {
                 pack_owned_cells(&mut self.mowing_owner_staging, tile.cells, tile.owners);
@@ -1150,7 +1157,7 @@ fn make_frame_uniform(renderer: &Renderer, run: &RunState, camera: CameraState) 
         options: [
             // Density selection is CPU-side. Its sign reserves the existing
             // uniform channel for interpreting the mowing mirror's owner byte.
-            quality_density(renderer.quality) * if run.rival.is_some() { -1.0 } else { 1.0 },
+            quality_density(renderer.quality) * if run.race.is_some() { -1.0 } else { 1.0 },
             INTERACTION_RESOLUTION as f32,
             if renderer.high_contrast { 1.0 } else { 0.0 },
             run.planet.config.grass_height_scale * renderer.grass_height_multiplier,
@@ -1284,14 +1291,14 @@ fn create_planet_resources(
     });
     let face_area = (resolution * resolution) as usize;
     let mut owned_cells = Vec::new();
-    if run.rival.is_some() {
+    if run.race.is_some() {
         pack_owned_cells(
             &mut owned_cells,
             run.mowing.packed_cells(),
             run.mowing.packed_owners(),
         );
     }
-    let packed: &[u8] = if run.rival.is_some() {
+    let packed: &[u8] = if run.race.is_some() {
         bytemuck::cast_slice(&owned_cells)
     } else {
         bytemuck::cast_slice(run.mowing.packed_cells())

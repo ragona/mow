@@ -11,8 +11,13 @@ available beside it. Both modes use the exact planet shown in the editor.
   weights. Rocks do not count toward the lawn or either score.
 - The first mower strictly past 50% wins immediately. Exactly 50% is not a win;
   an exhausted lawn split equally is a draw. There is no countdown or time limit.
-- Both vehicles stop when the result is decided. Rematch regrows the same world
-  and resets both mowers, ownership, boosts, elapsed time, and bumps.
+- Winning starts a victory lap at the player's current position and speed.
+  The rival bursts into colorful fragments and disappears; the player keeps
+  driving and cutting while the victory card is open. Keep mowing dismisses
+  the card, and the final race shares, time, and bumps remain fixed.
+- The victory lap shows total lawn coverage and supports finishing the rest of
+  the grass. Losses and draws stop at the results screen. Rematch regrows the
+  same world and resets both mowers, ownership, boosts, elapsed time, and bumps.
 - The top bar shows player coral, rival blue, and the remaining unclaimed grass.
   Subtle turf tints and a rival marker make positions and routes readable.
 
@@ -50,7 +55,7 @@ guarantee.
 
 ## Acceptance evidence
 
-- All 198 ordinary workspace tests pass, with formatting, strict workspace
+- All 212 ordinary workspace tests pass, with formatting, strict workspace
   Clippy, and the complete release build.
 - Headless AI matches finish on open and rocky worlds. The unattended rival
   reached a majority in 136.9 seconds at resolution 128 and 155.7 seconds on
@@ -59,26 +64,36 @@ guarantee.
   travel; they are samples, not an exhaustive assessment of difficulty.
 - Ownership tests cover cut thresholds, permanent claims, area-weighted totals,
   cube seams/corners, rocks, compatible snapshots, and dirty tile staging.
-  Match tests cover both winners, strict majority, draws, terminal freezing,
+  Match tests cover both winners, strict majority, draws, loss/draw freezing,
   pause, restart, and switching back to Free Mow.
+- Victory tests cross the actual majority threshold while driving, then verify
+  continued movement and cutting, unchanged final results and ownership, a
+  single rival defeat, global coverage milestones, and a clean rematch.
+  App checks exercise the real victory controls, dismissal, reopening, held
+  input, and gamepad pause navigation.
+  Particle regressions retain the defeat through skipped surface frames and
+  pause, then emit it exactly once without replaying unrelated effects.
 - Real player chase input starts the mowers 4.27 metres apart and contacts the
   active AI after 0.17 seconds. Twelve seconds of driving produces 26 bumps with
   matching positive impact events. Both finish grounded, with exactly identical
   poses, ownership, scores, and events at 30/60/120/240 display Hz.
 - Independent contact tests cover momentum transfer, separation, high-speed
   crossing, arbitrary hemispheres, and return of steering control.
-- All nine explicit renderer GPU checks pass on Apple M2, including race and
-  Free Mow at supported 1×/2×/4× MSAA counts. Pixel checks locate both mower
-  palettes. Race and bumper reference images were inspected.
-- The UI GPU check passes all 24 references at 960×540 and 1280×720, including
-  race HUD, pause, and each outcome. Main-menu, editor, and Free Mow checks
-  remain covered.
-- Native release inspection covered both window sizes, mode selection, the
-  moving rival and its near/far-side marker, pause/resume, a complete AI win,
+- All ten explicit renderer GPU checks pass on Apple M2, including race,
+  Free Mow, and the victory burst at supported 1×/2×/4× MSAA counts. Pixel
+  checks locate both mower palettes and defeat particles after rival removal.
+  Race, bumper, and normal/reduced victory reference images were inspected.
+- The UI GPU check passes all 28 references at 960×540 and 1280×720, including
+  race HUD, pause, each outcome, and the open/dismissed victory card.
+  Main-menu, editor, and Free Mow checks remain covered.
+- Initial race native release inspection covered both window sizes, mode
+  selection, the moving rival and its near/far-side marker, pause/resume, a complete AI win,
   rematch, and switching to solo play. On the default Classic planet
   `0x4C41574E4F524249`, the unattended rival won at 02:37.0. Rematch reset both
   shares to zero and regrew the same world; Free Mow restored its solo HUD and
-  removed the rival. The editor was left open with Turf Race selected.
+  removed the rival. The victory lap was verified through simulation/input
+  regressions and actual GPU/UI captures; a native player victory was not
+  manually played through.
 
 Useful focused checks:
 
@@ -88,6 +103,8 @@ cargo test -p lawn_core --test turf_race unattended_rival_wins_rocky_world_at_sh
 cargo test -p lawn_render gpu_ -- --ignored --nocapture --test-threads=1
 LAWN_CAPTURE_DIR=/tmp/lawn-race LAWN_CAPTURE_VIEW=race cargo test -p lawn_render gpu_smoke_race -- --ignored --nocapture
 LAWN_CAPTURE_DIR=/tmp/lawn-race LAWN_CAPTURE_VIEW=bumper cargo test -p lawn_render gpu_smoke_race -- --ignored --nocapture
+LAWN_CAPTURE_DIR=/tmp/lawn-victory LAWN_CAPTURE_VIEW=victory cargo test -p lawn_render gpu_smoke_victory -- --ignored --nocapture
+LAWN_CAPTURE_DIR=/tmp/lawn-victory LAWN_CAPTURE_VIEW=victory-reduced cargo test -p lawn_render gpu_smoke_victory -- --ignored --nocapture
 LAWN_UI_CAPTURE_DIR=/tmp/lawn-race-ui cargo test -p lawn_orbit gpu_capture_garden_ui_references -- --ignored --nocapture
 ```
 

@@ -13,9 +13,11 @@ use crate::{
     mowing::{MowingField, MowingStamp},
     planet::Planet,
     profile::AccessibilitySettings,
-    race::{RaceState, rival_spawn},
+    race::{RaceOutcome, RaceState, rival_spawn},
     score::{CollisionEvent, Results, RunMetrics},
-    vehicle::{HoverVehicle, VehicleTickResult, resolve_mower_contact, surface_distance},
+    vehicle::{
+        HoverVehicle, VehicleTickResult, VehicleTransform, resolve_mower_contact, surface_distance,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,16 +110,29 @@ impl RunRecorder {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RunEvent {
-    GrassCut { weight: f64 },
+    GrassCut {
+        weight: f64,
+    },
     RockScrape,
-    SubstantialCollision { impulse: f32 },
+    SubstantialCollision {
+        impulse: f32,
+    },
     Recovered,
     CoverageMilestone(u8),
     CompletionAvailable,
     TutorialAdvanced(TutorialStage),
-    RivalGrassCut { weight: f64 },
+    RivalGrassCut {
+        weight: f64,
+    },
     RivalRecovered,
-    MowerBump { impulse: f32, position: Vec3 },
+    RivalDefeated {
+        transform: VehicleTransform,
+        velocity: Vec3,
+    },
+    MowerBump {
+        impulse: f32,
+        position: Vec3,
+    },
 }
 
 #[derive(Debug)]
@@ -275,7 +290,7 @@ impl RunState {
         if self.mode == GameMode::Standard {
             self.metrics.elapsed_seconds = self.simulation_seconds
                 + self.metrics.recoveries as f32 * self.job_config.recovery_time_penalty;
-        } else if self.mode == GameMode::TurfRace {
+        } else if self.mode == GameMode::TurfRace && !self.is_victory_lap() {
             self.metrics.elapsed_seconds = self.simulation_seconds;
         }
         self.metrics.distance_traveled += tick.traveled_distance;
@@ -294,14 +309,25 @@ impl RunState {
             }
         }
         self.metrics.coverage = self.mowing.coverage();
-        self.update_objectives();
         if let Some(race) = &mut self.race {
-            race.update_score(&self.mowing);
-            self.metrics.coverage = race.player_coverage;
-            if race.outcome.is_some() {
-                self.active = false;
+            race.update_score(&self.mowing, self.simulation_seconds);
+            if race.outcome == Some(RaceOutcome::PlayerWon) {
+                // Take the final live pose once; the same player, terrain, and
+                // cut field continue seamlessly into solo mowing.
+                if let Some(rival) = self.rival.take() {
+                    self.recent_events.push(RunEvent::RivalDefeated {
+                        transform: rival.state.transform,
+                        velocity: rival.state.linear_velocity,
+                    });
+                }
+            } else {
+                self.metrics.coverage = race.player_coverage;
+                if race.outcome.is_some() {
+                    self.active = false;
+                }
             }
         }
+        self.update_objectives();
         self.update_tutorial(input, accessibility);
         self.camera.update(
             &self.planet,
@@ -357,7 +383,7 @@ impl RunState {
             cut_delta: self.vehicle_tuning.cut_rate_per_second * cutter_seconds,
             recent_epoch: ((self.simulation_seconds * 30.0) as u32 & 0xff) as u8,
         };
-        let result = if self.mode == GameMode::TurfRace {
+        let result = if self.mode == GameMode::TurfRace && !self.is_victory_lap() {
             self.mowing.stamp_owned(stamp, 1)
         } else {
             self.mowing.stamp(stamp)
@@ -413,7 +439,7 @@ impl RunState {
     }
 
     fn update_objectives(&mut self) {
-        let coverage = if self.mode == GameMode::TurfRace {
+        let coverage = if self.mode == GameMode::TurfRace && !self.is_victory_lap() {
             self.mowing.owned_coverage(1)
         } else {
             self.mowing.coverage()
@@ -501,6 +527,17 @@ impl RunState {
             self.tutorial_stage_seconds = 0.0;
             self.recent_events.push(RunEvent::TutorialAdvanced(next));
         }
+    }
+
+    /// The completed player win continues as solo mowing on the current lawn.
+    /// Keeping the race mode and result allows Restart to begin a fresh rematch.
+    #[must_use]
+    pub fn is_victory_lap(&self) -> bool {
+        self.mode == GameMode::TurfRace
+            && self
+                .race
+                .as_ref()
+                .is_some_and(|race| race.outcome == Some(RaceOutcome::PlayerWon))
     }
 
     #[must_use]
@@ -624,6 +661,74 @@ mod tests {
             &AccessibilitySettings::default(),
             false,
         )
+    }
+
+    #[test]
+    fn defeat_event_captures_the_rivals_final_simulated_pose_and_velocity() {
+        let accessibility = AccessibilitySettings::default();
+        let mut run = run(GameMode::TurfRace);
+        run.mowing.stamp_owned(
+            MowingStamp {
+                from: Vec3::X,
+                to: Vec3::X,
+                comb_direction: Vec3::Y,
+                deck_width: std::f32::consts::TAU * run.planet.config.base_radius,
+                cut_delta: 1.0,
+                recent_epoch: 0,
+            },
+            1,
+        );
+        let spawn = rival_spawn(&run.planet);
+        assert!(
+            spawn
+                .position
+                .distance(run.vehicle.state.transform.position)
+                > 3.0
+        );
+        let mut expected_rival = HoverVehicle::from_spawn(&run.planet, spawn, &run.vehicle_tuning);
+        let mut expected_race = RaceState::new(&run.planet);
+        let input = expected_race.ai.drive(
+            &run.planet,
+            &run.mowing,
+            &expected_rival.state,
+            &run.vehicle.state,
+        );
+        expected_rival.tick(
+            &run.planet,
+            &run.vehicle_tuning,
+            input,
+            expected_rival.state.transform.forward,
+            accessibility.boost_enabled,
+            FIXED_DT,
+        );
+        run.tick(InputSnapshot::default(), &accessibility);
+        let expected = RunEvent::RivalDefeated {
+            transform: expected_rival.state.transform,
+            velocity: expected_rival.state.linear_velocity,
+        };
+        assert!(expected_rival.state.speed() > 0.0);
+        assert_ne!(expected_rival.state.transform.position, spawn.position);
+        assert!(run.events().contains(&expected));
+        assert!(run.rival.is_none() && run.is_victory_lap());
+        // Several fixed ticks can share one render frame. Keep the event in
+        // that frame, but never enqueue a second defeat during catch-up ticks.
+        for _ in 0..8 {
+            run.tick(InputSnapshot::default(), &accessibility);
+        }
+        assert_eq!(
+            run.events()
+                .iter()
+                .filter(|event| matches!(event, RunEvent::RivalDefeated { .. }))
+                .count(),
+            1
+        );
+        run.clear_frame_events();
+        run.tick(InputSnapshot::default(), &accessibility);
+        assert!(
+            !run.events()
+                .iter()
+                .any(|event| matches!(event, RunEvent::RivalDefeated { .. }))
+        );
     }
 
     #[test]

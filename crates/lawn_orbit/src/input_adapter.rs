@@ -367,6 +367,10 @@ impl InputAdapter {
         let mut duration_ms = 0_u32;
         for event in run.events() {
             match event {
+                RunEvent::RivalDefeated { .. } => {
+                    strength = strength.max(0.35);
+                    duration_ms = duration_ms.max(240);
+                }
                 RunEvent::MowerBump { impulse, .. } => {
                     strength = strength.max((impulse / 18.0).clamp(0.25, 0.6));
                     duration_ms = duration_ms.max(95);

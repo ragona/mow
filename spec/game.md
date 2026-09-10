@@ -102,7 +102,7 @@ There is no death. Falling away from the surface, becoming stuck, or overturning
 1. **Generate and survey:** A seed produces the planet. The editor reveals its mountain groups, open lawns, and routes. Choose Turf Race (the default) or Free Mow, then enter through a brief, skippable camera approach.
 2. **Mow and claim:** Drive freely with an always-active deck. In Turf Race, the first counted cut claims each patch permanently for that mower.
 3. **Route and contest:** Seek fresh grass around rock faces and through passes. Boost toward productive patches or bump the rival off its line; recutting either mower's trail earns nothing.
-4. **Finish or explore:** The first racer past half of the mowable area wins and opens the result card. Free Mow has no forced ending or submission action.
+4. **Finish or explore:** The first racer past half of the mowable area wins. A player win opens a dismissible card while driving continues into a solo victory lap; a rival win or draw stops at results. Free Mow has no forced ending or submission action.
 5. **Replay:** Rematch on the same planet, regrow a Free Mow lawn, generate a new seed, or return to the world editor.
 
 ---
@@ -376,7 +376,9 @@ The rival periodically plans routes through a seam-safe graph of traversable sur
 
 Swept bumper contacts keep the mowers from passing through each other. Separation and shoves follow the local tangent surface and preserve grounded movement. Bumping causes no damage, time penalty, or loss of claimed territory; its value is changing the rival's route.
 
-A majority immediately freezes the simulation and opens a win/loss result card; exhaustion can open a draw card. Results show both shares, active time, and bump count, with Rematch, World editor, and New random planet actions. Rematching preserves the generated planet and resets both mowers, ownership, and grass. Pausing freezes both racers. Race results do not submit legacy jobs or save star ratings.
+A player majority immediately records the result and begins a victory lap without resetting the mower, camera, or lawn. The rival disappears in a brief burst of blue/cream fragments, cyan glints, grass, and dust. The victory card stays visible while the player continues driving and cutting; Keep mowing dismisses it. The solo-style HUD shows total lawn coverage, while the final race shares, time, and bump count remain fixed. Reduced motion and particle settings soften the celebration.
+
+Rival victories and exhausted draws freeze the simulation and open their results screen. Result cards offer Rematch, World editor, and New random planet actions. Rematching preserves the generated planet and resets both mowers, ownership, and grass. Pausing freezes play, including victory laps. Race results do not submit legacy jobs or save star ratings.
 
 ### 10.2 Free Mow
 
@@ -1044,6 +1046,7 @@ The MVP is complete when all of the following are true:
 - The rival routes through traversable terrain toward fresh grass using the same movement and cutting rules.
 - Harmless swept bumper shoves keep contacts grounded without damage or lost ownership.
 - A shared scoreboard, rival direction marker, and win/loss/draw results explain the race and offer a rematch.
+- Player victories preserve driving and cutting with a dismissible win card, a defeated-rival burst, and fixed final race figures during the victory lap.
 - Substantial collisions with mountain terrain are detected and reported as feedback, not penalties.
 - Pausing freezes both racers; restarting resets both mowers, all ownership, and grass state.
 - Rematching or regrowing preserves the seed and world shape; generating a new planet changes the seed and retains the selected mode.

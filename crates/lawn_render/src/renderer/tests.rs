@@ -184,23 +184,31 @@ fn grass_horizon_retains_elevated_roots_and_blades() {
 #[test]
 #[ignore = "requires a working wgpu graphics adapter"]
 fn gpu_smoke_renders_all_passes_at_supported_sample_counts() {
-    run_gpu_smoke(false);
+    run_gpu_smoke(false, false);
 }
 
 #[test]
 #[ignore = "requires a working wgpu graphics adapter"]
 fn gpu_smoke_race_renders_both_mowers_at_supported_sample_counts() {
-    run_gpu_smoke(true);
+    run_gpu_smoke(true, false);
 }
 
-fn run_gpu_smoke(force_race: bool) {
+#[test]
+#[ignore = "requires a working wgpu graphics adapter"]
+fn gpu_smoke_victory_renders_burst_without_a_live_rival() {
+    run_gpu_smoke(true, true);
+}
+
+fn run_gpu_smoke(force_race: bool, force_victory: bool) {
     pollster::block_on(async {
         // Optional art references use the same real render passes as the smoke
         // check, with shipping density and a repeatable camera/planet recipe.
         let capture_dir = std::env::var_os("LAWN_CAPTURE_DIR").map(std::path::PathBuf::from);
-        let capture_view = std::env::var("LAWN_CAPTURE_VIEW").unwrap_or_else(|_| "day".into());
+        let capture_view = std::env::var("LAWN_CAPTURE_VIEW")
+            .unwrap_or_else(|_| if force_victory { "victory" } else { "day" }.into());
         let capture = capture_dir.is_some();
-        let race = force_race || matches!(capture_view.as_str(), "race" | "bumper");
+        let victory = capture_view.starts_with("victory");
+        let race = force_race || matches!(capture_view.as_str(), "race" | "bumper") || victory;
         let mowing_reference = capture
             && ["stripes", "crosscut", "curve"]
                 .iter()
@@ -352,6 +360,15 @@ fn run_gpu_smoke(force_race: bool) {
         if race {
             prepare_race_reference(&mut run, capture_view == "bumper");
         }
+        // A victory capture deliberately has no live rival. All fragments
+        // must come from its captured event pose; no model/wash may remain.
+        let defeated = if victory {
+            run.rival
+                .take()
+                .map(|rival| (rival.state.transform, rival.state.linear_velocity))
+        } else {
+            None
+        };
         let mowing_camera =
             mowing_reference.then(|| prepare_mowing_reference(&mut run, &capture_view));
         if benchmark && scene == "mown" {
@@ -365,9 +382,15 @@ fn run_gpu_smoke(force_race: bool) {
         let mut interaction = GrassInteraction::new(&device, run.planet.config.base_radius);
         let mut particles = ClippingParticles::new(&device);
         particles.update(&queue, &run, false);
-        if capture {
+        if capture || victory {
             use lawn_core::run::RunEvent;
             let event = match capture_view.as_str() {
+                "victory" | "victory-reduced" => {
+                    defeated.map(|(transform, velocity)| RunEvent::RivalDefeated {
+                        transform,
+                        velocity,
+                    })
+                }
                 "bumper" => Some(RunEvent::MowerBump {
                     impulse: 8.0,
                     position: (run.vehicle.state.transform.position
@@ -380,7 +403,7 @@ fn run_gpu_smoke(force_race: bool) {
                 _ => None,
             };
             if let Some(event) = event {
-                particles.preview_event(&queue, &run, event);
+                particles.preview_event(&queue, &run, event, capture_view == "victory-reduced");
             }
         }
         assert!(
@@ -445,7 +468,12 @@ fn run_gpu_smoke(force_race: bool) {
         );
         let (camera, look_at) = if race {
             let player = run.vehicle.state.transform;
-            let rival = run.rival.as_ref().unwrap().state.transform;
+            let rival = run
+                .rival
+                .as_ref()
+                .map(|rival| rival.state.transform)
+                .or_else(|| defeated.map(|(transform, _)| transform))
+                .unwrap();
             let center = (player.position + rival.position) * 0.5;
             let up = center.normalize();
             (
@@ -884,7 +912,14 @@ fn run_gpu_smoke(force_race: bool) {
                     if race {
                         for (position, blue) in [
                             (run.vehicle.state.transform.position, false),
-                            (run.rival.as_ref().unwrap().state.transform.position, true),
+                            (
+                                run.rival
+                                    .as_ref()
+                                    .map(|rival| rival.state.transform.position)
+                                    .or_else(|| defeated.map(|(transform, _)| transform.position))
+                                    .unwrap(),
+                                true,
+                            ),
                         ] {
                             let ndc = camera_projection.project_point3(position);
                             let center_x = (ndc.x * 0.5 + 0.5) * width as f32;

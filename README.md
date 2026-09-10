@@ -76,8 +76,12 @@ mowers along the surface, so a timely bump can disrupt a route without damage or
 lost territory. Coral and blue shares grow across a shared top bar, with unclaimed
 grass between them; a marker helps locate the rival on the far side of the globe.
 The result card opens automatically and offers a rematch on the same planet,
-the world editor, or a new random planet. Pausing freezes both racers, and
-restarting clears both scores and regrows the lawn.
+the world editor, or a new random planet. Winning also starts a victory lap:
+the rival bursts into colorful fragments, and you can keep driving and cutting
+with the win card open. Choose Keep mowing to dismiss it and enjoy the rest of
+the lawn; the final race score and time stay fixed. Losses and draws stop at
+the results screen. Pausing freezes play, and restarting clears both scores
+and regrows the lawn.
 
 **Free Mow** keeps the relaxed, solo sandbox and first-play tutorial. There is no
 rival, timer, rating, required completion, or forced result screen. Mow as much as

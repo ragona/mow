@@ -29,6 +29,8 @@ pub struct RaceState {
     pub player_coverage: f64,
     pub rival_coverage: f64,
     pub outcome: Option<RaceOutcome>,
+    /// Active simulation time when the race ended, retained during a victory lap.
+    pub finished_seconds: Option<f32>,
     pub bumps: u32,
     pub(crate) ai: RivalAi,
     pub(crate) bump_cooldown: f32,
@@ -41,13 +43,14 @@ impl RaceState {
             player_coverage: 0.0,
             rival_coverage: 0.0,
             outcome: None,
+            finished_seconds: None,
             bumps: 0,
             ai: RivalAi::new(planet),
             bump_cooldown: 0.0,
         }
     }
 
-    pub(crate) fn update_score(&mut self, mowing: &MowingField) {
+    pub(crate) fn update_score(&mut self, mowing: &MowingField, elapsed_seconds: f32) {
         if self.outcome.is_some() {
             return;
         }
@@ -62,6 +65,9 @@ impl RaceState {
         } else {
             None
         };
+        if self.outcome.is_some() {
+            self.finished_seconds = Some(elapsed_seconds);
+        }
     }
 }
 

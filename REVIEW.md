@@ -354,3 +354,34 @@ Text entry, modal/menu handling, remapping, and keyboard HUD activation remain
 covered. The intermittent native startup symptom was not reproduced in a
 controlled run; native keyboard checks were interrupted by concurrent user
 activity, so the automated regressions are the verification for this change.
+
+## Playable victory lap
+
+A player win now records the final race figures and continues the same live
+vehicle, camera, and cut field. The rival is removed once and emits its final
+pose and velocity for a celebratory burst of colored parts and lawn debris.
+The player can drive and mow while the victory card is open, dismiss it with
+Keep mowing, and revisit the result later. A solo-style coverage HUD tracks
+the rest of the lawn; final race shares, elapsed time, and bump count stay fixed.
+Gamepad players can dismiss or revisit the card through Pause without giving
+up movement or boost controls during play.
+
+Loss and draw results retain their stopped flow. A rematch recreates both
+mowers and clears the celebration and all mowing progress on the same planet.
+Victory particles use the existing bounded pool and soften under reduced
+particle/motion settings.
+
+Final review found that a skipped surface frame or an immediate pause could
+discard the one-shot defeat event. The renderer now retains its snapshot before
+surface acquisition and emits it on the first acquired, active frame. A per-run
+latch prevents duplicate bursts, and rematching clears it.
+
+Validation: all 212 ordinary workspace tests, formatting, and strict Clippy pass.
+All ten explicit renderer GPU checks and 28 UI references pass on Apple M2;
+the victory render check covers 1×/2×/4× MSAA and was rerun after the event
+delivery fix. Normal/reduced burst captures and victory UI layouts were visually
+inspected. Simulation and app regressions cross the actual majority threshold
+while driving, continue cutting with the card open, preserve final figures,
+exercise dismissal/reopening and gamepad pause navigation, and reset a rematch.
+A native player victory was not manually played through.
+The complete workspace release build passed.

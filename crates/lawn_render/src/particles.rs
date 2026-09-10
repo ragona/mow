@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use lawn_core::{
     run::{RunEvent, RunState},
-    vehicle::VehicleState,
+    vehicle::{VehicleState, VehicleTransform},
 };
 use wgpu::util::DeviceExt;
 
@@ -36,7 +36,7 @@ impl ParticleVertex {
 struct ParticleGpu {
     position_size: [f32; 4],
     velocity_life: [f32; 4],
-    // kind, stable variation, opacity, reserved
+    // kind, stable variation, opacity, fragment spin
     appearance: [f32; 4],
 }
 
@@ -63,6 +63,10 @@ enum ParticleKind {
     Dust,
     Recovery,
     Milestone,
+    BodyFragment,
+    CanopyFragment,
+    PodFragment,
+    Glint,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +79,7 @@ struct Particle {
     kind: ParticleKind,
     variation: f32,
     opacity: f32,
+    spin: f32,
 }
 
 impl Particle {
@@ -85,6 +90,10 @@ impl Particle {
             ParticleKind::Clipping => (3.2, 1.8),
             ParticleKind::Dust => (0.45, 3.4),
             ParticleKind::Recovery | ParticleKind::Milestone => (-0.15, 2.0),
+            ParticleKind::BodyFragment
+            | ParticleKind::CanopyFragment
+            | ParticleKind::PodFragment => (4.0, 0.9),
+            ParticleKind::Glint => (0.15, 2.0),
         };
         self.velocity -= radial * (gravity * dt);
         self.velocity *= (-drag * dt).exp();
@@ -101,6 +110,7 @@ struct EmissionBatch {
     recovery: usize,
     milestone: usize,
     bump: Option<(Vec3, usize)>,
+    defeat: Option<(VehicleTransform, Vec3)>,
 }
 
 #[derive(Debug, Default)]
@@ -109,9 +119,32 @@ struct ParticleEmission {
     last_seconds: Option<f32>,
     fractional_clippings: f32,
     fractional_dust: f32,
+    // A race has one defeat. Its snapshot can outlive the app's event buffer
+    // until a frame is acquired and unpaused; clear() starts a new delivery.
+    pending_defeat: Option<(VehicleTransform, Vec3)>,
+    defeat_seen: bool,
 }
 
 impl ParticleEmission {
+    fn retain_defeat(&mut self, events: &[RunEvent]) {
+        if self.rival || self.defeat_seen {
+            return;
+        }
+        for event in events {
+            if let RunEvent::RivalDefeated {
+                transform,
+                velocity,
+            } = *event
+                && transform.position.is_finite()
+                && velocity.is_finite()
+            {
+                self.pending_defeat = Some((transform, velocity));
+                self.defeat_seen = true;
+                break;
+            }
+        }
+    }
+
     fn sample(
         &mut self,
         seconds: f32,
@@ -121,6 +154,7 @@ impl ParticleEmission {
         speed: f32,
         deck_width: f32,
     ) -> EmissionBatch {
+        self.retain_defeat(events);
         let previous = self.last_seconds.replace(seconds);
         if !active || previous.is_some_and(|last| seconds < last) {
             self.fractional_clippings = 0.0;
@@ -129,11 +163,16 @@ impl ParticleEmission {
         }
         // Event buffers can survive another render or a pause. Advancing
         // simulation time, rather than the display clock, authorizes a batch.
+        // A retained victory may resume at the same simulation timestamp as
+        // the paused redraw. Only that durable event bypasses the time gate.
+        let mut batch = EmissionBatch {
+            defeat: self.pending_defeat.take(),
+            ..EmissionBatch::default()
+        };
         if previous == Some(seconds) {
-            return EmissionBatch::default();
+            return batch;
         }
         let dt = previous.map_or(1.0 / 60.0, |last| (seconds - last).clamp(0.0, 0.05));
-        let mut batch = EmissionBatch::default();
         let mut cut_area = 0.0;
         let mut scraping = false;
         for event in events {
@@ -205,6 +244,7 @@ impl ParticleEmission {
             batch.impact = 0;
             batch.milestone = 0;
             batch.bump = None;
+            // Defeat belongs to a different mower and survives player recovery.
         }
         batch
     }
@@ -262,6 +302,12 @@ impl ClippingParticles {
             },
             last_update: Instant::now(),
         }
+    }
+
+    /// Retain the one-shot victory before surface acquisition can skip a frame.
+    /// No particles are emitted or advanced here, including while paused.
+    pub(crate) fn retain_defeat_event(&mut self, events: &[RunEvent]) {
+        self.emission.retain_defeat(events);
     }
 
     pub fn update(&mut self, queue: &wgpu::Queue, run: &RunState, reduced: bool) {
@@ -329,7 +375,7 @@ impl ClippingParticles {
                     particle.kind as u8 as f32,
                     particle.variation,
                     particle.opacity,
-                    0.0,
+                    particle.spin,
                 ],
             }));
         queue.write_buffer(
@@ -341,19 +387,25 @@ impl ClippingParticles {
 
     /// Deterministic effect reference for the headless renderer capture test.
     #[cfg(test)]
-    pub(super) fn preview_event(&mut self, queue: &wgpu::Queue, run: &RunState, event: RunEvent) {
+    pub(super) fn preview_event(
+        &mut self,
+        queue: &wgpu::Queue,
+        run: &RunState,
+        event: RunEvent,
+        reduced: bool,
+    ) {
         self.clear();
         let batch = self.emission.sample(
             run.simulation_seconds,
             &[event],
             true,
-            false,
+            reduced,
             run.vehicle.state.speed().max(12.0),
             run.vehicle_tuning.mower_width,
         );
-        self.spawn(&run.vehicle.state, &batch, false);
+        self.spawn(&run.vehicle.state, &batch, reduced);
         for particle in &mut self.particles {
-            particle.advance(0.12);
+            particle.advance(if batch.defeat.is_some() { 0.24 } else { 0.12 });
         }
         self.upload(queue);
     }
@@ -395,9 +447,30 @@ impl ClippingParticles {
             (ParticleKind::Milestone, batch.milestone),
         ];
         let count = groups.iter().map(|(_, count)| count).sum::<usize>()
-            + batch.bump.map_or(0, |(_, count)| count);
+            + batch.bump.map_or(0, |(_, count)| count)
+            + if batch.defeat.is_some() {
+                defeat_groups(reduced).iter().map(|(_, count)| count).sum()
+            } else {
+                0
+            };
         let overflow = (self.particles.len() + count).saturating_sub(MAX_PARTICLES);
         self.particles.drain(..overflow.min(self.particles.len()));
+        if let Some((transform, velocity)) = batch.defeat {
+            for (kind, count) in defeat_groups(reduced) {
+                for index in 0..count {
+                    self.spawn_counter = self.spawn_counter.wrapping_add(1);
+                    self.particles.push(make_defeat_particle(
+                        transform,
+                        velocity,
+                        kind,
+                        self.spawn_counter,
+                        index,
+                        count,
+                        reduced,
+                    ));
+                }
+            }
+        }
         if let Some((position, count)) = batch.bump {
             for index in 0..count {
                 self.spawn_counter = self.spawn_counter.wrapping_add(1);
@@ -427,6 +500,106 @@ impl ClippingParticles {
     }
 }
 
+/// A single, bounded burst uses the existing quad buffer and particle draw.
+fn defeat_groups(reduced: bool) -> [(ParticleKind, usize); 6] {
+    [
+        (ParticleKind::BodyFragment, if reduced { 3 } else { 8 }),
+        (ParticleKind::CanopyFragment, if reduced { 2 } else { 6 }),
+        (ParticleKind::PodFragment, 4),
+        (ParticleKind::Glint, if reduced { 6 } else { 16 }),
+        (ParticleKind::Clipping, if reduced { 8 } else { 28 }),
+        (ParticleKind::Dust, if reduced { 4 } else { 10 }),
+    ]
+}
+
+fn make_defeat_particle(
+    transform: VehicleTransform,
+    velocity: Vec3,
+    kind: ParticleKind,
+    seed: u32,
+    index: usize,
+    count: usize,
+    reduced: bool,
+) -> Particle {
+    let up = transform.up;
+    let forward = transform.forward;
+    let right = forward.cross(up).normalize_or(Vec3::X);
+    let a = hash01(seed.wrapping_mul(0x9E37_79B9));
+    let b = hash01(seed.wrapping_mul(0x85EB_CA6B));
+    let angle = (index as f32 + a * 0.3) / count as f32 * std::f32::consts::TAU;
+    let mut direction = right * angle.cos() + forward * angle.sin();
+    let (offset, lift, speed, size, lifetime, opacity) = match kind {
+        ParticleKind::BodyFragment => (
+            direction * 0.68 + up * 0.04,
+            3.0 + b * 2.0,
+            2.5 + a * 1.2,
+            0.46 + b * 0.22,
+            1.10 + b * 0.24,
+            1.0,
+        ),
+        ParticleKind::CanopyFragment => (
+            direction * 0.30 + up * 0.46,
+            4.0 + b * 1.8,
+            2.0 + a,
+            0.36 + b * 0.20,
+            1.05 + b * 0.28,
+            1.0,
+        ),
+        ParticleKind::PodFragment => {
+            // Four recognizable discs start exactly at the model's pad centers.
+            let x = if index & 1 == 0 { -1.0 } else { 1.0 };
+            let z = if index & 2 == 0 { -1.0 } else { 1.0 };
+            let pad = (right * x + forward * z) * crate::mesh::HOVER_PAD_OFFSET;
+            direction = pad.normalize();
+            (
+                pad - up * 0.28,
+                3.2 + b * 1.2,
+                3.2,
+                0.56,
+                1.15 + b * 0.20,
+                1.0,
+            )
+        }
+        ParticleKind::Glint => (
+            direction * (0.5 + b * 0.5),
+            2.0 + b * 3.0,
+            3.0 + a * 1.6,
+            0.13 + b * 0.08,
+            0.64 + b * 0.25,
+            0.90,
+        ),
+        ParticleKind::Clipping => (
+            direction * (0.75 + b * 0.35) - up * 0.38,
+            1.8 + b * 2.2,
+            2.0 + a * 2.0,
+            0.08 + b * 0.07,
+            0.60 + b * 0.22,
+            0.90,
+        ),
+        ParticleKind::Dust => (
+            direction * 0.75 - up * 0.35,
+            0.6 + b,
+            1.2 + a,
+            0.32 + b * 0.22,
+            0.50 + b * 0.18,
+            0.45,
+        ),
+        ParticleKind::Recovery | ParticleKind::Milestone => unreachable!("not a defeat particle"),
+    };
+    let motion = if reduced { 0.32 } else { 1.0 };
+    Particle {
+        position: transform.position + offset,
+        velocity: (velocity.clamp_length_max(20.0) * 0.18 + direction * speed + up * lift) * motion,
+        size,
+        age: 0.0,
+        lifetime: lifetime * if reduced { 0.85 } else { 1.0 },
+        kind,
+        variation: a,
+        opacity: opacity * if reduced { 0.80 } else { 1.0 },
+        spin: if reduced { 0.0 } else { 1.0 },
+    }
+}
+
 fn make_bump_particle(
     position: Vec3,
     vehicle: &VehicleState,
@@ -450,6 +623,7 @@ fn make_bump_particle(
         kind: ParticleKind::Dust,
         variation,
         opacity: if reduced { 0.40 } else { 0.55 },
+        spin: 0.0,
     }
 }
 
@@ -489,6 +663,7 @@ fn make_particle(
                 kind,
                 variation: a,
                 opacity: 0.95,
+                spin: 0.0,
             }
         }
         ParticleKind::Dust => Particle {
@@ -502,6 +677,7 @@ fn make_particle(
             kind,
             variation: a,
             opacity: if impact { 0.42 } else { 0.28 },
+            spin: 0.0,
         },
         ParticleKind::Recovery | ParticleKind::Milestone => {
             // Evenly spaced motes make a readable arrival gesture without a
@@ -529,7 +705,14 @@ fn make_particle(
                 kind,
                 variation: a,
                 opacity: 0.72,
+                spin: 0.0,
             }
+        }
+        ParticleKind::BodyFragment
+        | ParticleKind::CanopyFragment
+        | ParticleKind::PodFragment
+        | ParticleKind::Glint => {
+            unreachable!("defeat fragments use their captured event pose")
         }
     };
     if reduced {
@@ -782,6 +965,183 @@ mod tests {
             assert!(full.velocity.is_finite());
             assert!(reduced.velocity.length() < full.velocity.length());
             assert!(reduced.opacity < full.opacity);
+        }
+    }
+
+    #[test]
+    fn defeat_uses_its_snapshot_once_even_with_player_recovery() {
+        let transform = VehicleTransform {
+            position: Vec3::new(18.0, 0.0, 0.0),
+            rotation: glam::Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2),
+            forward: Vec3::NEG_Z,
+            up: Vec3::X,
+        };
+        let velocity = Vec3::Z * 9.0;
+        let events = [
+            RunEvent::RivalDefeated {
+                transform,
+                velocity,
+            },
+            RunEvent::Recovered,
+            RunEvent::RivalGrassCut { weight: 5.0 },
+        ];
+        let mut emission = ParticleEmission::default();
+        let batch = emission.sample(1.0, &events, true, false, 0.0, 2.2);
+        assert_eq!(batch.defeat, Some((transform, velocity)));
+        assert_eq!(batch.recovery, 24);
+        assert_eq!(batch.clippings, 0);
+        assert_eq!(
+            emission.sample(1.0, &events, true, false, 0.0, 2.2),
+            EmissionBatch::default()
+        );
+        let mut rival = ParticleEmission {
+            rival: true,
+            ..ParticleEmission::default()
+        };
+        assert!(
+            rival
+                .sample(1.0, &events, true, false, 0.0, 2.2)
+                .defeat
+                .is_none()
+        );
+    }
+
+    fn defeat_event() -> RunEvent {
+        RunEvent::RivalDefeated {
+            transform: VehicleTransform {
+                position: Vec3::X * 18.0,
+                rotation: glam::Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2),
+                forward: Vec3::NEG_Z,
+                up: Vec3::X,
+            },
+            velocity: Vec3::Z * 9.0,
+        }
+    }
+
+    #[test]
+    fn retained_defeat_survives_failed_acquisitions_and_cleared_app_events() {
+        let event = defeat_event();
+        let mut emission = ParticleEmission::default();
+        emission.sample(0.9, &[], true, false, 0.0, 2.2);
+        // begin_frame retains before acquisition. A Timeout/Outdated/Lost
+        // returns without calling sample, and the app clears events next tick.
+        emission.retain_defeat(std::slice::from_ref(&event));
+        emission.retain_defeat(&[]);
+        emission.retain_defeat(&[]);
+        let delivered = emission.sample(1.2, &[], true, false, 0.0, 2.2);
+        let RunEvent::RivalDefeated {
+            transform,
+            velocity,
+        } = event
+        else {
+            unreachable!()
+        };
+        assert_eq!(delivered.defeat, Some((transform, velocity)));
+        assert_eq!(
+            emission.sample(1.2, &[], true, false, 0.0, 2.2),
+            EmissionBatch::default()
+        );
+        // Even a stale event seen again at a later simulation time cannot
+        // produce a second burst in this race.
+        assert_eq!(
+            emission.sample(1.3, &[event], true, false, 0.0, 2.2),
+            EmissionBatch::default()
+        );
+    }
+
+    #[test]
+    fn paused_victory_waits_for_resume_without_replaying_other_effects() {
+        let event = defeat_event();
+        let events = [
+            event.clone(),
+            RunEvent::GrassCut { weight: 2.0 },
+            RunEvent::Recovered,
+        ];
+        let mut emission = ParticleEmission::default();
+        emission.retain_defeat(&events);
+        assert_eq!(
+            emission.sample(1.0, &events, false, false, 12.0, 2.2),
+            EmissionBatch::default()
+        );
+        // Paused redraws have no events after the app update clears them.
+        assert_eq!(
+            emission.sample(1.0, &[], false, false, 12.0, 2.2),
+            EmissionBatch::default()
+        );
+        let resumed = emission.sample(1.0, &[], true, false, 12.0, 2.2);
+        let RunEvent::RivalDefeated {
+            transform,
+            velocity,
+        } = event
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            resumed,
+            EmissionBatch {
+                defeat: Some((transform, velocity)),
+                ..EmissionBatch::default()
+            }
+        );
+        assert_eq!(
+            emission.sample(1.1, &[], true, false, 12.0, 2.2),
+            EmissionBatch::default()
+        );
+        // Restart/upload clears the existing ParticleEmission, authorizing a
+        // fresh race even if its seed produces the identical defeat snapshot.
+        emission = ParticleEmission::default();
+        assert_eq!(
+            emission
+                .sample(0.1, &[event], true, false, 12.0, 2.2)
+                .defeat,
+            Some((transform, velocity))
+        );
+    }
+
+    #[test]
+    fn defeat_fragments_are_bounded_local_short_lived_and_calmer_when_reduced() {
+        let transform = VehicleTransform {
+            position: Vec3::Y * 18.0,
+            rotation: glam::Quat::IDENTITY,
+            forward: Vec3::NEG_Z,
+            up: Vec3::Y,
+        };
+        let full_count: usize = defeat_groups(false).iter().map(|(_, count)| count).sum();
+        let reduced_count: usize = defeat_groups(true).iter().map(|(_, count)| count).sum();
+        assert_eq!(full_count, 72);
+        assert_eq!(reduced_count, 27);
+        assert!(full_count < MAX_PARTICLES / 20);
+        for (kind, count) in defeat_groups(false) {
+            for index in 0..count {
+                let mut full = make_defeat_particle(
+                    transform,
+                    Vec3::Z * 18.0,
+                    kind,
+                    index as u32 + 1,
+                    index,
+                    count,
+                    false,
+                );
+                let reduced = make_defeat_particle(
+                    transform,
+                    Vec3::Z * 18.0,
+                    kind,
+                    index as u32 + 1,
+                    index,
+                    count,
+                    true,
+                );
+                assert!(full.position.distance(transform.position) < 1.3);
+                assert!(full.lifetime <= 1.4);
+                assert!(reduced.velocity.length() < full.velocity.length());
+                assert!(reduced.opacity < full.opacity);
+                assert_eq!(reduced.spin, 0.0);
+                for _ in 0..90 {
+                    full.advance(1.0 / 60.0);
+                    assert!(full.position.is_finite() && full.velocity.is_finite());
+                }
+                assert!(full.age > full.lifetime);
+            }
         }
     }
 }

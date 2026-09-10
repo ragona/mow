@@ -39,7 +39,9 @@ fn gpu_capture_garden_ui_references() {
                 "results",
                 "race",
                 "race-pause",
-                "race-result-win",
+                "race-victory",
+                "race-victory-lap",
+                "race-victory-pause",
                 "race-result-loss",
                 "race-result-draw",
             ] {
@@ -87,12 +89,27 @@ fn reference_app(scene: &str) -> LawnOrbitApp {
         let race = app.run.race.as_mut().unwrap();
         race.bumps = 3;
         (race.player_coverage, race.rival_coverage, race.outcome) = match scene {
-            "race-result-win" => (0.511, 0.413, Some(RaceOutcome::PlayerWon)),
+            "race-victory" | "race-victory-lap" | "race-victory-pause" => {
+                (0.511, 0.413, Some(RaceOutcome::PlayerWon))
+            }
             "race-result-loss" => (0.427, 0.501, Some(RaceOutcome::RivalWon)),
             "race-result-draw" => (0.5, 0.5, Some(RaceOutcome::Draw)),
             _ => (0.342, 0.299, None),
         };
-        app.run.active = race.outcome.is_none();
+        race.finished_seconds = race.outcome.map(|_| 72.4);
+        app.run.active = race.outcome.is_none() || race.outcome == Some(RaceOutcome::PlayerWon);
+        if app.run.is_victory_lap() {
+            app.run.rival = None;
+            app.run.simulation_seconds = 93.0;
+            app.victory_card_open = scene != "race-victory-lap";
+            let mut mowing = app.run.mowing.snapshot();
+            for (index, cell) in mowing.cells.iter_mut().enumerate() {
+                if index % 100 < 94 {
+                    *cell = lawn_core::mowing::PackedMowingCell(255);
+                }
+            }
+            app.run.mowing.restore(&mowing).unwrap();
+        }
         if scene == "race" {
             app.run.rival.as_mut().unwrap().state.transform.position =
                 -app.run.vehicle.state.transform.position;
@@ -101,9 +118,9 @@ fn reference_app(scene: &str) -> LawnOrbitApp {
     app.state = match scene {
         "title" => GameState::Title,
         "editor" => GameState::WorldEditor,
-        "gameplay" | "race" => GameState::Playing,
-        "pause" | "race-pause" => GameState::Paused,
-        "race-result-win" | "race-result-loss" | "race-result-draw" => GameState::Results,
+        "gameplay" | "race" | "race-victory" | "race-victory-lap" => GameState::Playing,
+        "pause" | "race-pause" | "race-victory-pause" => GameState::Paused,
+        "race-result-loss" | "race-result-draw" => GameState::Results,
         "settings" | "settings-bottom" => {
             app.settings_open = true;
             GameState::Title
@@ -231,7 +248,20 @@ fn capture_scene(
             "results" => &["A lovely day's work.", "Retry seed", "World editor"],
             "race" => &["YOU  34.2%", "29.9%  RIVAL", "Rival · far side"],
             "race-pause" => &["The race can wait.", "Resume", "Restart race"],
-            "race-result-win" => &["The lawn is yours!", "Rematch", "World editor"],
+            "race-victory" => &[
+                "The lawn is yours!",
+                "Keep mowing",
+                "Rematch",
+                "World editor",
+                "01:12.4",
+            ],
+            "race-victory-lap" => &["Race won · View result", "A little tidier."],
+            "race-victory-pause" => &[
+                "The lawn can wait.",
+                "Keep mowing",
+                "View race result",
+                "Rematch",
+            ],
             "race-result-loss" => &["A rematch, perhaps?", "Rematch", "World editor"],
             "race-result-draw" => &["An evenly shared lawn.", "Rematch", "World editor"],
             _ => unreachable!(),

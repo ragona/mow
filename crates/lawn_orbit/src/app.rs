@@ -65,6 +65,8 @@ enum UiCommand {
     ToggleFullscreen,
     ToggleFavorite(WorldSeed),
     SkipArrival,
+    KeepMowing,
+    ShowVictory,
 }
 
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
@@ -267,6 +269,7 @@ pub struct LawnOrbitApp {
     occluded: bool,
     surface_retry_at: Option<Instant>,
     results: Option<Results>,
+    victory_card_open: bool,
     pending_generation: Option<PendingGeneration>,
     preview_recipe: Option<WorldRecipe>,
     preview_attempt: Option<WorldRecipe>,
@@ -357,6 +360,7 @@ impl LawnOrbitApp {
             occluded: false,
             surface_retry_at: None,
             results: None,
+            victory_card_open: false,
             pending_generation: None,
             preview_recipe: None,
             preview_attempt: None,
@@ -485,6 +489,7 @@ impl LawnOrbitApp {
             return;
         }
         self.run.clear_frame_events();
+        let was_victory_lap = self.run.is_victory_lap();
         let input = &mut self.input;
         let run = &mut self.run;
         let controls = &self.profile.settings.controls;
@@ -505,8 +510,13 @@ impl LawnOrbitApp {
                 .as_ref()
                 .is_some_and(|race| race.outcome.is_some())
         {
-            self.finish_run();
-            return;
+            if !self.run.is_victory_lap() {
+                self.finish_run();
+                return;
+            }
+            if !was_victory_lap {
+                self.finish_run();
+            }
         }
         if self.run.tutorial_enabled
             && self.run.tutorial_stage == TutorialStage::Complete
@@ -569,6 +579,25 @@ impl LawnOrbitApp {
         }
     }
 
+    fn keep_mowing(&mut self) {
+        if self.run.is_victory_lap() {
+            self.victory_card_open = false;
+            self.clear_ui_keyboard_focus();
+            if self.state == GameState::Paused {
+                self.resume();
+            }
+        }
+    }
+
+    fn show_victory(&mut self) {
+        if self.run.is_victory_lap() {
+            self.victory_card_open = true;
+            if self.state == GameState::Paused {
+                self.resume();
+            }
+        }
+    }
+
     fn window_focus_changed(&mut self, focused: bool) {
         tracing::debug!(focused, state = ?self.state, "window focus changed");
         self.input.handle_window_event(
@@ -608,6 +637,13 @@ impl LawnOrbitApp {
 
     fn finish_run(&mut self) {
         if self.run.mode == GameMode::TurfRace {
+            if self.run.is_victory_lap() {
+                // The core has removed the rival, but driving and mowing keep
+                // their current camera, clock, velocity, and held input.
+                self.victory_card_open = true;
+                self.results = None;
+                return;
+            }
             if self
                 .run
                 .race
@@ -616,6 +652,7 @@ impl LawnOrbitApp {
             {
                 self.run.paused = true;
                 self.results = None;
+                self.victory_card_open = false;
                 self.state = GameState::Results;
                 self.scene_transition = None;
                 self.clock = FixedStepClock::default();
@@ -801,6 +838,7 @@ impl LawnOrbitApp {
     }
 
     fn enter_sandbox(&mut self) {
+        self.victory_card_open = false;
         let from = self.run.camera.state;
         let from_inset = if self.state == GameState::WorldEditor {
             EDITOR_SCENE_INSET
@@ -863,6 +901,7 @@ impl LawnOrbitApp {
     }
 
     fn enter_editor(&mut self) {
+        self.victory_card_open = false;
         let from = self.run.camera.state;
         let from_inset = if self.state == GameState::Title {
             TITLE_SCENE_INSET
@@ -1248,6 +1287,7 @@ impl LawnOrbitApp {
     }
 
     fn draw_hud(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
+        let victory_lap = self.run.is_victory_lap();
         let reduced_motion = self.profile.settings.accessibility.reduced_motion;
         let arrival = self.scene_transition.map_or(1.0, SceneTransition::fraction);
         let hud_opacity = if reduced_motion {
@@ -1273,7 +1313,7 @@ impl LawnOrbitApp {
             .show(context, |ui| {
                 ui.set_opacity(hud_opacity);
                 garden_card().inner_margin(12).show(ui, |ui| {
-                    if self.run.mode == GameMode::TurfRace {
+                    if self.run.mode == GameMode::TurfRace && !victory_lap {
                         ui.label(RichText::new("YOUR MOWER").size(11.0).color(GARDEN_MUTED));
                     } else {
                         coverage_dial(ui, coverage, accent);
@@ -1342,64 +1382,74 @@ impl LawnOrbitApp {
                         });
                     });
             });
-        if self.run.mode == GameMode::TurfRace {
+        if victory_lap {
+            self.draw_victory_hud(context, commands);
+        } else if self.run.mode == GameMode::TurfRace {
             self.draw_race_hud(context, hud_opacity);
-        } else if let Some((percent, age)) = self.hud_milestone {
-            egui::Area::new("milestone".into())
-                .anchor(Align2::CENTER_TOP, [0.0, 24.0])
-                .show(context, |ui| {
-                    let fade = (age / 0.15).min(1.0) * ((3.0 - age) / 0.4).min(1.0);
-                    ui.set_opacity(if reduced_motion { 1.0 } else { fade });
-                    garden_card().inner_margin(12).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-                            icon(ui.painter(), rect.center(), 20.0, Icon::Leaf, GARDEN_PINE);
-                            ui.label(
-                                RichText::new(match percent {
-                                    100 => "Every blade. Beautifully done.".to_owned(),
-                                    50 => "Half a world, freshly mown.".to_owned(),
-                                    _ => format!("{percent}% — a lovely little lawn."),
-                                })
-                                .font(display(20.0)),
-                            );
+        }
+        if self.run.mode != GameMode::TurfRace || victory_lap {
+            if let Some((percent, age)) = self.hud_milestone {
+                egui::Area::new("milestone".into())
+                    .anchor(Align2::CENTER_TOP, [0.0, 24.0])
+                    .show(context, |ui| {
+                        let fade = (age / 0.15).min(1.0) * ((3.0 - age) / 0.4).min(1.0);
+                        ui.set_opacity(if reduced_motion { 1.0 } else { fade });
+                        garden_card().inner_margin(12).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(22.0, 22.0),
+                                    egui::Sense::hover(),
+                                );
+                                icon(ui.painter(), rect.center(), 20.0, Icon::Leaf, GARDEN_PINE);
+                                ui.label(
+                                    RichText::new(match percent {
+                                        100 => "Every blade. Beautifully done.".to_owned(),
+                                        50 => "Half a world, freshly mown.".to_owned(),
+                                        _ => format!("{percent}% — a lovely little lawn."),
+                                    })
+                                    .font(display(20.0)),
+                                );
+                            });
                         });
                     });
-                });
-        } else if let Some(direction) = self.run.locator_direction() {
-            let camera = self.run.camera.state;
-            let camera_forward = (camera.target - camera.position).normalize_or(glam::Vec3::NEG_Z);
-            let screen_right = camera_forward.cross(camera.up).normalize_or(glam::Vec3::X);
-            let screen_up = screen_right.cross(camera_forward);
-            let forward = direction.dot(screen_up);
-            let side = direction.dot(screen_right);
-            egui::Area::new("locator".into())
-                .anchor(Align2::CENTER_TOP, [0.0, 24.0])
-                .show(context, |ui| {
-                    let size = if self.profile.settings.accessibility.enlarged_locator {
-                        27.0
-                    } else {
-                        18.0
-                    };
-                    garden_card().inner_margin(10).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-                            icon(
-                                ui.painter(),
-                                rect.center(),
-                                size,
-                                Icon::Arrow(side.atan2(forward)),
-                                GARDEN_PINE,
-                            );
-                            ui.label(
-                                RichText::new("A little grass this way")
-                                    .size(size * 0.72)
-                                    .color(GARDEN_PINE),
-                            );
+            } else if let Some(direction) = self.run.locator_direction() {
+                let camera = self.run.camera.state;
+                let camera_forward =
+                    (camera.target - camera.position).normalize_or(glam::Vec3::NEG_Z);
+                let screen_right = camera_forward.cross(camera.up).normalize_or(glam::Vec3::X);
+                let screen_up = screen_right.cross(camera_forward);
+                let forward = direction.dot(screen_up);
+                let side = direction.dot(screen_right);
+                egui::Area::new("locator".into())
+                    .anchor(Align2::CENTER_TOP, [0.0, 24.0])
+                    .show(context, |ui| {
+                        let size = if self.profile.settings.accessibility.enlarged_locator {
+                            27.0
+                        } else {
+                            18.0
+                        };
+                        garden_card().inner_margin(10).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(size, size),
+                                    egui::Sense::hover(),
+                                );
+                                icon(
+                                    ui.painter(),
+                                    rect.center(),
+                                    size,
+                                    Icon::Arrow(side.atan2(forward)),
+                                    GARDEN_PINE,
+                                );
+                                ui.label(
+                                    RichText::new("A little grass this way")
+                                        .size(size * 0.72)
+                                        .color(GARDEN_PINE),
+                                );
+                            });
                         });
                     });
-                });
+            }
         }
         if self.scene_transition.is_some() {
             egui::Area::new("arrival".into())
@@ -1449,6 +1499,7 @@ impl LawnOrbitApp {
     }
 
     fn draw_pause(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
+        let victory_lap = self.run.is_victory_lap();
         egui::Window::new("Paused")
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
@@ -1463,7 +1514,7 @@ impl LawnOrbitApp {
                         .color(GARDEN_MUTED),
                 );
                 ui.label(
-                    RichText::new(if self.run.mode == GameMode::TurfRace {
+                    RichText::new(if self.run.mode == GameMode::TurfRace && !victory_lap {
                         "The race can wait."
                     } else {
                         "The lawn can wait."
@@ -1495,14 +1546,34 @@ impl LawnOrbitApp {
                 }
                 ui.add_space(8.0);
                 ui.label("Hold Recover at any time if the mower is stuck or overturned.");
-                if garden_button(ui, "Resume", [300.0, 38.0], true).clicked() {
-                    commands.push(UiCommand::Resume);
+                let resume_button = garden_button(
+                    ui,
+                    if victory_lap { "Keep mowing" } else { "Resume" },
+                    [300.0, 38.0],
+                    true,
+                );
+                if self.input.last_device_label == "Gamepad"
+                    && !ui.ctx().egui_wants_keyboard_input()
+                {
+                    resume_button.request_focus();
+                }
+                if resume_button.clicked() {
+                    commands.push(if victory_lap {
+                        UiCommand::KeepMowing
+                    } else {
+                        UiCommand::Resume
+                    });
+                }
+                if victory_lap && ui.button("View race result").clicked() {
+                    commands.push(UiCommand::ShowVictory);
                 }
                 if ui.button("Settings & Accessibility").clicked() {
                     commands.push(UiCommand::OpenSettings);
                 }
                 if ui
-                    .button(if self.run.mode == GameMode::TurfRace {
+                    .button(if victory_lap {
+                        "Rematch"
+                    } else if self.run.mode == GameMode::TurfRace {
                         "Restart race"
                     } else {
                         "Regrow this planet"
@@ -1903,6 +1974,8 @@ impl LawnOrbitApp {
                 UiCommand::Resume => self.resume(),
                 UiCommand::Pause => self.pause(),
                 UiCommand::SkipArrival => self.finish_arrival(),
+                UiCommand::KeepMowing => self.keep_mowing(),
+                UiCommand::ShowVictory => self.show_victory(),
                 UiCommand::Restart => {
                     self.selected_mode = self.run.mode;
                     self.begin_selected_game();
@@ -2993,12 +3066,8 @@ mod tests {
     }
 
     #[test]
-    fn every_race_outcome_opens_results_without_job_ratings() {
-        for outcome in [
-            RaceOutcome::PlayerWon,
-            RaceOutcome::RivalWon,
-            RaceOutcome::Draw,
-        ] {
+    fn losses_and_draws_open_results_without_job_ratings() {
+        for outcome in [RaceOutcome::RivalWon, RaceOutcome::Draw] {
             let mut app = preview_app();
             app.profile_write_enabled = false;
             app.profile.settings.accessibility.reduced_motion = true;
@@ -3017,6 +3086,220 @@ mod tests {
             assert_eq!(app.run.race.as_ref().unwrap().outcome, None);
             assert!(app.run.active);
         }
+    }
+
+    fn win_moving_race() -> LawnOrbitApp {
+        use lawn_core::mowing::MowingStamp;
+        use winit::event::{DeviceId, ElementState, MouseButton};
+
+        let mut app = preview_app();
+        app.profile_write_enabled = false;
+        app.profile.settings.accessibility.reduced_motion = true;
+        app.begin_selected_game();
+        // Hold a real supported binding through the adapter, so a win that
+        // clears input would be caught without platform-specific KeyEvent data.
+        app.profile
+            .settings
+            .controls
+            .bindings
+            .get_mut(&Action::Accelerate)
+            .unwrap()
+            .push(Binding::MouseButton(2));
+        app.input.handle_window_event(
+            &WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+            },
+            &mut app.profile.settings.controls,
+        );
+        for _ in 0..60 {
+            app.update_simulation(Duration::from_millis(17));
+        }
+        let previous = app.run.vehicle.state.clone();
+        let camera = app.run.camera.state;
+        let radius = app.run.planet.config.base_radius;
+        let away = -previous.transform.position.normalize() * radius;
+        app.run.mowing.stamp_owned(
+            MowingStamp {
+                from: away,
+                to: away,
+                comb_direction: glam::Vec3::Y,
+                deck_width: 2.0 * radius * (1.8 - 1.5 / app.run.mowing.resolution() as f32),
+                cut_delta: 1.0,
+                recent_epoch: 0,
+            },
+            1,
+        );
+        assert!(app.run.mowing.owned_coverage(1) > 0.5);
+        assert!(!app.run.is_victory_lap());
+        app.update_simulation(Duration::from_millis(17));
+        assert!(app.run.is_victory_lap());
+        assert!(app.victory_card_open);
+        assert_eq!(app.state, GameState::Playing);
+        assert!(app.run.active && !app.run.paused);
+        assert!(app.run.rival.is_none());
+        assert!(app.scene_transition.is_none());
+        assert!(app.clock.interpolation_alpha() > 0.0);
+        assert!(app.run.vehicle.state.speed() > 1.0);
+        assert!(
+            app.run
+                .vehicle
+                .state
+                .transform
+                .position
+                .distance(previous.transform.position)
+                < 1.0
+        );
+        assert!(app.run.camera.state.position.distance(camera.position) < 1.0);
+        assert!(
+            app.input
+                .snapshot(
+                    &app.profile.settings.controls,
+                    &app.profile.settings.accessibility
+                )
+                .accelerate
+                > 0.9
+        );
+        assert_eq!(
+            app.run
+                .events()
+                .iter()
+                .filter(|event| matches!(event, RunEvent::RivalDefeated { .. }))
+                .count(),
+            1
+        );
+        app
+    }
+
+    #[test]
+    fn victory_card_keeps_live_mowing_and_frozen_results_then_dismisses_once() {
+        let mut app = win_moving_race();
+        let finished = app.run.race.as_ref().unwrap();
+        let results = (
+            finished.player_coverage,
+            finished.rival_coverage,
+            finished.finished_seconds,
+            finished.bumps,
+        );
+        let coverage = app.run.mowing.coverage();
+        let seconds = app.run.simulation_seconds;
+        for _ in 0..60 {
+            app.update_simulation(Duration::from_millis(17));
+        }
+        assert!(app.victory_card_open);
+        assert!(app.run.mowing.coverage() > coverage);
+        assert!(app.run.simulation_seconds > seconds + 1.0);
+        let finished = app.run.race.as_ref().unwrap();
+        assert_eq!(
+            (
+                finished.player_coverage,
+                finished.rival_coverage,
+                finished.finished_seconds,
+                finished.bumps
+            ),
+            results
+        );
+        assert!(app.results.is_none() && app.profile.records.is_empty());
+        assert!(
+            !app.run
+                .events()
+                .iter()
+                .any(|event| matches!(event, RunEvent::RivalDefeated { .. }))
+        );
+        app.keep_mowing();
+        for _ in 0..3 {
+            app.update_simulation(Duration::from_millis(17));
+        }
+        assert!(!app.victory_card_open);
+        assert_eq!(app.state, GameState::Playing);
+        assert!(
+            app.input
+                .snapshot(
+                    &app.profile.settings.controls,
+                    &app.profile.settings.accessibility
+                )
+                .accelerate
+                > 0.9
+        );
+        app.show_victory();
+        assert!(app.victory_card_open);
+    }
+
+    #[test]
+    fn victory_pause_rematch_and_mode_change_reset_presentation_correctly() {
+        let mut app = win_moving_race();
+        let planet = app.run.planet.deterministic_hash;
+        app.pause();
+        let seconds = app.run.simulation_seconds;
+        app.update_simulation(Duration::from_secs(1));
+        assert_eq!(app.run.simulation_seconds, seconds);
+        app.keep_mowing();
+        assert_eq!(app.state, GameState::Playing);
+        assert!(!app.run.paused && !app.victory_card_open);
+        app.pause();
+        app.show_victory();
+        assert_eq!(app.state, GameState::Playing);
+        assert!(app.victory_card_open);
+        app.begin_selected_game();
+        assert!(!app.victory_card_open);
+        assert!(!app.run.is_victory_lap());
+        assert!(app.run.rival.is_some());
+        assert_eq!(app.run.race.as_ref().unwrap().finished_seconds, None);
+        assert_eq!(app.run.mowing.coverage(), 0.0);
+        assert_eq!(app.run.planet.deterministic_hash, planet);
+        app.victory_card_open = true;
+        app.enter_editor();
+        assert!(!app.victory_card_open);
+        app.selected_mode = GameMode::FreeMow;
+        app.begin_selected_game();
+        assert!(!app.victory_card_open);
+        assert!(app.run.race.is_none() && app.run.rival.is_none());
+    }
+
+    #[test]
+    fn victory_buttons_preserve_driving_and_gamepad_pause_can_dismiss_the_card() {
+        use winit::keyboard::KeyCode;
+
+        let mut app = win_moving_race();
+        let context = egui::Context::default();
+        configure_egui_style(&context);
+        draw_keyboard_test_frame(&mut app, &context, Vec::new());
+        draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Tab));
+        draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Tab));
+        assert!(context.egui_wants_keyboard_input());
+        assert!(app.gameplay_owns_key(
+            PhysicalKey::Code(KeyCode::KeyW),
+            context.text_edit_focused()
+        ));
+        assert!(app.gameplay_owns_key(
+            PhysicalKey::Code(KeyCode::Space),
+            context.text_edit_focused()
+        ));
+        let commands =
+            draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Enter));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, UiCommand::KeepMowing))
+        );
+
+        app.pause();
+        let context = egui::Context::default();
+        configure_egui_style(&context);
+        app.input.last_device_label = "Gamepad";
+        draw_keyboard_test_frame(&mut app, &context, Vec::new());
+        assert!(context.egui_wants_keyboard_input());
+        let commands =
+            draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Enter));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, UiCommand::KeepMowing))
+        );
+        app.keep_mowing();
+        assert_eq!(app.state, GameState::Playing);
+        assert!(!app.victory_card_open);
     }
 
     #[test]

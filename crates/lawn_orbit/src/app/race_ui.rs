@@ -11,6 +11,83 @@ use super::{
 };
 
 impl LawnOrbitApp {
+    pub(super) fn draw_victory_hud(&self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
+        if self.victory_card_open {
+            let race = self
+                .run
+                .race
+                .as_ref()
+                .expect("victory lap has race results");
+            egui::Window::new("Victory lap")
+                .id(egui::Id::new("victory-lap"))
+                .anchor(Align2::RIGHT_CENTER, [-18.0, 0.0])
+                .collapsible(false)
+                .resizable(false)
+                .title_bar(false)
+                .frame(garden_card().inner_margin(16))
+                .show(context, |ui| {
+                    ui.set_width(270.0);
+                    ui.label(
+                        RichText::new("TURF RACE · YOU WIN")
+                            .size(11.0)
+                            .color(GARDEN_MUTED),
+                    );
+                    ui.label(RichText::new("The lawn is yours!").font(display(28.0)));
+                    ui.label(
+                        RichText::new("Your rival is out. Enjoy a little victory lap.")
+                            .size(13.0)
+                            .color(GARDEN_MUTED),
+                    );
+                    ui.add_space(8.0);
+                    race_meter(ui, 270.0, race.player_coverage, race.rival_coverage);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format_time(
+                                race.finished_seconds.unwrap_or(self.run.simulation_seconds),
+                            ))
+                            .font(display(22.0)),
+                        );
+                        ui.label(
+                            RichText::new(format!("race time · {} bumps", race.bumps))
+                                .size(11.0)
+                                .color(GARDEN_MUTED),
+                        );
+                    });
+                    ui.label(
+                        RichText::new("Keep driving. The remaining grass is yours to mow.")
+                            .size(12.0)
+                            .color(GARDEN_MUTED),
+                    );
+                    ui.add_space(8.0);
+                    if garden_button(ui, "Keep mowing", [270.0, 36.0], true).clicked() {
+                        commands.push(UiCommand::KeepMowing);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Rematch").clicked() {
+                            commands.push(UiCommand::Restart);
+                        }
+                        if ui.button("World editor").clicked() {
+                            commands.push(UiCommand::ReturnToEditor);
+                        }
+                    });
+                    if ui.button("New random planet").clicked() {
+                        commands.push(UiCommand::Random);
+                    }
+                });
+        } else {
+            egui::Area::new("victory-status".into())
+                .anchor(Align2::LEFT_BOTTOM, [18.0, -18.0])
+                .show(context, |ui| {
+                    garden_card().inner_margin(8).show(ui, |ui| {
+                        if ui.button("Race won · View result").clicked() {
+                            commands.push(UiCommand::ShowVictory);
+                        }
+                    });
+                });
+        }
+    }
+
     pub(super) fn draw_race_hud(&self, context: &egui::Context, opacity: f32) {
         let Some(race) = &self.run.race else { return };
         egui::Area::new("race-score".into())
@@ -149,7 +226,10 @@ impl LawnOrbitApp {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(format_time(self.run.simulation_seconds)).font(display(23.0)),
+                        RichText::new(format_time(
+                            race.finished_seconds.unwrap_or(self.run.simulation_seconds),
+                        ))
+                        .font(display(23.0)),
                     );
                     ui.label(
                         RichText::new(format!("elapsed · {} mower bumps", race.bumps))

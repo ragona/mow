@@ -47,14 +47,21 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     // Lifetime freezes along with the CPU simulation when paused. Neither
     // particle orientation nor the soft occasion accents use the scene clock.
     let tumble = (1.0 - life) * (5.0 + variation * 4.0) + variation * 6.2831853;
-    let angle = select(0.0, sin(tumble) * 0.8, kind == 0u);
+    let fragment = kind >= 4u && kind <= 6u;
+    var angle = select(0.0, sin(tumble) * 0.8, kind == 0u);
+    if fragment {
+        angle = variation * 6.2831853 + (1.0 - life) * (7.0 + variation * 5.0) * input.appearance.w;
+    }
     let crosswise = side * cos(angle) + upright * sin(angle);
     let along = upright * cos(angle) - side * sin(angle);
     let taper = select(1.0, mix(1.0, 0.5, input.local.y), kind == 0u);
     let length = select(1.0, 1.8, kind == 0u);
     let expansion = select(1.0, 1.0 + (1.0 - life) * 0.75, kind == 1u);
+    // Modest foreshortening makes the cut metal pieces tumble as facets;
+    // reduced motion holds their initial orientation and width still.
+    let turning = select(1.0, 0.55 + abs(cos(angle * 1.4)) * 0.45, fragment);
     let position = input.position_size.xyz
-        + crosswise * input.local.x * input.position_size.w * taper * expansion
+        + crosswise * input.local.x * input.position_size.w * taper * expansion * turning
         + along * (input.local.y - 0.5) * input.position_size.w * length * expansion;
     var output: VertexOutput;
     output.clip_position = frame.view_proj * vec4<f32>(position, 1.0);
@@ -85,6 +92,34 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let soft_disc = 1.0 - smoothstep(0.08, 1.0, radius);
         let arrival = smoothstep(0.0, 0.10, 1.0 - input.life);
         return vec4<f32>(stone * light, soft_disc * fade * arrival * input.opacity);
+    }
+    if input.kind == 4u || input.kind == 5u {
+        // Clipped corners and two broad tones suggest body panels, rather
+        // than a flat square confetti sprite or a lingering intact mower.
+        let edge = max(abs(local.x), abs(local.y));
+        let corner = abs(local.x) + abs(local.y);
+        let shape = (1.0 - smoothstep(0.88, 1.0, edge))
+            * (1.0 - smoothstep(1.35, 1.58, corner));
+        let blue = mix(vec3<f32>(0.10, 0.20, 0.65), vec3<f32>(0.30, 0.45, 0.92), input.variation);
+        let cream = vec3<f32>(0.76, 0.81, 0.96);
+        let base = select(blue, cream, input.kind == 5u);
+        let facet = select(0.76, 1.15, local.x * 0.6 + local.y > 0.08);
+        let bevel = smoothstep(0.67, 0.85, edge) * 0.18;
+        return vec4<f32>(base * light * facet + vec3<f32>(bevel), shape * fade * input.opacity);
+    }
+    if input.kind == 6u {
+        let disc = 1.0 - smoothstep(0.86, 1.0, radius);
+        let ring = smoothstep(0.60, 0.74, radius);
+        let body = vec3<f32>(0.075, 0.12, 0.23) * light;
+        let pad_light = vec3<f32>(0.48, 0.67, 1.5);
+        return vec4<f32>(mix(body, pad_light, ring), disc * fade * input.opacity);
+    }
+    if input.kind == 7u {
+        let diamond = abs(local.x) + abs(local.y);
+        let shape = 1.0 - smoothstep(0.48, 1.0, diamond);
+        let core = 1.0 - smoothstep(0.05, 0.35, radius);
+        let color = mix(vec3<f32>(0.20, 1.00, 1.18), vec3<f32>(0.80, 1.30, 1.45), core);
+        return vec4<f32>(color, shape * fade * input.opacity);
     }
     let soft_disc = 1.0 - smoothstep(0.35, 1.0, radius);
     let core = 1.0 - smoothstep(0.0, 0.40, radius);
