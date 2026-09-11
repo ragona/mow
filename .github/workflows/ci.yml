@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: Native checks and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native
+      - name: Install Linux window and gamepad dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libudev-dev libxkbcommon-dev
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint native targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run native tests
+        run: cargo test --workspace --locked
+
+  wasm:
+    name: WebGPU and WASM build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - name: Lint the browser target
+        run: cargo clippy -p lawn_orbit --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      - name: Install the locked wasm-bindgen CLI
+        shell: bash
+        run: |
+          bindgen_version=$(python3 -c 'import tomllib; lock = tomllib.load(open("Cargo.lock", "rb")); print(next(p["version"] for p in lock["package"] if p["name"] == "wasm-bindgen"))')
+          if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != "wasm-bindgen $bindgen_version" ]]; then
+            cargo install wasm-bindgen-cli --version "$bindgen_version" --locked --force
+          fi
+      - name: Build the browser distribution with the development CLI
+        run: cargo web build
+      - name: Keep the deployable static files
+        uses: actions/upload-artifact@v7
+        with:
+          name: lawn-orbit-web
+          path: target/web/
+          if-no-files-found: error
+          retention-days: 7

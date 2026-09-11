@@ -11,7 +11,7 @@ use crate::{
     config::{JobConfig, VehicleTuning},
     input::InputSnapshot,
     mowing::{MowingField, MowingStamp},
-    planet::Planet,
+    planet::{GenerationError, Planet, PlanetGenerator, WorldSeed},
     profile::AccessibilitySettings,
     race::{RaceOutcome, RaceState, rival_spawn},
     score::{CollisionEvent, Results, RunMetrics},
@@ -162,6 +162,53 @@ pub struct RunState {
     locator_cache: Cell<(f32, Option<Vec3>)>,
 }
 
+/// A generated world and its fully prepared mowing field, ready to cross a
+/// worker boundary. Physics and camera state are initialized by the receiving
+/// thread; the expensive per-cell area calculation is performed only once.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreparedWorld {
+    planet: Planet,
+    mowing: MowingField,
+}
+
+impl PreparedWorld {
+    /// Generates the same world data used by [`RunState::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the generator's validation error if the world cannot be built.
+    pub fn generate(generator: &PlanetGenerator, seed: WorldSeed) -> Result<Self, GenerationError> {
+        Ok(Self::from_planet(generator.generate(seed)?))
+    }
+
+    #[must_use]
+    pub fn from_planet(planet: Planet) -> Self {
+        let mowing = MowingField::from_planet(&planet);
+        Self { planet, mowing }
+    }
+
+    /// Finishes the inexpensive runtime setup without recalculating mowing
+    /// cells, their areas, or grass roots.
+    #[must_use]
+    pub fn into_run(
+        self,
+        mode: GameMode,
+        vehicle_tuning: VehicleTuning,
+        job_config: JobConfig,
+        accessibility: &AccessibilitySettings,
+        tutorial_enabled: bool,
+    ) -> RunState {
+        RunState::from_prepared(
+            self,
+            mode,
+            vehicle_tuning,
+            job_config,
+            accessibility,
+            tutorial_enabled,
+        )
+    }
+}
+
 impl RunState {
     #[must_use]
     pub fn new(
@@ -172,7 +219,25 @@ impl RunState {
         accessibility: &AccessibilitySettings,
         tutorial_enabled: bool,
     ) -> Self {
-        let mowing = MowingField::from_planet(&planet);
+        Self::from_prepared(
+            PreparedWorld::from_planet(planet),
+            mode,
+            vehicle_tuning,
+            job_config,
+            accessibility,
+            tutorial_enabled,
+        )
+    }
+
+    fn from_prepared(
+        prepared: PreparedWorld,
+        mode: GameMode,
+        vehicle_tuning: VehicleTuning,
+        job_config: JobConfig,
+        accessibility: &AccessibilitySettings,
+        tutorial_enabled: bool,
+    ) -> Self {
+        let PreparedWorld { planet, mowing } = prepared;
         let vehicle = HoverVehicle::new(&planet, &vehicle_tuning);
         let camera = CameraRig::new(
             vehicle.state.transform,

@@ -1,7 +1,7 @@
 //! Bounded lawn clippings, stone dust, and quiet occasion accents.
 //! All effects share one draw and consume simulation events at most once.
 
-use std::time::Instant;
+use web_time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -311,7 +311,30 @@ impl ClippingParticles {
     }
 
     pub fn update(&mut self, queue: &wgpu::Queue, run: &RunState, reduced: bool) {
-        let dt = self.last_update.elapsed().as_secs_f32().min(1.0 / 20.0);
+        self.update_internal(queue, run, reduced, None);
+    }
+
+    /// Advances effects on an explicit visual timeline for repeatable rendering.
+    pub fn update_with_delta(
+        &mut self,
+        queue: &wgpu::Queue,
+        run: &RunState,
+        reduced: bool,
+        dt: f32,
+    ) {
+        self.update_internal(queue, run, reduced, Some(dt));
+    }
+
+    fn update_internal(
+        &mut self,
+        queue: &wgpu::Queue,
+        run: &RunState,
+        reduced: bool,
+        dt: Option<f32>,
+    ) {
+        let dt = dt
+            .unwrap_or_else(|| self.last_update.elapsed().as_secs_f32())
+            .clamp(0.0, 1.0 / 20.0);
         self.last_update = Instant::now();
         let active = run.active && !run.paused;
         let batch = self.emission.sample(

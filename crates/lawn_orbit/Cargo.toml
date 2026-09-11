@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 anyhow.workspace = true
-directories.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
@@ -15,13 +17,25 @@ gilrs.workspace = true
 glam.workspace = true
 lawn_core = { path = "../lawn_core" }
 lawn_render = { path = "../lawn_render" }
-pollster.workspace = true
+bincode.workspace = true
 ron.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 web-time.workspace = true
 winit.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+directories.workspace = true
+pollster.workspace = true
+egui-winit = { workspace = true, features = ["clipboard", "links", "wayland", "x11"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["Window", "Document", "HtmlCanvasElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "Storage", "ClipboardEvent", "DataTransfer", "Clipboard", "Navigator", "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "ErrorEvent", "KeyboardEvent", "console"] }
 
 [lints]
 workspace = true

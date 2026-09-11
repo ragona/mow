@@ -108,7 +108,7 @@ pub struct MowingFieldSnapshot {
 
 /// All scoring state is maintained incrementally on the CPU. `mowable` and
 /// `weights` never need to be mirrored back from the GPU.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MowingField {
     resolution: u32,
     cells: Vec<PackedMowingCell>,
@@ -127,6 +127,7 @@ pub struct MowingField {
     dirty_flags: Vec<bool>,
     dirty_staging: Vec<PackedMowingCell>,
     dirty_owner_staging: Vec<u8>,
+    #[serde(skip)]
     locator_cache: OnceLock<Option<Vec3>>,
     nominal_radius: f32,
 }

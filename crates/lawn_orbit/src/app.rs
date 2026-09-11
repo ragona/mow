@@ -1,15 +1,18 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, mpsc},
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::VecDeque, sync::Arc};
+
+#[cfg(not(target_arch = "wasm32"))]
+use lawn_core::PlanetGenerator;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{sync::mpsc, thread};
+use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::dpi::LogicalSize;
 
 use anyhow::{Context, Result};
 use egui::{Align2, Color32, RichText};
 use egui_wgpu::wgpu;
 use lawn_core::{
-    GameConfig, PlanetGenerator, WorldSeed,
+    GameConfig, WorldSeed,
     camera::{CameraRig, CameraState},
     config::GeneratorConfig,
     flow::GameState,
@@ -24,7 +27,6 @@ use lawn_core::{
 use lawn_render::{FrameAcquireError, FrameStats, Renderer};
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::PhysicalKey,
@@ -61,6 +63,7 @@ enum UiCommand {
     ReturnToEditor,
     Submit,
     Retry,
+    #[cfg(not(target_arch = "wasm32"))]
     Quit,
     ToggleFullscreen,
     ToggleFavorite(WorldSeed),
@@ -160,7 +163,10 @@ struct WorldRecipe {
 struct PendingGeneration {
     recipe: WorldRecipe,
     purpose: GenerationPurpose,
+    #[cfg(not(target_arch = "wasm32"))]
     receiver: mpsc::Receiver<Result<RunState, String>>,
+    #[cfg(target_arch = "wasm32")]
+    receiver: crate::generation::GenerationJob,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -250,6 +256,10 @@ impl WorldEditorSettings {
 
 pub struct LawnOrbitApp {
     window: Option<Arc<Window>>,
+    #[cfg(target_arch = "wasm32")]
+    browser_platform: Option<crate::browser_platform::BrowserPlatform>,
+    #[cfg(target_arch = "wasm32")]
+    redraw_pending: bool,
     renderer: Option<Renderer>,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -290,11 +300,13 @@ pub struct LawnOrbitApp {
 }
 
 impl LawnOrbitApp {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Result<Self> {
         let game_config = GameConfig::shipping().context("shipping gameplay config is invalid")?;
         Self::load_with_config(ProfileStore::discover(), game_config)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn load_with_config(profile_store: ProfileStore, game_config: GameConfig) -> Result<Self> {
         let (profile, load_error) = match profile_store.load() {
             Ok(profile) => (profile, None),
@@ -314,6 +326,7 @@ impl LawnOrbitApp {
         Ok(app)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn with_config(
         profile_store: ProfileStore,
         mut profile: Profile,
@@ -338,9 +351,22 @@ impl LawnOrbitApp {
             &profile.settings.accessibility,
             false,
         );
+        Ok(Self::with_run(profile_store, profile, game_config, run))
+    }
+
+    fn with_run(
+        profile_store: ProfileStore,
+        profile: Profile,
+        game_config: GameConfig,
+        run: RunState,
+    ) -> Self {
         let world_editor = WorldEditorSettings::from_generator(&game_config.generator);
-        Ok(Self {
+        Self {
             window: None,
+            #[cfg(target_arch = "wasm32")]
+            browser_platform: None,
+            #[cfg(target_arch = "wasm32")]
+            redraw_pending: false,
             renderer: None,
             egui_state: None,
             egui_renderer: None,
@@ -378,9 +404,10 @@ impl LawnOrbitApp {
             app_started: Instant::now(),
             show_diagnostics: false,
             frame_times_ms: VecDeque::with_capacity(240),
-        })
+        }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn create_window_and_gpu(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         if self.window.is_some() {
             return Ok(());
@@ -393,7 +420,15 @@ impl LawnOrbitApp {
         if self.profile.settings.fullscreen {
             window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         }
-        let mut renderer = pollster::block_on(Renderer::new(
+        pollster::block_on(self.initialize_gpu(window, None))
+    }
+
+    async fn initialize_gpu(
+        &mut self,
+        window: Arc<Window>,
+        sky: Option<&lawn_render::PreparedSky>,
+    ) -> Result<()> {
+        let mut renderer = Renderer::new_with_sky(
             window.clone(),
             &self.run,
             self.profile.settings.msaa_samples,
@@ -403,7 +438,9 @@ impl LawnOrbitApp {
             self.profile.settings.accessibility.reduced_particles
                 || self.profile.settings.accessibility.reduced_motion,
             self.profile.settings.grass_height_multiplier,
-        ))?;
+            sky,
+        )
+        .await?;
         renderer.set_motion_reduction(self.profile.settings.accessibility.reduced_motion);
         tracing::info!(
             adapter = %renderer.capabilities().adapter_name,
@@ -431,6 +468,81 @@ impl LawnOrbitApp {
         self.egui_renderer = Some(egui_renderer);
         self.window = Some(window);
         self.last_frame = Instant::now();
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn start_web() -> Result<()> {
+        use crate::generation::{GenerationJob, GenerationRequest, GenerationResult};
+        use wasm_bindgen::JsCast;
+        use winit::{
+            event_loop::EventLoop,
+            platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys},
+        };
+
+        let document = web_sys::window()
+            .and_then(|window| window.document())
+            .context("browser document is unavailable")?;
+        let canvas = document
+            .get_element_by_id("lawn-canvas")
+            .context("game canvas is missing")?
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .map_err(|_| anyhow::anyhow!("game canvas has the wrong element type"))?;
+        let game_config = GameConfig::shipping()?;
+        let profile_store = ProfileStore::discover();
+        let (mut profile, load_error) = match profile_store.load() {
+            Ok(profile) => (profile, None),
+            Err(error) => (
+                Profile::default(),
+                Some(format!(
+                    "Profile could not be loaded: {error}. The saved profile is preserved; changes will not be saved this session."
+                )),
+            ),
+        };
+        profile.sanitize();
+        let result = GenerationJob::spawn(&GenerationRequest::Startup {
+            config: game_config.generator.clone(),
+            seed: TUTORIAL_SEED,
+        })
+        .map_err(anyhow::Error::msg)?
+        .finish()
+        .await
+        .map_err(anyhow::Error::msg)?;
+        let GenerationResult::Startup { world, sky } = result else {
+            anyhow::bail!("worker returned an unexpected startup response");
+        };
+        let run = world.into_run(
+            GameMode::FreeMow,
+            game_config.vehicle.clone(),
+            game_config.job.clone(),
+            &profile.settings.accessibility,
+            false,
+        );
+        let mut app = Self::with_run(profile_store, profile, game_config, run);
+        app.profile_write_enabled = load_error.is_none();
+        app.status_message = load_error;
+        app.browser_platform = Some(crate::browser_platform::BrowserPlatform::new(&canvas)?);
+        if let Some(status) = document.get_element_by_id("loading-status") {
+            status.set_text_content(Some("Preparing the garden's lighting…"));
+        }
+        let event_loop = EventLoop::new()?;
+        let attributes = WindowAttributes::default()
+            .with_title("Lawn Orbit")
+            .with_canvas(Some(canvas.clone()))
+            .with_prevent_default(false);
+        // On the web, creation before spawn_app lets GPU initialization await
+        // browser promises without blocking winit's event callbacks.
+        #[allow(deprecated)]
+        let window = Arc::new(event_loop.create_window(attributes)?);
+        app.initialize_gpu(window, Some(&sky)).await?;
+        drop(sky);
+        // The browser owns fullscreen. A saved desktop-style preference must
+        // not request fullscreen without a user gesture on a fresh page load.
+        app.profile.settings.fullscreen = false;
+        canvas
+            .focus()
+            .map_err(|error| anyhow::anyhow!("could not focus game canvas: {error:?}"))?;
+        event_loop.spawn_app(app);
         Ok(())
     }
 
@@ -674,15 +786,30 @@ impl LawnOrbitApp {
     }
 
     fn poll_generation(&mut self) {
-        let Some(pending) = &self.pending_generation else {
+        let Some(pending) = &mut self.pending_generation else {
             return;
         };
+        #[cfg(not(target_arch = "wasm32"))]
         let result = match pending.receiver.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => Err(
                 "The planet worker stopped before finishing. Try another setting or seed.".into(),
             ),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let result = match pending.receiver.poll() {
+            None => return,
+            Some(result) => result.and_then(|prepared| match prepared {
+                crate::generation::GenerationResult::World(world) => Ok(world.into_run(
+                    GameMode::FreeMow,
+                    self.game_config.vehicle.clone(),
+                    self.game_config.job.clone(),
+                    &self.profile.settings.accessibility,
+                    false,
+                )),
+                _ => Err("The planet worker returned an unexpected response.".into()),
+            }),
         };
         let recipe = pending.recipe;
         let purpose = pending.purpose;
@@ -771,6 +898,7 @@ impl LawnOrbitApp {
         };
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn spawn_generation(&mut self, recipe: WorldRecipe, purpose: GenerationPurpose) {
         let config = recipe
             .settings
@@ -813,6 +941,29 @@ impl LawnOrbitApp {
             receiver,
         });
         self.status_message = None;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn spawn_generation(&mut self, recipe: WorldRecipe, purpose: GenerationPurpose) {
+        let request = crate::generation::GenerationRequest::World {
+            config: recipe
+                .settings
+                .generator_config(&self.game_config.generator),
+            seed: recipe.seed,
+        };
+        match crate::generation::GenerationJob::spawn(&request) {
+            Ok(receiver) => {
+                self.pending_generation = Some(PendingGeneration {
+                    recipe,
+                    purpose,
+                    receiver,
+                });
+                self.status_message = None;
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Could not start planet generation: {error}"));
+            }
+        }
     }
 
     fn begin_selected_game(&mut self) {
@@ -1050,6 +1201,7 @@ impl LawnOrbitApp {
                     if ui.button("Settings & Accessibility").clicked() {
                         commands.push(UiCommand::OpenSettings);
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
                     if ui.button("Quit").clicked() {
                         commands.push(UiCommand::Quit);
                     }
@@ -1750,7 +1902,7 @@ impl LawnOrbitApp {
                             .text("World render scale"),
                     );
                     ui.horizontal(|ui| {
-                        ui.label("MSAA");
+                        ui.label("MSAA").on_hover_text("The renderer uses a supported sample count if the selected value is unavailable on this GPU.");
                         for samples in [1, 2, 4] {
                             ui.selectable_value(
                                 &mut self.profile.settings.msaa_samples,
@@ -1759,7 +1911,21 @@ impl LawnOrbitApp {
                             );
                         }
                     });
-                    ui.small("Render scale and MSAA apply on the next launch; UI remains native resolution.");
+                    let restart_action = if cfg!(target_arch = "wasm32") {
+                        "Reload the page"
+                    } else {
+                        "Restart the game"
+                    };
+                    ui.small(format!("{restart_action} to apply render scale and MSAA. Quality changes immediately; UI stays at full resolution."));
+                    if let Some(renderer) = &self.renderer {
+                        let active = renderer.diagnostics();
+                        ui.small(format!(
+                            "Rendering now: {:?} · {:.0}% world scale · {}× MSAA",
+                            active.quality,
+                            active.render_scale * 100.0,
+                            active.msaa_samples,
+                        ));
+                    }
                     ui.checkbox(&mut self.profile.settings.fullscreen, "Borderless fullscreen");
                     if ui.button("Apply fullscreen").clicked() { commands.push(UiCommand::ToggleFullscreen); }
                     ui.separator();
@@ -1870,39 +2036,76 @@ impl LawnOrbitApp {
         egui::Window::new("Lawn Orbit diagnostics (F3)")
             .anchor(Align2::RIGHT_BOTTOM, [-12.0, -12.0])
             .resizable(false)
+            .vscroll(true)
             .show(context, |ui| {
                 ui.monospace(format!(
-                    "frame p50 {:>5.2} ms  p95 {:>5.2} ms",
+                    "frame interval p50 {:>5.2}  p95 {:>5.2} ms",
                     percentile(0.50),
                     percentile(0.95)
                 ));
                 ui.monospace(format!(
-                    "acquire   {:>5.2} ms",
+                    "surface acquire    {:>5.2} ms",
                     self.last_stats.cpu_acquire_milliseconds
                 ));
                 ui.monospace(format!(
-                    "encode    {:>5.2} ms",
+                    "renderer CPU       {:>5.2} ms",
                     self.last_stats.cpu_encode_milliseconds
-                ));
-                if self.last_stats.gpu_frame_milliseconds > 0.0 {
+                ))
+                .on_hover_text("CPU work inside the world renderer; excludes simulation, UI, and presentation.");
+                if let Some(renderer) = &self.renderer {
+                    let active = renderer.diagnostics();
+                    let capabilities = renderer.capabilities();
+                    if !capabilities.timestamp_queries {
+                        ui.monospace("GPU timing         unavailable")
+                            .on_hover_text("This adapter or browser does not expose GPU timestamp queries. CPU timings are not GPU timings.");
+                    } else if !active.gpu_profiling_enabled {
+                        ui.monospace("GPU timing         off");
+                    } else if self.last_stats.gpu_frame_milliseconds > 0.0 {
+                        ui.monospace(format!(
+                            "renderer GPU       {:>5.2} ms",
+                            self.last_stats.gpu_frame_milliseconds
+                        ))
+                        .on_hover_text("GPU timestamps cover the world renderer, including its post-processing. They exclude egui and presentation; results arrive after the measured frame.");
+                    } else {
+                        ui.monospace("GPU timing         waiting for sample");
+                    }
+                    if active.gpu_profiling_enabled && self.last_stats.gpu_world_milliseconds > 0.0 {
+                        ui.monospace(format!(
+                            "GPU passes  i {:>4.2}  s {:>4.2}  w {:>4.2}  c {:>4.2} ms",
+                            self.last_stats.gpu_interaction_milliseconds,
+                            self.last_stats.gpu_shadow_milliseconds,
+                            self.last_stats.gpu_world_milliseconds,
+                            self.last_stats.gpu_composite_milliseconds,
+                        ))
+                        .on_hover_text(
+                            "Interaction, shadow, world, composite. Pass spans can overlap and need not sum to the total renderer GPU time.",
+                        );
+                    }
+                    ui.separator();
                     ui.monospace(format!(
-                        "gpu frame {:>5.2} ms",
-                        self.last_stats.gpu_frame_milliseconds
-                    ));
-                }
-                if self.last_stats.gpu_world_milliseconds > 0.0 {
-                    ui.monospace(format!(
-                        "gpu spans i {:>4.2}  s {:>4.2}  w {:>4.2}  c {:>4.2} ms",
-                        self.last_stats.gpu_interaction_milliseconds,
-                        self.last_stats.gpu_shadow_milliseconds,
-                        self.last_stats.gpu_world_milliseconds,
-                        self.last_stats.gpu_composite_milliseconds,
+                        "framebuffer  {} × {} px",
+                        active.surface_size.width, active.surface_size.height,
                     ))
-                    .on_hover_text(
-                        "Pass timestamp spans can overlap; GPU frame measures the total directly.",
-                    );
+                    .on_hover_text("Physical presentation pixels; the UI renders at this resolution.");
+                    ui.monospace(format!(
+                        "world        {} × {} px",
+                        active.world_size.width, active.world_size.height,
+                    ));
+                    if let Some(window) = &self.window {
+                        ui.monospace(format!("window scale {:.2}×", window.scale_factor()));
+                    }
+                    ui.monospace(format!(
+                        "active       {:?} · {:.0}% scale · {}× MSAA",
+                        active.quality,
+                        active.render_scale * 100.0,
+                        active.msaa_samples,
+                    ))
+                    .on_hover_text("The configuration currently used by the renderer. Pending render-scale and MSAA selections in Settings apply after restarting or reloading.");
+                    ui.separator();
                 }
                 ui.monospace(format!("patches   {:>7}", self.last_stats.visible_patches));
+                ui.monospace(format!("grass draws {:>5}", self.last_stats.grass_draw_calls))
+                    .on_hover_text("Grass draw commands submitted by the world pass; excludes terrain, vehicles, shadows, and UI.");
                 ui.monospace(format!("tufts     {:>7}", self.last_stats.visible_tufts));
                 ui.monospace(format!(
                     "triangles {:>7}",
@@ -1925,17 +2128,43 @@ impl LawnOrbitApp {
                     .as_ref()
                     .map(lawn_render::Renderer::capabilities)
                 {
+                    ui.separator();
                     ui.monospace(format!(
-                        "gpu       {:?} · {:?} · timestamps {}",
+                        "backend   {:?} · {:?} · timestamps {}",
                         capabilities.backend,
                         capabilities.tier,
                         if capabilities.timestamp_queries {
-                            "on"
+                            "supported"
                         } else {
-                            "off"
+                            "unavailable"
                         }
                     ));
-                    ui.monospace(format!("adapter   {}", capabilities.adapter_name));
+                    let adapter = &capabilities.adapter;
+                    ui.monospace(format!(
+                        "GPU       {}",
+                        capabilities.adapter_name,
+                    ));
+                    ui.monospace(format!(
+                        "vendor    {} · device {}",
+                        adapter.vendor.as_deref().unwrap_or("unavailable"),
+                        adapter.device.as_deref().unwrap_or("unavailable"),
+                    ));
+                    ui.monospace(format!("arch      {}", adapter.architecture.as_deref().unwrap_or("unavailable")));
+                    ui.monospace(format!("type      {}", adapter.device_type.as_deref().unwrap_or("unavailable")));
+                    ui.monospace(format!("driver    {}", adapter.driver.as_deref().unwrap_or("unavailable")));
+                    ui.monospace(format!("driver info {}", adapter.driver_info.as_deref().unwrap_or("unavailable")));
+                    ui.monospace(format!(
+                        "fallback  {}",
+                        match adapter.fallback {
+                            Some(true) => "yes",
+                            Some(false) => "no",
+                            None => "unavailable",
+                        },
+                    ));
+                    ui.small(match adapter.source {
+                        lawn_render::AdapterMetadataSource::WgpuDevice => "GPU details reported by the rendering device.",
+                        lawn_render::AdapterMetadataSource::BrowserConfiguredDevice => "GPU details reported by the configured browser device. Browsers may hide these fields.",
+                    });
                 }
                 ui.monospace(format!("seed      {}", self.run.planet.world_seed));
                 ui.monospace(format!(
@@ -1946,6 +2175,8 @@ impl LawnOrbitApp {
     }
 
     fn process_commands(&mut self, commands: Vec<UiCommand>, event_loop: &ActiveEventLoop) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = event_loop;
         for command in commands {
             match command {
                 UiCommand::OpenEditor | UiCommand::ReturnToEditor => {
@@ -1984,6 +2215,7 @@ impl LawnOrbitApp {
                 UiCommand::Retry => {
                     self.start_generation(self.run.planet.world_seed);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 UiCommand::Quit => {
                     self.save_profile();
                     event_loop.exit();
@@ -1994,7 +2226,7 @@ impl LawnOrbitApp {
                             self.profile
                                 .settings
                                 .fullscreen
-                                .then(|| Fullscreen::Borderless(None)),
+                                .then_some(Fullscreen::Borderless(None)),
                         );
                     }
                 }
@@ -2034,6 +2266,11 @@ impl LawnOrbitApp {
             return;
         }
         self.surface_retry_at = None;
+        // Browser gamepad state is sampled once per animation frame, before
+        // processing menu actions and simulation input from that same frame.
+        #[cfg(target_arch = "wasm32")]
+        self.input
+            .poll_gamepads(&mut self.profile.settings.controls);
         self.poll_generation();
         if self.state == GameState::Playing {
             // East is recovery during play, not a menu-cancel action.
@@ -2073,6 +2310,10 @@ impl LawnOrbitApp {
         };
         let mut egui_state = self.egui_state.take().expect("egui state initialized");
         let mut raw_input = egui_state.take_egui_input(&window);
+        #[cfg(target_arch = "wasm32")]
+        if let Some(platform) = &mut self.browser_platform {
+            platform.append_input(&mut raw_input);
+        }
         if matches!(self.state, GameState::Playing | GameState::Loading) && !self.settings_open {
             self.input.discard_menu_events();
         } else {
@@ -2089,6 +2330,10 @@ impl LawnOrbitApp {
             }
             self.draw_diagnostics(&context);
         });
+        #[cfg(target_arch = "wasm32")]
+        if let Some(platform) = &self.browser_platform {
+            platform.handle_output(&full_output.platform_output);
+        }
         egui_state.handle_platform_output(&window, full_output.platform_output);
         self.egui_state = Some(egui_state);
         self.process_commands(ui_commands, event_loop);
@@ -2099,6 +2344,7 @@ impl LawnOrbitApp {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
+        renderer.set_gpu_profiling(self.show_diagnostics);
         let scene_inset = if let Some(transition) = self.scene_transition {
             let to_inset = if transition.to_editor {
                 EDITOR_SCENE_INSET
@@ -2208,6 +2454,12 @@ impl LawnOrbitApp {
 
 impl ApplicationHandler for LawnOrbitApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = event_loop;
+            self.redraw_pending = false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Err(error) = self.create_window_and_gpu(event_loop) {
             tracing::error!(%error, "application initialization failed");
             event_loop.exit();
@@ -2250,10 +2502,14 @@ impl ApplicationHandler for LawnOrbitApp {
             && matches!(&event, WindowEvent::KeyboardInput { event, .. }
                 if event.state == winit::event::ElementState::Pressed);
         let consumed = !(gameplay_key || rebinding_key)
-            && self
-                .egui_state
-                .as_mut()
-                .is_some_and(|state| state.on_window_event(window, &event).consumed);
+            && self.egui_state.as_mut().is_some_and(|state| {
+                let response = state.on_window_event(window, &event);
+                #[cfg(target_arch = "wasm32")]
+                if let Some(platform) = &self.browser_platform {
+                    platform.normalize_modifiers(&event, state.egui_input_mut());
+                }
+                response.consumed
+            });
         let release = matches!(&event,
             WindowEvent::KeyboardInput { event, .. } if event.state == winit::event::ElementState::Released
         ) || matches!(
@@ -2274,6 +2530,10 @@ impl ApplicationHandler for LawnOrbitApp {
             }
             WindowEvent::Focused(focused) => self.window_focus_changed(focused),
             WindowEvent::Occluded(occluded) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.redraw_pending = false;
+                }
                 self.occluded = occluded;
                 if occluded {
                     self.pause();
@@ -2296,7 +2556,13 @@ impl ApplicationHandler for LawnOrbitApp {
                     renderer.resize(window.inner_size());
                 }
             }
-            WindowEvent::RedrawRequested => self.redraw(event_loop),
+            WindowEvent::RedrawRequested => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.redraw_pending = false;
+                }
+                self.redraw(event_loop);
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if !event.repeat
                     && !rebinding
@@ -2326,13 +2592,31 @@ impl ApplicationHandler for LawnOrbitApp {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             return;
         }
-        self.input
-            .poll_gamepads(&mut self.profile.settings.controls);
-        event_loop.set_control_flow(ControlFlow::Poll);
-        window.request_redraw();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.input
+                .poll_gamepads(&mut self.profile.settings.controls);
+            event_loop.set_control_flow(ControlFlow::Poll);
+            window.request_redraw();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // winit schedules request_redraw through requestAnimationFrame.
+            // Re-requesting it on every input event cancels and replaces that
+            // callback, so keep a single request until it actually arrives.
+            event_loop.set_control_flow(ControlFlow::Wait);
+            if !self.redraw_pending {
+                self.redraw_pending = true;
+                window.request_redraw();
+            }
+        }
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.redraw_pending = false;
+        }
         self.pause();
         self.save_profile();
     }

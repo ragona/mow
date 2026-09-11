@@ -35,12 +35,49 @@ deterministic and directly testable.
 
 ## Build and run
 
-The workspace requires Rust 1.93 or newer and a desktop GPU/driver supported by
-`wgpu` (Metal, Vulkan, or Direct3D 12). From the repository root:
+The workspace requires Rust 1.93 or newer. Native builds use a desktop GPU/driver
+supported by `wgpu` (Metal, Vulkan, or Direct3D 12). Browser builds use WebAssembly
+and WebGPU, with the same simulation, editor, UI, shaders, and quality settings.
+From the repository root, launch the native game:
 
 ```sh
 cargo run --release -p lawn_orbit
 ```
+
+For the browser target, install the WebAssembly target and the `wasm-bindgen`
+CLI version matching `Cargo.lock` once:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.127 --locked
+cargo web
+```
+
+`cargo web` builds an optimized browser bundle, serves it at
+`http://127.0.0.1:8080/`, and opens your default browser. Leave the command running
+while testing; Ctrl+C stops the server. After changing Rust or web files, restart
+the command and reload the page. Useful variants:
+
+```sh
+cargo web --no-open --port 8088  # Serve without opening another tab.
+cargo web build                 # Package a static site in target/web.
+cargo web bench                 # Open the repeatable native/browser comparison.
+cargo web --help
+```
+
+Use a current browser with core WebGPU and graphics acceleration enabled. Browser
+support still depends on the OS and GPU; the loading page reports unavailable
+graphics or startup failures. Firefox on Apple Silicon, Chrome/Edge, and Safari
+on supported current systems are suitable starting points. See
+[`WEB.md`](WEB.md) for architecture, development checks, deployment, and browser
+validation notes. WebGL2 and touch controls are not provided.
+
+F3 shows the actual GPU information exposed by the device, physical framebuffer
+and world-render sizes, active quality/MSAA, and frame timings. GPU timestamp
+collection runs only while F3 is open. For controlled comparisons, `cargo web bench`
+and `cargo run --release -p lawn_orbit -- --benchmark --gpu-timing` use the same
+scripted renderer workload without changing saves. See
+[`BROWSER_PERFORMANCE.md`](BROWSER_PERFORMANCE.md) for measurements and limitations.
 
 The first launch opens the title screen. Open the world editor to choose a terrain
 preset or tune planet size, rockiness, peak count, peak height, and rolling terrain.
@@ -56,7 +93,8 @@ Enter, or Start now. The garden interface uses a bundled, licensed display
 typeface, a shared race scoreboard, a Free Mow coverage dial, a segmented boost
 meter, and remapping-aware hints.
 Settings plus favorite and recent seeds are saved atomically in the operating
-system's per-user application-data directory.
+system's per-user application-data directory on desktop. The browser stores them
+in localStorage for the site's origin; native and browser profiles are independent.
 
 On Linux, the platform libraries required by winit and gilrs must be installed;
 package names vary by distribution and commonly include Wayland or X11 and udev
@@ -117,8 +155,9 @@ oscillation, disables speed shake, and reduces particle motion and HUD animation
 | --- | --- |
 | `lawn_core` | Versioned generation, cube-sphere math, validation, fixed-step simulation, Rapier vehicles, camera, mowing ownership, rival routing, race/Free Mow flow, and profiles |
 | `lawn_render` | `wgpu` terrain/vehicle/grass rendering, interaction compute field, shadows, clipping particles, HDR composite, culling, dirty texture uploads, and diagnostics |
-| `lawn_orbit` | Desktop lifecycle, world editor, menus/HUD, input and rumble, and atomic persistence |
+| `lawn_orbit` | Native/browser lifecycle, world editor, menus/HUD, input, persistence, and browser preparation worker |
 | `lawn_tools` | Headless seed inspection, generation timing, and deterministic validation batches |
+| `lawn_web_dev` | `cargo web` browser build, local development server, and browser launch |
 
 Gameplay tuning lives in [`config/game.ron`](config/game.ron), which is embedded
 at build time and parsed and validated at startup. Rebuild after editing it.
@@ -135,6 +174,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release --workspace
+cargo clippy --target wasm32-unknown-unknown -p lawn_orbit --lib -- -D warnings
+cargo web build
 cargo run --release -p lawn_tools -- validate 1000
 # Requires an available GPU; executes every rendering pass and reads pixels back.
 cargo test -p lawn_render gpu_smoke -- --ignored --nocapture

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#172a30">
+    <title>Lawn Orbit</title>
+    <link rel="icon" href="data:,">
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #fff9e7; background: #172a30; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+      #lawn-canvas { display: block; width: 100% !important; height: 100% !important; outline: none; touch-action: none; }
+      #loading { position: fixed; inset: 0; display: grid; place-content: center; padding: 2rem; background: radial-gradient(ellipse at 50% 65%, #314e46, #172a30 70%); text-align: center; }
+      #loading[hidden] { display: none; }
+      .orbit { margin: 0 auto 1.5rem; width: 4rem; height: 4rem; border: 2px solid #cee0b64d; border-top-color: #f8936f; border-radius: 50%; animation: orbit 2s linear infinite; }
+      .failed .orbit { animation: none; border-color: #f8936f; }
+      h1 { margin: 0 0 .6rem; font-family: Georgia, serif; font-weight: normal; font-size: clamp(2.5rem, 6vw, 4rem); }
+      p { max-width: 38rem; margin: .5rem auto; line-height: 1.5; color: #cee0b6; }
+      button { margin: 1.5rem auto 0; background: #f8936f; color: #172a30; border: 0; border-radius: .75rem; padding: .8rem 1.4rem; font: inherit; cursor: pointer; }
+      @keyframes orbit { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .orbit { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <canvas id="lawn-canvas" tabindex="0" aria-label="Lawn Orbit game. Use WASD or arrow keys to drive, Space to boost, and Escape to pause."></canvas>
+    <main id="loading" aria-live="polite">
+      <div class="orbit" aria-hidden="true"></div>
+      <h1>Lawn Orbit</h1>
+      <p id="loading-status">Loading your little corner of the cosmos…</p>
+      <button id="retry" hidden type="button">Try again</button>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

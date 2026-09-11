@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lawn Orbit benchmark</title>
+<style>
+  body { margin: 20px; background: #172a30; color: #fff9e7; font: 15px system-ui, sans-serif; }
+  a { color: #f8936f; } nav { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  canvas { display: block; width: 640px !important; height: 360px !important; max-width: 100%; object-fit: contain; }
+  pre { white-space: pre-wrap; font-size: 12px; }
+</style>
+<h1>Lawn Orbit benchmark</h1>
+<p><span id="benchmark-spec">Fixed render target · High · 4× MSAA · seed 42 · full visual quality.</span><br>
+Close other games and keep this tab visible. Timing runs collect GPU samples; regular runs measure normal frame pacing.</p>
+<nav>
+  <a href="?scene=stationary">Stationary</a><a href="?scene=race">Scripted race</a>
+  <a href="?scene=stationary&amp;gpu=1">Stationary + GPU timing</a><a href="?scene=race&amp;gpu=1">Race + GPU timing</a>
+  <a href="?scene=stationary&amp;resolution=1440p">1440p stationary</a>
+  <a href="?scene=race&amp;resolution=1440p">1440p race</a>
+  <a href="?scene=stationary&amp;gpu=1&amp;resolution=1440p">1440p stationary + GPU timing</a>
+  <a href="?scene=race&amp;gpu=1&amp;resolution=1440p">1440p race + GPU timing</a>
+  <a href="./">Play the game</a>
+</nav>
+<canvas id="lawn-canvas" aria-label="Benchmark rendering"></canvas>
+<pre id="benchmark-results" aria-live="polite">Preparing benchmark…</pre>
+<script type="module">
+  const output = document.getElementById('benchmark-results');
+  const fail = error => { output.textContent = String(error); };
+  window.addEventListener('error', event => fail(event.error || event.message));
+  window.addEventListener('unhandledrejection', event => fail(event.reason));
+  try {
+    if (!navigator.gpu) throw new Error('This benchmark requires WebGPU.');
+    const {default: init, benchmark} = await import('./lawn_orbit.js');
+    await init();
+    const params = new URLSearchParams(location.search);
+    const resolution = params.get('resolution') || '720p';
+    document.getElementById('benchmark-spec').textContent = `${resolution} physical render target · High · 4× MSAA · seed 42 · full visual quality`;
+    await benchmark(params.get('scene') || 'stationary', params.get('gpu') === '1', resolution);
+  } catch (error) { fail(error); }
+</script>
+</html>

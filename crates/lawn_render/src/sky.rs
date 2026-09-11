@@ -2,9 +2,54 @@
 //! are baked once, so every visible sky pixel needs only one filtered cube lookup.
 
 use glam::{Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 
 const RESOLUTION: u32 = 1024;
 const STAR_COUNT: u32 = 5_000;
+
+/// The immutable pixels of the shipping sky, prepared without a GPU. The
+/// browser bakes these in a dedicated worker and uploads the identical mip
+/// chain after the worker transfers it back to the rendering thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedSky {
+    resolution: u32,
+    levels: Vec<Vec<u8>>,
+}
+
+impl PreparedSky {
+    #[must_use]
+    pub fn bake() -> Self {
+        let started = web_time::Instant::now();
+        let result = Self {
+            resolution: RESOLUTION,
+            levels: bake(RESOLUTION),
+        };
+        tracing::info!(
+            milliseconds = started.elapsed().as_secs_f64() * 1_000.0,
+            bytes = result.levels.iter().map(Vec::len).sum::<usize>(),
+            "Baked space panorama"
+        );
+        result
+    }
+
+    /// Checks the complete fixed-resolution payload before any GPU upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for truncated or incorrectly sized mip levels.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.resolution != RESOLUTION || self.levels.len() != RESOLUTION.ilog2() as usize + 1 {
+            return Err("sky payload does not describe the shipping cubemap");
+        }
+        for (level, pixels) in self.levels.iter().enumerate() {
+            let width = (RESOLUTION >> level) as usize;
+            if pixels.len() != width * width * 6 * 4 {
+                return Err("sky payload has an incorrectly sized mip level");
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct SkyMap {
@@ -13,7 +58,15 @@ pub(crate) struct SkyMap {
 
 impl SkyMap {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let started = std::time::Instant::now();
+        Self::from_prepared(device, queue, &PreparedSky::bake())
+    }
+
+    pub fn from_prepared(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        prepared: &PreparedSky,
+    ) -> Self {
+        assert!(prepared.validate().is_ok(), "invalid prepared sky payload");
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("painted nebula and stars cubemap"),
             size: wgpu::Extent3d {
@@ -28,9 +81,8 @@ impl SkyMap {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let levels = bake(RESOLUTION);
         let mut width = RESOLUTION;
-        for (level, pixels) in levels.iter().enumerate() {
+        for (level, pixels) in prepared.levels.iter().enumerate() {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
@@ -52,11 +104,6 @@ impl SkyMap {
             );
             width = (width / 2).max(1);
         }
-        tracing::info!(
-            milliseconds = started.elapsed().as_secs_f64() * 1_000.0,
-            bytes = levels.iter().map(Vec::len).sum::<usize>(),
-            "Baked space panorama"
-        );
         Self {
             view: texture.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::Cube),
@@ -215,34 +262,7 @@ fn bake(resolution: u32) -> Vec<Vec<u8>> {
     let mut pixels = vec![Vec3::ZERO; width * width * 6];
     #[cfg(test)]
     let allocated = started.elapsed();
-    // Only the startup bake uses workers; there is no sky work or allocation on
-    // subsequent frames. The number of workers is bounded by the six faces.
-    let workers = if resolution >= 128 {
-        std::thread::available_parallelism().map_or(1, |count| count.get().min(6))
-    } else {
-        1
-    };
-    let faces_per_worker = 6_usize.div_ceil(workers);
-    std::thread::scope(|scope| {
-        for (batch, output) in pixels
-            .chunks_mut(faces_per_worker * width * width)
-            .enumerate()
-        {
-            scope.spawn(move || {
-                for (local_face, face_pixels) in output.chunks_mut(width * width).enumerate() {
-                    let face = batch * faces_per_worker + local_face;
-                    for y in 0..width {
-                        for x in 0..width {
-                            let uv = (Vec2::new(x as f32, y as f32) + Vec2::splat(0.5))
-                                * (2.0 / resolution as f32)
-                                - Vec2::ONE;
-                            face_pixels[y * width + x] = nebula(face_direction(face, uv));
-                        }
-                    }
-                }
-            });
-        }
-    });
+    paint_clouds(&mut pixels, resolution);
     #[cfg(test)]
     let clouds_finished = started.elapsed();
     paint_stars(&mut pixels, resolution);
@@ -329,6 +349,50 @@ fn bake(resolution: u32) -> Vec<Vec<u8>> {
         );
     }
     levels
+}
+
+/// The browser runs the exact same face loop inside its dedicated worker;
+/// entering `std::thread::scope` would still spawn an unsupported Rust thread,
+/// even if the requested worker count were one.
+#[cfg(target_arch = "wasm32")]
+fn paint_clouds(pixels: &mut [Vec3], resolution: u32) {
+    paint_nebula_faces(pixels, resolution, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn paint_clouds(pixels: &mut [Vec3], resolution: u32) {
+    let width = resolution as usize;
+    let workers = if resolution >= 128 {
+        std::thread::available_parallelism().map_or(1, |count| count.get().min(6))
+    } else {
+        1
+    };
+    let faces_per_worker = 6_usize.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (batch, output) in pixels
+            .chunks_mut(faces_per_worker * width * width)
+            .enumerate()
+        {
+            scope.spawn(move || {
+                paint_nebula_faces(output, resolution, batch * faces_per_worker);
+            });
+        }
+    });
+}
+
+fn paint_nebula_faces(pixels: &mut [Vec3], resolution: u32, first_face: usize) {
+    let width = resolution as usize;
+    for (local_face, face_pixels) in pixels.chunks_mut(width * width).enumerate() {
+        let face = first_face + local_face;
+        for y in 0..width {
+            for x in 0..width {
+                let uv = (Vec2::new(x as f32, y as f32) + Vec2::splat(0.5))
+                    * (2.0 / resolution as f32)
+                    - Vec2::ONE;
+                face_pixels[y * width + x] = nebula(face_direction(face, uv));
+            }
+        }
+    }
 }
 
 fn paint_stars(pixels: &mut [Vec3], resolution: u32) {
@@ -511,6 +575,33 @@ pub(crate) fn direction_color_cube(resolution: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serial_browser_cloud_loop_matches_native_face_batches_exactly() {
+        let resolution = 128;
+        let len = resolution as usize * resolution as usize * 6;
+        let mut serial = vec![Vec3::ZERO; len];
+        let mut batched = vec![Vec3::ZERO; len];
+        paint_nebula_faces(&mut serial, resolution, 0);
+        paint_clouds(&mut batched, resolution);
+        assert_eq!(serial, batched);
+        assert_eq!(encode_srgb(&serial), encode_srgb(&batched));
+    }
+
+    #[test]
+    fn prepared_sky_rejects_missing_and_truncated_mip_levels() {
+        let mut prepared = PreparedSky {
+            resolution: RESOLUTION,
+            levels: (0..=RESOLUTION.ilog2())
+                .map(|level| vec![0; (RESOLUTION >> level).pow(2) as usize * 6 * 4])
+                .collect(),
+        };
+        assert!(prepared.validate().is_ok());
+        prepared.levels.last_mut().unwrap().pop();
+        assert!(prepared.validate().is_err());
+        prepared.levels.pop();
+        assert!(prepared.validate().is_err());
+    }
 
     #[test]
     fn sky_srgb_encoder_preserves_bytes_including_rounding_boundaries() {

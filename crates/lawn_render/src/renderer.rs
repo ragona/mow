@@ -1,4 +1,5 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
+use web_time::Instant;
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -10,6 +11,7 @@ use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{
+    adapter_metadata::AdapterMetadata,
     bloom::Bloom,
     gpu_profiler::GpuProfiler,
     grass_bounds::{self, GrassPatchBounds},
@@ -17,7 +19,7 @@ use crate::{
     interaction::{GrassInteraction, INTERACTION_RESOLUTION},
     mesh::{self, MeshVertex, TuftVertex},
     particles::ClippingParticles,
-    sky::SkyMap,
+    sky::{PreparedSky, SkyMap},
     surface::TerrainSurface,
     vehicle_presentation::VehiclePresentation,
 };
@@ -35,16 +37,30 @@ pub enum RenderTier {
 #[derive(Clone, Debug)]
 pub struct RenderCapabilities {
     pub adapter_name: String,
+    pub adapter: AdapterMetadata,
     pub backend: wgpu::Backend,
     pub tier: RenderTier,
     pub timestamp_queries: bool,
     pub maximum_texture_dimension: u32,
 }
 
+/// Effective rendering settings, including the physical sizes of GPU targets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderDiagnostics {
+    pub surface_size: PhysicalSize<u32>,
+    pub world_size: PhysicalSize<u32>,
+    pub msaa_samples: u32,
+    pub render_scale: f32,
+    pub quality: QualityPreset,
+    pub gpu_profiling_enabled: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameStats {
     pub visible_patches: u32,
     pub visible_tufts: u32,
+    /// Number of indexed instanced draws used for grass geometry.
+    pub grass_draw_calls: u32,
     pub generated_triangles: u32,
     pub mowing_tile_uploads: u32,
     pub clipping_particles: u32,
@@ -190,6 +206,7 @@ pub struct Renderer {
     rival_presentation: Option<VehiclePresentation>,
     mowing_owner_staging: Vec<u32>,
     started: Instant,
+    explicit_visual_seconds: f32,
     quality: QualityPreset,
     high_contrast: bool,
     reduced_particles: bool,
@@ -218,10 +235,39 @@ impl Renderer {
         reduced_particles: bool,
         grass_height_multiplier: f32,
     ) -> Result<Self> {
+        Self::new_with_sky(
+            window,
+            run,
+            msaa_samples,
+            quality,
+            render_scale,
+            high_contrast,
+            reduced_particles,
+            grass_height_multiplier,
+            None,
+        )
+        .await
+    }
+
+    /// Creates GPU resources using an optional panorama prepared off-thread.
+    ///
+    /// # Errors
+    /// Returns an error when the surface, adapter, device, or prepared sky is invalid.
+    pub async fn new_with_sky(
+        window: Arc<Window>,
+        run: &RunState,
+        msaa_samples: u32,
+        quality: QualityPreset,
+        render_scale: f32,
+        high_contrast: bool,
+        reduced_particles: bool,
+        grass_height_multiplier: f32,
+        prepared_sky: Option<&PreparedSky>,
+    ) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
-            .create_surface(window)
+            .create_surface(window.clone())
             .context("failed to create the window surface")?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -323,7 +369,13 @@ impl Renderer {
             targets.world_texture.width(),
             targets.world_texture.height(),
         );
-        let sky = SkyMap::new(&device, &queue);
+        let sky = match prepared_sky {
+            Some(sky) => {
+                sky.validate().map_err(anyhow::Error::msg)?;
+                SkyMap::from_prepared(&device, &queue, sky)
+            }
+            None => SkyMap::new(&device, &queue),
+        };
         let composite_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("garden atmosphere and display uniform"),
             size: std::mem::size_of::<CompositeUniformGpu>() as u64,
@@ -374,8 +426,10 @@ impl Renderer {
         // potentially larger native limits. Baseline device creation deliberately
         // uses conservative defaults.
         let limits = device.limits();
+        let adapter_metadata = AdapterMetadata::for_device(&device, window.as_ref());
         let capabilities = RenderCapabilities {
-            adapter_name: adapter_info.name,
+            adapter_name: adapter_metadata.display_label(),
+            adapter: adapter_metadata,
             backend: adapter_info.backend,
             tier: if enhanced {
                 RenderTier::EnhancedAvailable
@@ -385,9 +439,6 @@ impl Renderer {
             timestamp_queries: diagnostic_features.contains(wgpu::Features::TIMESTAMP_QUERY),
             maximum_texture_dimension: limits.max_texture_dimension_2d,
         };
-        let gpu_profiler = capabilities
-            .timestamp_queries
-            .then(|| GpuProfiler::new(&device, queue.get_timestamp_period()));
         Ok(Self {
             surface,
             device,
@@ -442,6 +493,7 @@ impl Renderer {
             }),
             mowing_owner_staging: Vec::with_capacity(256),
             started: Instant::now(),
+            explicit_visual_seconds: 0.0,
             quality,
             high_contrast,
             reduced_particles,
@@ -449,7 +501,9 @@ impl Renderer {
             grass_height_multiplier: grass_height_multiplier.clamp(0.4, 1.6),
             render_scale,
             last_visual_frame: Instant::now(),
-            gpu_profiler,
+            // GPU queries and asynchronous readbacks are diagnostics work.
+            // Callers opt in while inspecting timings or running a benchmark.
+            gpu_profiler: None,
         })
     }
 
@@ -476,6 +530,41 @@ impl Renderer {
     #[must_use]
     pub const fn capabilities(&self) -> &RenderCapabilities {
         &self.capabilities
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> RenderDiagnostics {
+        RenderDiagnostics {
+            surface_size: self.size,
+            world_size: PhysicalSize::new(
+                self.targets.world_texture.width(),
+                self.targets.world_texture.height(),
+            ),
+            msaa_samples: self.msaa_samples,
+            render_scale: self.render_scale,
+            quality: self.quality,
+            gpu_profiling_enabled: self.gpu_profiling_enabled(),
+        }
+    }
+
+    /// Enables GPU timing only when the selected device supports timestamps.
+    /// Disabling it removes query resolve, readback, and mapping work from frames.
+    pub fn set_gpu_profiling(&mut self, enabled: bool) {
+        if enabled && self.capabilities.timestamp_queries {
+            if self.gpu_profiler.is_none() {
+                self.gpu_profiler = Some(GpuProfiler::new(
+                    &self.device,
+                    self.queue.get_timestamp_period(),
+                ));
+            }
+        } else {
+            self.gpu_profiler = None;
+        }
+    }
+
+    #[must_use]
+    pub const fn gpu_profiling_enabled(&self) -> bool {
+        self.gpu_profiler.is_some()
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -566,16 +655,39 @@ impl Renderer {
         run: &mut RunState,
         interpolation_alpha: f32,
     ) -> Result<RenderFrame, FrameAcquireError> {
+        self.begin_frame_internal(run, interpolation_alpha, None)
+    }
+
+    /// Encodes the same frame with an explicit visual delta for repeatable
+    /// benchmarks. Explicit frames accumulate their own shader/effect timeline
+    /// from zero; simulation advancement remains the caller's responsibility.
+    ///
+    /// # Errors
+    /// Returns the same surface acquisition errors as [`Self::begin_frame`].
+    pub fn begin_frame_with_delta(
+        &mut self,
+        run: &mut RunState,
+        interpolation_alpha: f32,
+        visual_dt: f32,
+    ) -> Result<RenderFrame, FrameAcquireError> {
+        self.begin_frame_internal(run, interpolation_alpha, Some(visual_dt))
+    }
+
+    fn begin_frame_internal(
+        &mut self,
+        run: &mut RunState,
+        interpolation_alpha: f32,
+        visual_dt: Option<f32>,
+    ) -> Result<RenderFrame, FrameAcquireError> {
         let _span = tracing::debug_span!("render_encode").entered();
         // The app clears run events on its next update even if this redraw
         // cannot acquire a surface image. Preserve the victory snapshot first;
         // the particle update emits it only on a later unpaused, acquired frame.
         self.particles.retain_defeat_event(run.events());
         let acquire_started = Instant::now();
-        let visual_dt = self
-            .last_visual_frame
-            .elapsed()
-            .as_secs_f32()
+        let explicit_visual_delta = visual_dt.is_some();
+        let visual_dt = visual_dt
+            .unwrap_or_else(|| self.last_visual_frame.elapsed().as_secs_f32())
             .clamp(0.0, 1.0 / 30.0);
         self.last_visual_frame = Instant::now();
         let output = match self.surface.get_current_texture() {
@@ -673,11 +785,20 @@ impl Renderer {
             );
             deck
         });
-        self.particles.update(
-            &self.queue,
-            run,
-            self.reduced_particles || self.reduced_motion,
-        );
+        if explicit_visual_delta {
+            self.particles.update_with_delta(
+                &self.queue,
+                run,
+                self.reduced_particles || self.reduced_motion,
+                visual_dt,
+            );
+        } else {
+            self.particles.update(
+                &self.queue,
+                run,
+                self.reduced_particles || self.reduced_motion,
+            );
+        }
         let mut mowing_tile_uploads = 0;
         // Queue writes copy the borrowed cells before the callback returns;
         // every tile reuses the mowing field's persistent staging allocation.
@@ -716,6 +837,14 @@ impl Renderer {
         });
         let camera = run.camera.interpolated_state(interpolation_alpha);
         let mut frame_uniform = make_frame_uniform(self, run, camera);
+        if explicit_visual_delta {
+            self.explicit_visual_seconds += visual_dt;
+            frame_uniform.camera_time[3] = if self.reduced_motion {
+                0.0
+            } else {
+                self.explicit_visual_seconds
+            };
+        }
         frame_uniform.mower_position = deck_transform
             .position
             .extend(if run.vehicle.state.grounded { 1.0 } else { 0.0 })
@@ -792,7 +921,7 @@ impl Renderer {
             }),
         );
         self.encode_shadow(&mut encoder, query_set);
-        let (visible_patches, visible_tufts) =
+        let (visible_patches, visible_tufts, grass_draw_calls) =
             self.encode_world(&mut encoder, run, camera, &frame_uniform, query_set);
         self.encode_composite(&mut encoder, &view, query_set);
         if let (Some(slot), Some(profiler)) = (gpu_profile_slot, self.gpu_profiler.as_mut()) {
@@ -814,6 +943,7 @@ impl Renderer {
             stats: FrameStats {
                 visible_patches,
                 visible_tufts,
+                grass_draw_calls,
                 generated_triangles,
                 mowing_tile_uploads,
                 clipping_particles: self.particles.len(),
@@ -882,7 +1012,7 @@ impl Renderer {
         camera: CameraState,
         frame: &FrameUniformGpu,
         query_set: Option<&wgpu::QuerySet>,
-    ) -> (u32, u32) {
+    ) -> (u32, u32, u32) {
         let (color_view, resolve_target) = self
             .targets
             .multisample_view
@@ -963,28 +1093,30 @@ impl Renderer {
         );
         let mut visible_patches = 0;
         let mut visible_tufts = 0;
+        let mut grass_draw_calls = 0;
         for (patch, bounds) in run
             .planet
             .grass_patches
             .iter()
             .zip(&self.planet.grass_bounds)
         {
-            let draw_count = visibility.draw_count(patch, bounds);
-            if draw_count == 0 {
+            let count = visibility.draw_count(patch, bounds);
+            if count == 0 {
                 continue;
             }
             visible_patches += 1;
-            visible_tufts += draw_count;
+            visible_tufts += count;
+            grass_draw_calls += 1;
             pass.draw_indexed(
                 0..self.tuft_index_count,
                 0,
-                patch.roots.start..patch.roots.start + draw_count,
+                patch.roots.start..patch.roots.start + count,
             );
         }
         pass.set_pipeline(&self.particle_pipeline);
         pass.set_bind_group(0, &self.frame_bind_group, &[]);
         self.particles.draw(&mut pass);
-        (visible_patches, visible_tufts)
+        (visible_patches, visible_tufts, grass_draw_calls)
     }
 
     fn encode_composite(

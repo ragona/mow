@@ -200,7 +200,7 @@ pub(crate) fn face_solid_angles(resolution: u32) -> Vec<f64> {
     angles
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CubeGrid<T> {
     resolution: u32,
     cells: Vec<T>,

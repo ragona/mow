@@ -68,7 +68,7 @@ pub enum SurfaceMaterial {
     Rock = 1,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TerrainCell {
     pub radius: f32,
     pub normal: Vec3,
@@ -95,7 +95,7 @@ pub struct SpawnPoint {
 }
 
 /// Compact immutable root record consumed directly by the renderer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 #[repr(C)]
 pub struct GrassRootGpu {
     pub position: [f32; 3],
@@ -103,7 +103,7 @@ pub struct GrassRootGpu {
     pub packed_normal_seed: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GrassPatch {
     pub face: CubeFace,
     pub tile_x: u32,
@@ -128,7 +128,7 @@ pub struct ValidationReport {
     pub errors: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Planet {
     pub generator_version: GeneratorVersion,
     pub world_seed: WorldSeed,

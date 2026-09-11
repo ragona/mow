@@ -1,0 +1,902 @@
+{
+  "environment": "Apple M2, Codex in-app BrowserWebGpu, release builds; High, 4x MSAA, full scale; seed 42; observations, not guarantees",
+  "browserAndExploratory": [
+    {
+      "variant": "baseline",
+      "target": "browser",
+      "scene": "stationary",
+      "gpuTiming": true,
+      "frame": {
+        "mean": 16.66666666666661,
+        "p50": 16.7,
+        "p95": 18.6
+      },
+      "encode": {
+        "mean": 0.13083332685960664,
+        "p50": 0.09999999403953552,
+        "p95": 0.19999998807907104
+      },
+      "gpu": {
+        "mean": 14.101344672838847,
+        "p50": 14.024703979492188,
+        "p95": 14.942208290100098
+      },
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "baseline",
+      "target": "browser",
+      "scene": "race",
+      "gpuTiming": true,
+      "frame": {
+        "mean": 16.7180555555555,
+        "p50": 16.7,
+        "p95": 18.8
+      },
+      "encode": {
+        "mean": 0.22805555131700303,
+        "p50": 0.19999998807907104,
+        "p95": 0.30000001192092896
+      },
+      "simulation": {
+        "mean": 0.16722222222222236,
+        "p50": 0.1,
+        "p95": 0.3
+      },
+      "gpu": {
+        "mean": 12.619320872094896,
+        "p50": 12.64844799041748,
+        "p95": 13.959168434143066
+      },
+      "draws": 201,
+      "tufts": 244831,
+      "triangles": 4606174,
+      "coverage": 0.041247908252387624,
+      "particles": 224
+    },
+    {
+      "variant": "candidate",
+      "target": "native",
+      "scene": "stationary",
+      "gpuTiming": true,
+      "frame": {
+        "mean": 16.666556713888873,
+        "p50": 16.657417000000002,
+        "p95": 17.068208000000002
+      },
+      "encode": {
+        "mean": 0.33660081308335066,
+        "p50": 0.3550419807434082,
+        "p95": 0.4069159924983978
+      },
+      "simulation": {
+        "mean": 0.00012001666666666673,
+        "p50": 0.000125,
+        "p95": 0.000209
+      },
+      "gpu": {
+        "mean": 14.141340465015835,
+        "p50": 14.027083396911621,
+        "p95": 15.227791786193848
+      },
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764561527099,
+      "particles": 0
+    },
+    {
+      "variant": "candidate",
+      "target": "browser",
+      "scene": "race",
+      "gpuTiming": true,
+      "frame": {
+        "mean": 16.756388888888885,
+        "p50": 16.7,
+        "p95": 18.6
+      },
+      "encode": {
+        "mean": 0.6772222081820171,
+        "p50": 0.699999988079071,
+        "p95": 1.100000023841858
+      },
+      "simulation": {
+        "mean": 0.42527777777777814,
+        "p50": 0.4,
+        "p95": 0.6
+      },
+      "gpu": {
+        "mean": 12.94354203806983,
+        "p50": 12.64844799041748,
+        "p95": 13.893631935119629
+      },
+      "draws": 200,
+      "tufts": 244831,
+      "triangles": 4606174,
+      "coverage": 0.041247908252387624,
+      "particles": 224
+    },
+    {
+      "variant": "candidate",
+      "target": "browser",
+      "scene": "stationary",
+      "gpuTiming": true,
+      "frame": {
+        "mean": 16.666666666666643,
+        "p50": 16.6,
+        "p95": 17.7
+      },
+      "encode": {
+        "mean": 0.6544444284505314,
+        "p50": 0.699999988079071,
+        "p95": 0.8999999761581421
+      },
+      "simulation": {
+        "mean": 0.001388888888888889,
+        "p50": 0,
+        "p95": 0
+      },
+      "gpu": {
+        "mean": 14.210753382576836,
+        "p50": 14.024703979492188,
+        "p95": 14.68006420135498
+      },
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "final",
+      "version": 2,
+      "target": "browser",
+      "resolution": "720p",
+      "scene": "stationary",
+      "gpuTiming": true,
+      "frame": {
+        "mean": 16.67250000000001,
+        "p50": 16.7,
+        "p95": 18.6
+      },
+      "completedFps": 59.8056316969848,
+      "completedElapsedMs": 6019.5,
+      "encode": {
+        "mean": 0.5699999968210856,
+        "p50": 0.6000000238418579,
+        "p95": 0.7999999523162842
+      },
+      "gpu": {
+        "mean": 13.946242819892035,
+        "p50": 14.024703979492188,
+        "p95": 14.352383613586426
+      },
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "final",
+      "version": 2,
+      "target": "browser",
+      "resolution": "1440p",
+      "scene": "stationary",
+      "gpuTiming": true,
+      "frame": {
+        "mean": 19.466111111111108,
+        "p50": 19.6,
+        "p95": 20.7
+      },
+      "completedFps": 50.80870522482852,
+      "completedElapsedMs": 7085.4,
+      "encode": {
+        "mean": 0.668333324458864,
+        "p50": 0.699999988079071,
+        "p95": 0.8999999761581421
+      },
+      "gpu": {
+        "mean": 16.47775297164917,
+        "p50": 16.449535369873047,
+        "p95": 16.908287048339844
+      },
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "final",
+      "version": 2,
+      "target": "browser",
+      "resolution": "1440p",
+      "scene": "stationary",
+      "gpuTiming": false,
+      "frame": {
+        "mean": 19.02944444444443,
+        "p50": 19.1,
+        "p95": 20.2
+      },
+      "completedFps": 51.97580237644919,
+      "completedElapsedMs": 6926.3,
+      "encode": {
+        "mean": 0.5877777749465571,
+        "p50": 0.6000000238418579,
+        "p95": 0.7999999523162842
+      },
+      "gpu": null,
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "pre-bundle",
+      "version": 2,
+      "target": "browser",
+      "resolution": "1440p",
+      "scene": "race",
+      "gpuTiming": false,
+      "completedFps": 59.196895451705196,
+      "completedElapsedMs": 6081.400000000001,
+      "frame": {
+        "mean": 16.850833333333313,
+        "p50": 16.8,
+        "p95": 18.5
+      },
+      "encode": {
+        "mean": 0.6727777760889795,
+        "p50": 0.6000000238418579,
+        "p95": 1.100000023841858
+      },
+      "simulation": {
+        "mean": 0.46472222222222326,
+        "p50": 0.4,
+        "p95": 0.7
+      },
+      "gpu": null,
+      "draws": 201,
+      "tufts": 244831,
+      "triangles": 4606174,
+      "coverage": 0.041247908252387624,
+      "particles": 224
+    },
+    {
+      "variant": "pre-bundle",
+      "version": 2,
+      "target": "browser",
+      "resolution": "720p",
+      "scene": "race",
+      "gpuTiming": true,
+      "completedFps": 59.85136910006817,
+      "completedElapsedMs": 6014.9,
+      "frame": {
+        "mean": 16.666666666666632,
+        "p50": 16.6,
+        "p95": 18.599999999999998
+      },
+      "encode": {
+        "mean": 0.6741666538019975,
+        "p50": 0.699999988079071,
+        "p95": 1
+      },
+      "simulation": {
+        "mean": 0.45638888888888923,
+        "p50": 0.4,
+        "p95": 0.6
+      },
+      "gpu": {
+        "mean": 12.797542407777573,
+        "p50": 12.58291244506836,
+        "p95": 13.76255989074707
+      },
+      "draws": 201,
+      "tufts": 244831,
+      "triangles": 4606174,
+      "coverage": 0.041247908252387624,
+      "particles": 224
+    },
+    {
+      "variant": "pre-bundle",
+      "version": 2,
+      "target": "browser",
+      "resolution": "720p",
+      "scene": "stationary",
+      "gpuTiming": false,
+      "completedFps": 57.481358476105314,
+      "completedElapsedMs": 6262.900000000001,
+      "frame": {
+        "mean": 17.319722222222204,
+        "p50": 16.9,
+        "p95": 21.4
+      },
+      "encode": {
+        "mean": 0.5158333270914025,
+        "p50": 0.5,
+        "p95": 0.7999999523162842
+      },
+      "gpu": null,
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "bundle-experiment",
+      "version": 2,
+      "target": "browser",
+      "resolution": "1440p",
+      "scene": "stationary",
+      "gpuTiming": false,
+      "grassBundles": true,
+      "completedFps": 52.82232623655599,
+      "completedElapsedMs": 6815.299999999999,
+      "frame": {
+        "mean": 18.721111111111107,
+        "p50": 18.9,
+        "p95": 20
+      },
+      "encode": {
+        "mean": 0.519444440305233,
+        "p50": 0.5,
+        "p95": 0.7999999523162842
+      },
+      "gpu": null,
+      "draws": 363,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "bundle-control-repeat",
+      "version": 2,
+      "target": "browser",
+      "resolution": "1440p",
+      "scene": "stationary",
+      "gpuTiming": false,
+      "grassBundles": false,
+      "completedFps": 52.92016405250856,
+      "completedElapsedMs": 6802.7,
+      "frame": {
+        "mean": 18.6897222222222,
+        "p50": 18.700000000000003,
+        "p95": 20.1
+      },
+      "encode": {
+        "mean": 0.5430555498434437,
+        "p50": 0.5,
+        "p95": 0.8999999761581421
+      },
+      "gpu": null,
+      "draws": 225,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    },
+    {
+      "variant": "bundle-experiment-repeat",
+      "version": 2,
+      "target": "browser",
+      "resolution": "1440p",
+      "scene": "stationary",
+      "gpuTiming": false,
+      "grassBundles": true,
+      "completedFps": 52.55474452554745,
+      "completedElapsedMs": 6850,
+      "frame": {
+        "mean": 18.813333333333325,
+        "p50": 19,
+        "p95": 20
+      },
+      "encode": {
+        "mean": 0.5480555515322421,
+        "p50": 0.6000000238418579,
+        "p95": 0.7999999523162842
+      },
+      "gpu": null,
+      "draws": 363,
+      "tufts": 284324,
+      "triangles": 5315520,
+      "coverage": 0.0012591764538392267,
+      "particles": 0
+    }
+  ],
+  "nativeFinal": [
+    {
+      "adapter": "Apple M2",
+      "adapter_metadata": {
+        "architecture": null,
+        "description": "Apple M2",
+        "device": null,
+        "device_type": "IntegratedGpu",
+        "driver": null,
+        "driver_info": null,
+        "fallback": null,
+        "source": "WgpuDevice",
+        "vendor": null
+      },
+      "backend": "Metal",
+      "benchmark_version": 2,
+      "cpu_frame_including_present_ms": {
+        "mean": 16.4438976861111,
+        "p50": 16.336416999999997,
+        "p95": 17.973665999999998
+      },
+      "encode_ms": {
+        "mean": 0.9738785748680433,
+        "p50": 0.9462920427322388,
+        "p95": 1.4359999895095825
+      },
+      "final_clipping_particles": 224,
+      "final_grass_draw_calls": 201,
+      "final_total_coverage": 0.041247908591779854,
+      "final_triangles": 4606174,
+      "final_visible_patches": 201,
+      "final_visible_tufts": 244831,
+      "fixed_dt_seconds": 0.008333333767950535,
+      "frame_ms": {
+        "mean": 16.64798136666666,
+        "p50": 16.579875,
+        "p95": 18.472915999999998
+      },
+      "gpu_completed_elapsed_ms": 6023.80425,
+      "gpu_completed_frames_per_second": 59.762898171865395,
+      "gpu_ms": null,
+      "gpu_timing_active": false,
+      "gpu_timing_requested": false,
+      "msaa": 4,
+      "quality": "High",
+      "render_scale": 1.0,
+      "sample_frames": 360,
+      "scene": "race",
+      "scope": "Shared renderer and scripted simulation. Frame intervals count CPU redraw callbacks, not display flips. GPU completed throughput drains the queue before and after measured frames. Excludes egui, loading and compositor display timing. GPU spans are asynchronous latest samples, not per-frame correlated.",
+      "seed": 42,
+      "simulation_ms": {
+        "mean": 0.44792570000000026,
+        "p50": 0.383416,
+        "p95": 0.564375
+      },
+      "surface": [
+        2560,
+        1440
+      ],
+      "warmup_frames": 90,
+      "world_hash": "9a9297eb37bdab86",
+      "world_target": [
+        2560,
+        1440
+      ]
+    },
+    {
+      "adapter": "Apple M2",
+      "adapter_metadata": {
+        "architecture": null,
+        "description": "Apple M2",
+        "device": null,
+        "device_type": "IntegratedGpu",
+        "driver": null,
+        "driver_info": null,
+        "fallback": null,
+        "source": "WgpuDevice",
+        "vendor": null
+      },
+      "backend": "Metal",
+      "benchmark_version": 2,
+      "cpu_frame_including_present_ms": {
+        "mean": 16.419752125,
+        "p50": 16.514291,
+        "p95": 17.685416999999998
+      },
+      "encode_ms": {
+        "mean": 0.442917438596487,
+        "p50": 0.4492499828338623,
+        "p95": 0.8175830245018005
+      },
+      "final_clipping_particles": 0,
+      "final_grass_draw_calls": 225,
+      "final_total_coverage": 0.0012591764561527099,
+      "final_triangles": 5315520,
+      "final_visible_patches": 225,
+      "final_visible_tufts": 284324,
+      "fixed_dt_seconds": 0.008333333767950535,
+      "frame_ms": {
+        "mean": 16.60738506944444,
+        "p50": 16.682042000000003,
+        "p95": 18.106917
+      },
+      "gpu_completed_elapsed_ms": 6012.307792,
+      "gpu_completed_frames_per_second": 59.87717403274287,
+      "gpu_ms": {
+        "mean": 16.18807983133528,
+        "p50": 16.158708572387695,
+        "p95": 16.548166275024414
+      },
+      "gpu_timing_active": true,
+      "gpu_timing_requested": true,
+      "msaa": 4,
+      "quality": "High",
+      "render_scale": 1.0,
+      "sample_frames": 360,
+      "scene": "stationary",
+      "scope": "Shared renderer and scripted simulation. Frame intervals count CPU redraw callbacks, not display flips. GPU completed throughput drains the queue before and after measured frames. Excludes egui, loading and compositor display timing. GPU spans are asynchronous latest samples, not per-frame correlated.",
+      "seed": 42,
+      "simulation_ms": {
+        "mean": 7.93111111111112e-05,
+        "p50": 8.3e-05,
+        "p95": 0.00020800000000000001
+      },
+      "surface": [
+        2560,
+        1440
+      ],
+      "warmup_frames": 90,
+      "world_hash": "9a9297eb37bdab86",
+      "world_target": [
+        2560,
+        1440
+      ]
+    },
+    {
+      "adapter": "Apple M2",
+      "adapter_metadata": {
+        "architecture": null,
+        "description": "Apple M2",
+        "device": null,
+        "device_type": "IntegratedGpu",
+        "driver": null,
+        "driver_info": null,
+        "fallback": null,
+        "source": "WgpuDevice",
+        "vendor": null
+      },
+      "backend": "Metal",
+      "benchmark_version": 2,
+      "cpu_frame_including_present_ms": {
+        "mean": 16.562850916666658,
+        "p50": 16.439958,
+        "p95": 17.661625
+      },
+      "encode_ms": {
+        "mean": 0.36878936106546056,
+        "p50": 0.3396660089492798,
+        "p95": 0.5623329877853394
+      },
+      "final_clipping_particles": 0,
+      "final_grass_draw_calls": 225,
+      "final_total_coverage": 0.0012591764561527099,
+      "final_triangles": 5315520,
+      "final_visible_patches": 225,
+      "final_visible_tufts": 284324,
+      "fixed_dt_seconds": 0.008333333767950535,
+      "frame_ms": {
+        "mean": 16.755127891666653,
+        "p50": 16.5785,
+        "p95": 18.197125
+      },
+      "gpu_completed_elapsed_ms": 6066.917208,
+      "gpu_completed_frames_per_second": 59.33820879000859,
+      "gpu_ms": null,
+      "gpu_timing_active": false,
+      "gpu_timing_requested": false,
+      "msaa": 4,
+      "quality": "High",
+      "render_scale": 1.0,
+      "sample_frames": 360,
+      "scene": "stationary",
+      "scope": "Shared renderer and scripted simulation. Frame intervals count CPU redraw callbacks, not display flips. GPU completed throughput drains the queue before and after measured frames. Excludes egui, loading and compositor display timing. GPU spans are asynchronous latest samples, not per-frame correlated.",
+      "seed": 42,
+      "simulation_ms": {
+        "mean": 7.559166666666675e-05,
+        "p50": 8.3e-05,
+        "p95": 0.000166
+      },
+      "surface": [
+        2560,
+        1440
+      ],
+      "warmup_frames": 90,
+      "world_hash": "9a9297eb37bdab86",
+      "world_target": [
+        2560,
+        1440
+      ]
+    },
+    {
+      "adapter": "Apple M2",
+      "adapter_metadata": {
+        "architecture": null,
+        "description": "Apple M2",
+        "device": null,
+        "device_type": "IntegratedGpu",
+        "driver": null,
+        "driver_info": null,
+        "fallback": null,
+        "source": "WgpuDevice",
+        "vendor": null
+      },
+      "backend": "Metal",
+      "benchmark_version": 2,
+      "cpu_frame_including_present_ms": {
+        "mean": 16.384270538888877,
+        "p50": 16.473041000000002,
+        "p95": 18.0775
+      },
+      "encode_ms": {
+        "mean": 1.1735798387891716,
+        "p50": 1.1357909440994263,
+        "p95": 1.8257499933242798
+      },
+      "final_clipping_particles": 224,
+      "final_grass_draw_calls": 201,
+      "final_total_coverage": 0.041247908591779854,
+      "final_triangles": 4606174,
+      "final_visible_patches": 201,
+      "final_visible_tufts": 244831,
+      "fixed_dt_seconds": 0.008333333767950535,
+      "frame_ms": {
+        "mean": 16.580566436111102,
+        "p50": 16.660042,
+        "p95": 18.305583
+      },
+      "gpu_completed_elapsed_ms": 5998.554625,
+      "gpu_completed_frames_per_second": 60.01445723268712,
+      "gpu_ms": {
+        "mean": 13.197611308097839,
+        "p50": 13.331125259399414,
+        "p95": 14.49445915222168
+      },
+      "gpu_timing_active": true,
+      "gpu_timing_requested": true,
+      "msaa": 4,
+      "quality": "High",
+      "render_scale": 1.0,
+      "sample_frames": 360,
+      "scene": "race",
+      "scope": "Shared renderer and scripted simulation. Frame intervals count CPU redraw callbacks, not display flips. GPU completed throughput drains the queue before and after measured frames. Excludes egui, loading and compositor display timing. GPU spans are asynchronous latest samples, not per-frame correlated.",
+      "seed": 42,
+      "simulation_ms": {
+        "mean": 0.49023209444444443,
+        "p50": 0.452292,
+        "p95": 0.604375
+      },
+      "surface": [
+        1280,
+        720
+      ],
+      "warmup_frames": 90,
+      "world_hash": "9a9297eb37bdab86",
+      "world_target": [
+        1280,
+        720
+      ]
+    },
+    {
+      "adapter": "Apple M2",
+      "adapter_metadata": {
+        "architecture": null,
+        "description": "Apple M2",
+        "device": null,
+        "device_type": "IntegratedGpu",
+        "driver": null,
+        "driver_info": null,
+        "fallback": null,
+        "source": "WgpuDevice",
+        "vendor": null
+      },
+      "backend": "Metal",
+      "benchmark_version": 2,
+      "cpu_frame_including_present_ms": {
+        "mean": 16.37878184722222,
+        "p50": 16.403666,
+        "p95": 17.770625000000003
+      },
+      "encode_ms": {
+        "mean": 0.5083293021553092,
+        "p50": 0.46004098653793335,
+        "p95": 0.7086250185966492
+      },
+      "final_clipping_particles": 0,
+      "final_grass_draw_calls": 225,
+      "final_total_coverage": 0.0012591764561527099,
+      "final_triangles": 5315520,
+      "final_visible_patches": 225,
+      "final_visible_tufts": 284324,
+      "fixed_dt_seconds": 0.008333333767950535,
+      "frame_ms": {
+        "mean": 16.581833219444462,
+        "p50": 16.622666000000002,
+        "p95": 18.033125000000002
+      },
+      "gpu_completed_elapsed_ms": 6001.7977089999995,
+      "gpu_completed_frames_per_second": 59.98202829464942,
+      "gpu_ms": {
+        "mean": 13.885771989822388,
+        "p50": 13.901333808898926,
+        "p95": 14.509333610534668
+      },
+      "gpu_timing_active": true,
+      "gpu_timing_requested": true,
+      "msaa": 4,
+      "quality": "High",
+      "render_scale": 1.0,
+      "sample_frames": 360,
+      "scene": "stationary",
+      "scope": "Shared renderer and scripted simulation. Frame intervals count CPU redraw callbacks, not display flips. GPU completed throughput drains the queue before and after measured frames. Excludes egui, loading and compositor display timing. GPU spans are asynchronous latest samples, not per-frame correlated.",
+      "seed": 42,
+      "simulation_ms": {
+        "mean": 0.0001700472222222224,
+        "p50": 0.000125,
+        "p95": 0.000292
+      },
+      "surface": [
+        1280,
+        720
+      ],
+      "warmup_frames": 90,
+      "world_hash": "9a9297eb37bdab86",
+      "world_target": [
+        1280,
+        720
+      ]
+    },
+    {
+      "adapter": "Apple M2",
+      "adapter_metadata": {
+        "architecture": null,
+        "description": "Apple M2",
+        "device": null,
+        "device_type": "IntegratedGpu",
+        "driver": null,
+        "driver_info": null,
+        "fallback": null,
+        "source": "WgpuDevice",
+        "vendor": null
+      },
+      "backend": "Metal",
+      "benchmark_version": 2,
+      "cpu_frame_including_present_ms": {
+        "mean": 16.350054616666657,
+        "p50": 16.359208,
+        "p95": 17.762916999999998
+      },
+      "encode_ms": {
+        "mean": 0.40859733199079834,
+        "p50": 0.3696660101413727,
+        "p95": 0.5615419745445251
+      },
+      "final_clipping_particles": 0,
+      "final_grass_draw_calls": 225,
+      "final_total_coverage": 0.0012591764561527099,
+      "final_triangles": 5315520,
+      "final_visible_patches": 225,
+      "final_visible_tufts": 284324,
+      "fixed_dt_seconds": 0.008333333767950535,
+      "frame_ms": {
+        "mean": 16.579502083333335,
+        "p50": 16.586209,
+        "p95": 18.392791
+      },
+      "gpu_completed_elapsed_ms": 6000.734334,
+      "gpu_completed_frames_per_second": 59.99265755863406,
+      "gpu_ms": null,
+      "gpu_timing_active": false,
+      "gpu_timing_requested": false,
+      "msaa": 4,
+      "quality": "High",
+      "render_scale": 1.0,
+      "sample_frames": 360,
+      "scene": "stationary",
+      "scope": "Shared renderer and scripted simulation. Frame intervals count CPU redraw callbacks, not display flips. GPU completed throughput drains the queue before and after measured frames. Excludes egui, loading and compositor display timing. GPU spans are asynchronous latest samples, not per-frame correlated.",
+      "seed": 42,
+      "simulation_ms": {
+        "mean": 0.0002564833333333335,
+        "p50": 0.000167,
+        "p95": 0.000375
+      },
+      "surface": [
+        1280,
+        720
+      ],
+      "warmup_frames": 90,
+      "world_hash": "9a9297eb37bdab86",
+      "world_target": [
+        1280,
+        720
+      ]
+    }
+  ],
+  "bundleImageComparison": {
+    "adapter": "Apple M2",
+    "backend": "Metal",
+    "comparisons": [
+      {
+        "image": "asteroid-culled-4x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-day-1x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-day-2x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-day-4x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-night-1x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-night-2x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-night-4x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-race-1x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-race-2x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-race-4x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-victory-1x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-victory-2x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      },
+      {
+        "image": "asteroid-victory-4x.ppm",
+        "identical": true,
+        "different_bytes": 0,
+        "lengths_match": true
+      }
+    ]
+  }
+}

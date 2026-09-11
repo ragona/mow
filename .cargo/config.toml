@@ -1,0 +1,3 @@
+[alias]
+# Build the release WebGPU/WASM target and open the local browser experience.
+web = "run --package lawn_web_dev --"

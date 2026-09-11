@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use gilrs::{
     Button, EventType, Gilrs,
@@ -16,6 +18,50 @@ use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     keyboard::{KeyCode, PhysicalKey},
 };
+
+/// WASM's compilation target does not identify the user's keyboard platform.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BrowserKeyboardPlatform {
+    Apple,
+    Other,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl BrowserKeyboardPlatform {
+    pub(crate) fn from_browser(platform: &str, user_agent: &str) -> Self {
+        let apple = ["Mac", "iPhone", "iPad", "iPod"]
+            .iter()
+            .any(|prefix| platform.starts_with(prefix))
+            || (platform.is_empty()
+                && ["Macintosh", "Mac OS", "iPhone", "iPad", "iPod"]
+                    .iter()
+                    .any(|name| user_agent.contains(name)));
+        if apple { Self::Apple } else { Self::Other }
+    }
+
+    pub(crate) fn normalize_modifiers(self, event: &WindowEvent, input: &mut egui::RawInput) {
+        match event {
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let modifiers = modifiers.state();
+                let mac_cmd = matches!(self, Self::Apple) && modifiers.super_key();
+                input.modifiers = egui::Modifiers {
+                    alt: modifiers.alt_key(),
+                    ctrl: modifiers.control_key(),
+                    shift: modifiers.shift_key(),
+                    mac_cmd,
+                    command: if matches!(self, Self::Apple) {
+                        mac_cmd
+                    } else {
+                        modifiers.control_key()
+                    },
+                };
+            }
+            WindowEvent::Focused(false) => input.modifiers = egui::Modifiers::NONE,
+            _ => {}
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 struct GamepadInput {
@@ -498,6 +544,73 @@ fn matches_binding(controls: &ControlMap, action: Action, candidate: &Binding) -
 mod tests {
     use super::*;
     use gilrs::Axis;
+    use winit::keyboard::ModifiersState;
+
+    #[test]
+    fn browser_select_all_and_paste_survives_modifier_release_before_frame() {
+        for (platform, shortcut_modifier) in [
+            ("MacIntel", ModifiersState::SUPER),
+            ("iPad", ModifiersState::SUPER),
+            ("Win32", ModifiersState::CONTROL),
+            ("Linux x86_64", ModifiersState::CONTROL),
+        ] {
+            let keyboard = BrowserKeyboardPlatform::from_browser(platform, "");
+            let context = egui::Context::default();
+            let text_id = egui::Id::new("browser-seed");
+            let mut seed = "123456789".to_owned();
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                ui.add(egui::TextEdit::singleline(&mut seed).id(text_id));
+                ui.memory_mut(|memory| memory.request_focus(text_id));
+            });
+            let mut input = egui::RawInput::default();
+            keyboard.normalize_modifiers(
+                &WindowEvent::ModifiersChanged(shortcut_modifier.into()),
+                &mut input,
+            );
+            input.events.push(egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: Some(egui::Key::A),
+                pressed: true,
+                repeat: false,
+                modifiers: input.modifiers,
+            });
+            // Releasing Command/Ctrl before RAF must not erase the modifier
+            // snapshot already attached to the select-all key event.
+            keyboard.normalize_modifiers(
+                &WindowEvent::ModifiersChanged(ModifiersState::empty().into()),
+                &mut input,
+            );
+            input.events.push(egui::Event::Paste("42".into()));
+            assert_eq!(input.modifiers, egui::Modifiers::NONE);
+            let _ = context.run_ui(input, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut seed).id(text_id));
+            });
+            assert_eq!(seed, "42", "select-all then paste on {platform}");
+        }
+    }
+
+    #[test]
+    fn browser_command_mapping_preserves_control_and_clears_on_blur() {
+        let keyboard = BrowserKeyboardPlatform::from_browser("", "Mozilla/5.0 (Macintosh)");
+        let mut input = egui::RawInput::default();
+        keyboard.normalize_modifiers(
+            &WindowEvent::ModifiersChanged(ModifiersState::CONTROL.into()),
+            &mut input,
+        );
+        assert!(input.modifiers.ctrl);
+        assert!(!input.modifiers.command, "Mac Control is not Command");
+        keyboard.normalize_modifiers(
+            &WindowEvent::ModifiersChanged(
+                (ModifiersState::SUPER | ModifiersState::ALT | ModifiersState::SHIFT).into(),
+            ),
+            &mut input,
+        );
+        assert!(input.modifiers.command && input.modifiers.mac_cmd);
+        assert!(input.modifiers.alt && input.modifiers.shift);
+        assert!(!input.modifiers.ctrl);
+        keyboard.normalize_modifiers(&WindowEvent::Focused(false), &mut input);
+        assert_eq!(input.modifiers, egui::Modifiers::NONE);
+    }
 
     #[test]
     fn focus_loss_clears_drag_buttons_and_queued_actions() {

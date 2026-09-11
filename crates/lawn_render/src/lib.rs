@@ -1,5 +1,6 @@
 //! `wgpu` renderer for Lawn Orbit.
 
+mod adapter_metadata;
 mod bloom;
 mod gpu_profiler;
 mod grass_bounds;
@@ -12,9 +13,12 @@ mod sky;
 mod surface;
 mod vehicle_presentation;
 
+pub use adapter_metadata::{AdapterMetadata, AdapterMetadataSource};
 pub use renderer::{
-    FrameAcquireError, FrameStats, RenderCapabilities, RenderFrame, RenderTier, Renderer,
+    FrameAcquireError, FrameStats, RenderCapabilities, RenderDiagnostics, RenderFrame, RenderTier,
+    Renderer,
 };
+pub use sky::PreparedSky;
 
 #[cfg(test)]
 mod tests {
