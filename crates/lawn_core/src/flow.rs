@@ -55,7 +55,7 @@ impl GameFlow {
             (Boot, BootComplete) | (WorldEditor | Results, ReturnToTitle) => Title,
             (Title | Results, OpenWorldEditor)
             | (Paused | Playing | Results, ReturnToWorldEditor) => WorldEditor,
-            (WorldEditor | Results, StartLoading) => Loading,
+            (Title | WorldEditor | Results, StartLoading) => Loading,
             (Loading, LoadComplete) | (Paused, Resume) => Playing,
             (Playing, Pause) => Paused,
             (Playing, Finish) => Results,
@@ -97,6 +97,22 @@ mod tests {
             flow.transition(action).unwrap();
         }
         assert_eq!(flow.state(), GameState::Results);
+    }
+
+    #[test]
+    fn quick_play_and_play_again_skip_the_world_editor() {
+        let mut flow = GameFlow::default();
+        for (action, expected) in [
+            (FlowAction::BootComplete, GameState::Title),
+            (FlowAction::StartLoading, GameState::Loading),
+            (FlowAction::LoadComplete, GameState::Playing),
+            (FlowAction::Finish, GameState::Results),
+            (FlowAction::StartLoading, GameState::Loading),
+            (FlowAction::LoadComplete, GameState::Playing),
+        ] {
+            assert_eq!(flow.transition(action).unwrap(), expected);
+            assert_eq!(flow.state(), expected);
+        }
     }
 
     #[test]

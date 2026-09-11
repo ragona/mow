@@ -79,8 +79,10 @@ and `cargo run --release -p lawn_orbit -- --benchmark --gpu-timing` use the same
 scripted renderer workload without changing saves. See
 [`BROWSER_PERFORMANCE.md`](BROWSER_PERFORMANCE.md) for measurements and limitations.
 
-The first launch opens the title screen. Open the world editor to choose a terrain
-preset or tune planet size, rockiness, peak count, peak height, and rolling terrain.
+The first launch opens the title screen. Choose the prominent **Mow** button to
+start a Turf Race on a random planet. The smaller **Customize planet** option
+opens the world editor, where you can choose Free Mow, select a terrain preset,
+or tune planet size, rockiness, peak count, peak height, and rolling terrain.
 The planet updates beside the controls as you edit, including when you change its
 seed. Rockiness can be set to 0% for a fully grassy world without outcroppings;
 the Meadow preset starts there. Enter a hexadecimal, decimal, or phrase seed,
@@ -113,8 +115,9 @@ driving, cutting, boost, and recovery rules. Harmless bumper contacts shove both
 mowers along the surface, so a timely bump can disrupt a route without damage or
 lost territory. Coral and blue shares grow across a shared top bar, with unclaimed
 grass between them; a marker helps locate the rival on the far side of the globe.
-The result card opens automatically and offers a rematch on the same planet,
-the world editor, or a new random planet. Winning also starts a victory lap:
+The result card opens automatically with **Mow again** as its primary action,
+starting a Turf Race on a new random planet. **Rematch** races the same planet,
+and **Customize planet** opens the world editor. Winning also starts a victory lap:
 the rival bursts into colorful fragments, and you can keep driving and cutting
 with the win card open. Choose Keep mowing to dismiss it and enjoy the rest of
 the lawn; the final race score and time stay fixed. Losses and draws stop at

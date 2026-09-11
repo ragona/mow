@@ -125,6 +125,104 @@ pub(super) fn icon_button(ui: &mut egui::Ui, kind: Icon, label: &str) -> Respons
     response.on_hover_text(label)
 }
 
+/// The main play action: a raised coral face and a little orbital play badge.
+/// All decoration shares one response, so pointer and keyboard activation agree.
+pub(super) fn mow_button(ui: &mut egui::Ui, label: &str, size: [f32; 2]) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size.into(), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let pressed = response.is_pointer_button_down_on();
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    let radius = 17;
+    let base = Color32::from_rgb(182, 91, 63);
+    let face = Rect::from_min_max(
+        rect.min + Vec2::new(0.0, if pressed { 4.0 } else { 0.0 }),
+        rect.max - Vec2::new(0.0, if pressed { 1.0 } else { 5.0 }),
+    );
+    painter.rect_filled(rect, radius, base);
+    painter.rect_filled(
+        face,
+        radius,
+        if pressed {
+            Color32::from_rgb(237, 134, 96)
+        } else if hovered {
+            Color32::from_rgb(255, 175, 129)
+        } else {
+            GARDEN_CORAL
+        },
+    );
+    painter.rect_stroke(
+        face.shrink(1.0),
+        radius - 1,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 249, 231, 100)),
+        egui::StrokeKind::Inside,
+    );
+    if response.has_focus() || hovered {
+        painter.rect_stroke(
+            rect.expand(3.0),
+            radius + 3,
+            Stroke::new(2.0, GARDEN_PINE),
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    let center = face.center();
+    let compact = size[1] < 80.0;
+    painter.text(
+        Pos2::new(face.left() + 20.0, center.y - 10.0),
+        Align2::LEFT_CENTER,
+        label,
+        display(if compact { 28.0 } else { 38.0 }),
+        GARDEN_PINE,
+    );
+    painter.text(
+        Pos2::new(
+            face.left() + 21.0,
+            center.y + if compact { 16.0 } else { 21.0 },
+        ),
+        Align2::LEFT_CENTER,
+        "Race a fresh planet",
+        FontId::proportional(11.0),
+        GARDEN_PINE,
+    );
+
+    let badge = Pos2::new(face.right() - 44.0, center.y);
+    let orbit: Vec<_> = (0..=48)
+        .map(|step| {
+            let angle = step as f32 / 48.0 * std::f32::consts::TAU;
+            let offset = Vec2::new(angle.cos() * 33.0, angle.sin() * 17.0);
+            badge + egui::emath::Rot2::from_angle(-0.55) * offset
+        })
+        .collect();
+    painter.add(Shape::line(
+        orbit,
+        Stroke::new(1.5, GARDEN_PINE.gamma_multiply(0.35)),
+    ));
+    painter.circle_filled(badge, 24.0, GARDEN_PINE);
+    painter.circle_stroke(
+        badge,
+        20.5,
+        Stroke::new(1.0, GARDEN_SAGE.gamma_multiply(0.35)),
+    );
+    painter.add(Shape::convex_polygon(
+        vec![
+            badge + Vec2::new(-5.0, -9.0),
+            badge + Vec2::new(9.0, 0.0),
+            badge + Vec2::new(-5.0, 9.0),
+        ],
+        GARDEN_CREAM,
+        Stroke::NONE,
+    ));
+    icon(
+        painter,
+        badge + Vec2::new(20.0, -22.0),
+        12.0,
+        Icon::Leaf,
+        GARDEN_PINE,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub(super) fn preset_card(ui: &mut egui::Ui, label: &str, selected: bool, peaks: u8) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(94.0, 86.0), Sense::click());
     let painter = ui.painter();

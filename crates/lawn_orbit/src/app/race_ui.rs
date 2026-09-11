@@ -6,8 +6,8 @@ use lawn_core::{camera::CameraState, input::Action};
 
 use super::{
     GARDEN_CORAL, GARDEN_CREAM, GARDEN_MUTED, GARDEN_PINE, GARDEN_RIVAL, LawnOrbitApp, RaceOutcome,
-    UiCommand, action_label, display, format_time, garden_button, garden_card,
-    garden_ui::{Icon, icon, keycap},
+    UiCommand, action_label, display, format_time, garden_card,
+    garden_ui::{Icon, icon, keycap, mow_button},
 };
 
 impl LawnOrbitApp {
@@ -60,20 +60,20 @@ impl LawnOrbitApp {
                             .color(GARDEN_MUTED),
                     );
                     ui.add_space(8.0);
-                    if garden_button(ui, "Keep mowing", [270.0, 36.0], true).clicked() {
+                    if mow_button(ui, "Mow again", [270.0, 70.0]).clicked() {
+                        commands.push(UiCommand::Mow);
+                    }
+                    if ui.button("Keep mowing").clicked() {
                         commands.push(UiCommand::KeepMowing);
                     }
                     ui.horizontal(|ui| {
                         if ui.button("Rematch").clicked() {
                             commands.push(UiCommand::Restart);
                         }
-                        if ui.button("World editor").clicked() {
+                        if ui.button("Customize planet").clicked() {
                             commands.push(UiCommand::ReturnToEditor);
                         }
                     });
-                    if ui.button("New random planet").clicked() {
-                        commands.push(UiCommand::Random);
-                    }
                 });
         } else {
             egui::Area::new("victory-status".into())
@@ -119,14 +119,33 @@ impl LawnOrbitApp {
                                 ui.label("Hold to recover your mower");
                             });
                         } else {
+                            ui.horizontal_wrapped(|ui| {
+                                for action in [
+                                    Action::Accelerate,
+                                    Action::SteerLeft,
+                                    Action::BrakeReverse,
+                                    Action::SteerRight,
+                                ] {
+                                    keycap(
+                                        ui,
+                                        &action_label(
+                                            &self.profile.settings.controls,
+                                            action,
+                                            gamepad,
+                                        ),
+                                    );
+                                }
+                                ui.label("Move to mow");
+                            });
                             ui.label(
-                                RichText::new("Claim fresh grass. Bump your rival off their line.")
-                                    .size(14.0),
+                                RichText::new("Claim fresh grass. First past 50% wins.").size(14.0),
                             );
                             ui.label(
-                                RichText::new("Cut grass stays claimed — find a fresh route.")
-                                    .size(11.0)
-                                    .color(GARDEN_MUTED),
+                                RichText::new(
+                                    "Bump your rival off their line. Cut grass stays claimed.",
+                                )
+                                .size(11.0)
+                                .color(GARDEN_MUTED),
                             );
                         }
                     });
@@ -139,12 +158,16 @@ impl LawnOrbitApp {
         let screen = context.content_rect();
         let camera = self.run.camera.state;
         let rival_position = rival.state.transform.position;
-        let marker = rival_marker(
+        let mut marker = rival_marker(
             camera,
             self.run.vehicle.state.transform.position,
             rival_position,
             screen,
         );
+        if self.run.simulation_seconds < 12.0 {
+            // Leave room for the initial movement and race-rules card.
+            marker.position.y = marker.position.y.min(screen.bottom() - 154.0);
+        }
         let label = if marker.hidden {
             "Rival · far side"
         } else {
@@ -243,15 +266,15 @@ impl LawnOrbitApp {
                         .color(GARDEN_MUTED),
                 );
                 ui.add_space(14.0);
-                if garden_button(ui, "Rematch", [342.0, 40.0], true).clicked() {
-                    commands.push(UiCommand::Restart);
+                if mow_button(ui, "Mow again", [342.0, 70.0]).clicked() {
+                    commands.push(UiCommand::Mow);
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("World editor").clicked() {
-                        commands.push(UiCommand::ReturnToEditor);
+                    if ui.button("Rematch").clicked() {
+                        commands.push(UiCommand::Restart);
                     }
-                    if ui.button("New random planet").clicked() {
-                        commands.push(UiCommand::Random);
+                    if ui.button("Customize planet").clicked() {
+                        commands.push(UiCommand::ReturnToEditor);
                     }
                 });
             });

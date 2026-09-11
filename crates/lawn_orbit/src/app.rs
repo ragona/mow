@@ -40,7 +40,8 @@ mod race_ui;
 #[cfg(test)]
 mod ui_capture_tests;
 use garden_ui::{
-    Icon, action_label, boost_meter, coverage_dial, display, icon, icon_button, keycap, preset_card,
+    Icon, action_label, boost_meter, coverage_dial, display, icon, icon_button, keycap, mow_button,
+    preset_card,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +53,7 @@ enum ConfirmAction {
 
 #[derive(Clone, Debug)]
 enum UiCommand {
+    Mow,
     OpenEditor,
     OpenSettings,
     Back,
@@ -151,7 +153,10 @@ impl SceneTransition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GenerationPurpose {
     Preview,
-    Play,
+    Play {
+        mode: GameMode,
+        return_state: GameState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -825,8 +830,8 @@ impl LawnOrbitApp {
                 self.results = None;
                 self.clock = FixedStepClock::default();
                 self.status_message = None;
-                if purpose == GenerationPurpose::Play {
-                    self.begin_selected_game();
+                if let GenerationPurpose::Play { mode, .. } = purpose {
+                    self.begin_game(mode);
                 } else {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.upload_planet(&self.run);
@@ -836,10 +841,18 @@ impl LawnOrbitApp {
                 }
             }
             Err(error) => {
-                if purpose == GenerationPurpose::Play || self.editor_recipe() == Some(recipe) {
+                if matches!(purpose, GenerationPurpose::Play { .. })
+                    || self.editor_recipe() == Some(recipe)
+                {
                     self.status_message = Some(format!("Planet generation failed: {error}"));
                 }
-                self.state = GameState::WorldEditor;
+                self.state = match purpose {
+                    GenerationPurpose::Preview => GameState::WorldEditor,
+                    GenerationPurpose::Play { return_state, .. } => return_state,
+                };
+                if !self.input.is_focused() {
+                    self.pause();
+                }
             }
         }
     }
@@ -879,23 +892,41 @@ impl LawnOrbitApp {
         self.spawn_generation(recipe, GenerationPurpose::Preview);
     }
 
+    fn start_mow(&mut self) {
+        // Quick play has its own recipe and mode. A custom lawn (including an
+        // unfinished preview or a Free Mow selection) stays in the editor.
+        let recipe = WorldRecipe {
+            settings: WorldEditorSettings::from_generator(&self.game_config.generator),
+            seed: Self::random_seed(),
+        };
+        self.start_play_generation(recipe, GameMode::TurfRace);
+    }
+
     fn start_generation(&mut self, seed: WorldSeed) {
         let recipe = WorldRecipe {
             settings: self.world_editor,
             seed,
         };
+        self.seed_text = seed.to_string();
         if self.preview_recipe == Some(recipe) && self.pending_generation.is_none() {
             // The visible world already has full grass, mowing, and collision
             // data. Enter that exact world without another generation or upload.
-            self.begin_selected_game();
+            self.begin_game(self.selected_mode);
             return;
         }
-        self.spawn_generation(recipe, GenerationPurpose::Play);
-        self.state = if self.pending_generation.is_some() {
-            GameState::Loading
-        } else {
-            GameState::WorldEditor
-        };
+        self.start_play_generation(recipe, self.selected_mode);
+    }
+
+    fn start_play_generation(&mut self, recipe: WorldRecipe, mode: GameMode) {
+        let return_state = self.state;
+        // Drop any editor worker before attempting a new one, including when
+        // starting a replacement worker fails. Its result must never enter play.
+        self.pending_generation = None;
+        self.scene_transition = None;
+        self.spawn_generation(recipe, GenerationPurpose::Play { mode, return_state });
+        if self.pending_generation.is_some() {
+            self.state = GameState::Loading;
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -966,11 +997,11 @@ impl LawnOrbitApp {
         }
     }
 
-    fn begin_selected_game(&mut self) {
+    fn begin_game(&mut self, mode: GameMode) {
         // Mode changes reset claims and vehicles on the exact previewed planet.
         // Keep the preview camera as the start of the arrival animation.
         let camera = self.run.camera.state;
-        match self.selected_mode {
+        match mode {
             GameMode::TurfRace => self.run.start_race(&self.profile.settings.accessibility),
             GameMode::FreeMow => self
                 .run
@@ -1019,7 +1050,6 @@ impl LawnOrbitApp {
             self.run.planet.generator_version,
             self.run.planet.world_seed,
         );
-        self.seed_text = self.run.planet.world_seed.to_string();
         self.run.paused = false;
         self.run.tutorial_enabled =
             self.run.mode != GameMode::TurfRace && !self.profile.tutorial_completed;
@@ -1190,14 +1220,24 @@ impl LawnOrbitApp {
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
-                            "Grow a tiny planet, race a rival for the lawn,\nor take your time and mow in peace.",
+                            "Hop onto a random planet and race a rival.\nFirst to claim more than half the lawn wins.",
                         )
                         .color(GARDEN_MUTED),
                     );
                     ui.add_space(22.0);
-                    if garden_button(ui, "Create a Planet", [292.0, 46.0], true).clicked() {
+                    let mow = mow_button(ui, "Mow", [292.0, 88.0]);
+                    if !context.egui_wants_keyboard_input() {
+                        mow.request_focus();
+                    }
+                    if mow.clicked() {
+                        commands.push(UiCommand::Mow);
+                    }
+                    ui.add_space(6.0);
+                    if ui.button("Customize planet").clicked() {
                         commands.push(UiCommand::OpenEditor);
                     }
+                    ui.small("Shape your world or settle in for Free Mow.");
+                    ui.add_space(12.0);
                     if ui.button("Settings & Accessibility").clicked() {
                         commands.push(UiCommand::OpenSettings);
                     }
@@ -1737,7 +1777,7 @@ impl LawnOrbitApp {
                 if ui.button("New random planet").clicked() {
                     self.confirmation = Some(ConfirmAction::RandomPlanet);
                 }
-                if ui.button("Return to world editor").clicked() {
+                if ui.button("Customize planet").clicked() {
                     self.confirmation = Some(ConfirmAction::ReturnToEditor);
                 }
             });
@@ -1831,7 +1871,7 @@ impl LawnOrbitApp {
                     if ui.button("Retry seed").clicked() {
                         commands.push(UiCommand::Retry);
                     }
-                    if ui.button("World editor").clicked() {
+                    if ui.button("Customize planet").clicked() {
                         commands.push(UiCommand::ReturnToEditor);
                     }
                 });
@@ -2179,6 +2219,7 @@ impl LawnOrbitApp {
         let _ = event_loop;
         for command in commands {
             match command {
+                UiCommand::Mow => self.start_mow(),
                 UiCommand::OpenEditor | UiCommand::ReturnToEditor => {
                     self.enter_editor();
                 }
@@ -2201,16 +2242,19 @@ impl LawnOrbitApp {
                     self.save_profile();
                 }
                 UiCommand::Start(seed) => self.start_generation(seed),
-                UiCommand::Random => self.start_generation(Self::random_seed()),
+                UiCommand::Random => {
+                    if self.run.mode == GameMode::TurfRace {
+                        self.start_mow();
+                    } else {
+                        self.start_generation(Self::random_seed());
+                    }
+                }
                 UiCommand::Resume => self.resume(),
                 UiCommand::Pause => self.pause(),
                 UiCommand::SkipArrival => self.finish_arrival(),
                 UiCommand::KeepMowing => self.keep_mowing(),
                 UiCommand::ShowVictory => self.show_victory(),
-                UiCommand::Restart => {
-                    self.selected_mode = self.run.mode;
-                    self.begin_selected_game();
-                }
+                UiCommand::Restart => self.begin_game(self.run.mode),
                 UiCommand::Submit => self.finish_run(),
                 UiCommand::Retry => {
                     self.start_generation(self.run.planet.world_seed);
@@ -2735,6 +2779,7 @@ fn configure_egui_style(context: &egui::Context) {
     context.set_visuals_of(egui::Theme::Dark, visuals.clone());
     context.set_visuals_of(egui::Theme::Light, visuals);
     context.all_styles_mut(|style| {
+        style.interaction.selectable_labels = false;
         style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         style.spacing.button_padding = egui::vec2(12.0, 7.0);
         style.spacing.interact_size.y = 26.0;
@@ -3120,6 +3165,139 @@ mod tests {
     }
 
     #[test]
+    fn title_defaults_to_mow_and_keeps_customization_separate() {
+        let mut app = preview_app();
+        app.return_to_title();
+        let context = egui::Context::default();
+        configure_egui_style(&context);
+        draw_keyboard_test_frame(&mut app, &context, Vec::new());
+        draw_keyboard_test_frame(&mut app, &context, Vec::new());
+        let commands =
+            draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Enter));
+        assert!(matches!(commands.as_slice(), [UiCommand::Mow]));
+        draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Tab));
+        let commands =
+            draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Enter));
+        assert!(matches!(commands.as_slice(), [UiCommand::OpenEditor]));
+        assert!(app.pending_generation.is_none());
+    }
+
+    #[test]
+    fn quick_mow_replaces_pending_preview_without_changing_the_custom_lawn() {
+        let mut app = preview_app();
+        app.profile_write_enabled = false;
+        app.world_editor = WorldEditorSettings::meadow();
+        app.selected_mode = GameMode::FreeMow;
+        app.seed_text = "my quiet garden".into();
+        let custom_recipe = app.editor_recipe().unwrap();
+        request_preview(&mut app);
+        app.return_to_title();
+        app.start_mow();
+        assert_eq!(app.state, GameState::Loading);
+        let quick_recipe = app.pending_generation.as_ref().unwrap().recipe;
+        assert_eq!(
+            quick_recipe.settings,
+            WorldEditorSettings::from_generator(&app.game_config.generator)
+        );
+        assert_ne!(quick_recipe.seed, custom_recipe.seed);
+        finish_preview(&mut app);
+        assert_eq!(app.state, GameState::Playing);
+        assert_eq!(app.run.mode, GameMode::TurfRace);
+        assert_eq!(app.run.planet.world_seed, quick_recipe.seed);
+        assert!(app.run.race.is_some() && app.run.rival.is_some());
+        assert!(!app.run.tutorial_enabled);
+        assert_eq!(app.run.simulation_seconds, 0.0);
+        assert_eq!(app.editor_recipe(), Some(custom_recipe));
+        assert_eq!(app.seed_text, "my quiet garden");
+        assert_eq!(app.selected_mode, GameMode::FreeMow);
+        assert_eq!(app.profile.recent_seeds[0].seed, quick_recipe.seed);
+
+        // A rematch uses the active race even though the editor prefers Free Mow.
+        app.begin_game(app.run.mode);
+        assert_eq!(app.run.mode, GameMode::TurfRace);
+        assert_eq!(app.run.planet.world_seed, quick_recipe.seed);
+        assert_eq!(app.selected_mode, GameMode::FreeMow);
+
+        app.start_mow();
+        finish_preview(&mut app);
+        assert_eq!(app.run.mode, GameMode::TurfRace);
+        assert_ne!(app.run.planet.world_seed, quick_recipe.seed);
+        app.enter_editor();
+        request_preview(&mut app);
+        finish_preview(&mut app);
+        assert_eq!(app.run.planet.world_seed, custom_recipe.seed);
+        assert!(app.run.planet.mountains.is_empty());
+        let custom_hash = app.run.planet.deterministic_hash;
+        app.start_generation(custom_recipe.seed);
+        assert_eq!(app.state, GameState::Playing);
+        assert_eq!(app.run.mode, GameMode::FreeMow);
+        assert_eq!(app.run.planet.deterministic_hash, custom_hash);
+        assert!(app.pending_generation.is_none());
+    }
+
+    #[test]
+    fn quick_mow_failure_returns_to_its_menu_and_preserves_the_previous_lawn() {
+        for state in [GameState::Title, GameState::Results] {
+            let mut app = preview_app();
+            app.profile_write_enabled = false;
+            app.state = state;
+            let original = app.run.planet.deterministic_hash;
+            let custom = app.editor_recipe();
+            app.start_mow();
+            let (sender, receiver) = mpsc::channel();
+            sender.send(Err("test generation failure".into())).unwrap();
+            app.pending_generation.as_mut().unwrap().receiver = receiver;
+            app.poll_generation();
+            assert_eq!(app.state, state);
+            assert_eq!(app.run.planet.deterministic_hash, original);
+            assert_eq!(app.editor_recipe(), custom);
+            assert!(
+                app.status_message
+                    .as_ref()
+                    .unwrap()
+                    .contains("test generation failure")
+            );
+            assert!(app.pending_generation.is_none());
+            app.start_mow();
+            finish_preview(&mut app);
+            assert_eq!(app.state, GameState::Playing);
+            assert_eq!(app.run.mode, GameMode::TurfRace);
+        }
+    }
+
+    #[test]
+    fn failed_mow_again_keeps_an_unfocused_victory_lap_paused() {
+        let mut app = win_moving_race();
+        let seconds = app.run.simulation_seconds;
+        app.start_mow();
+        app.window_focus_changed(false);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Err("test generation failure".into())).unwrap();
+        app.pending_generation.as_mut().unwrap().receiver = receiver;
+        app.poll_generation();
+        assert_eq!(app.state, GameState::Paused);
+        assert!(app.run.paused && app.run.is_victory_lap());
+        assert!(app.victory_card_open);
+        app.update_simulation(Duration::from_secs(1));
+        assert_eq!(app.run.simulation_seconds, seconds);
+    }
+
+    #[test]
+    fn background_quick_mow_does_not_resume_an_unfocused_game() {
+        let mut app = preview_app();
+        app.profile_write_enabled = false;
+        app.return_to_title();
+        app.start_mow();
+        app.window_focus_changed(false);
+        finish_preview(&mut app);
+        assert_eq!(app.state, GameState::Paused);
+        assert_eq!(app.run.mode, GameMode::TurfRace);
+        assert!(app.run.paused);
+        app.update_simulation(Duration::from_secs(1));
+        assert_eq!(app.run.simulation_seconds, 0.0);
+    }
+
+    #[test]
     fn background_generation_does_not_resume_an_unfocused_game() {
         let mut app = preview_app();
         app.start_generation(WorldSeed(42));
@@ -3328,7 +3506,7 @@ mod tests {
         app.profile.settings.accessibility.reduced_motion = true;
         assert_eq!(app.selected_mode, GameMode::TurfRace);
         let planet_hash = app.run.planet.deterministic_hash;
-        app.begin_selected_game();
+        app.begin_game(app.selected_mode);
         assert_eq!(app.run.mode, GameMode::TurfRace);
         assert!(app.run.rival.is_some());
         assert!(app.run.race.is_some());
@@ -3336,12 +3514,12 @@ mod tests {
         assert!(!app.run.tutorial_enabled);
         app.run.race.as_mut().unwrap().bumps = 7;
         app.run.simulation_seconds = 18.0;
-        app.begin_selected_game();
+        app.begin_game(app.selected_mode);
         assert_eq!(app.run.race.as_ref().unwrap().bumps, 0);
         assert_eq!(app.run.simulation_seconds, 0.0);
         assert_eq!(app.run.planet.deterministic_hash, planet_hash);
         app.selected_mode = GameMode::FreeMow;
-        app.begin_selected_game();
+        app.begin_game(app.selected_mode);
         assert_eq!(app.run.mode, GameMode::FreeMow);
         assert!(app.run.rival.is_none());
         assert!(app.run.race.is_none());
@@ -3355,7 +3533,7 @@ mod tests {
             let mut app = preview_app();
             app.profile_write_enabled = false;
             app.profile.settings.accessibility.reduced_motion = true;
-            app.begin_selected_game();
+            app.begin_game(app.selected_mode);
             app.run.race.as_mut().unwrap().outcome = Some(outcome);
             app.run.active = false;
             app.update_simulation(Duration::from_millis(17));
@@ -3365,7 +3543,7 @@ mod tests {
             assert!(app.results.is_none());
             assert!(app.profile.records.is_empty());
             assert!(!app.profile.tutorial_completed);
-            app.begin_selected_game();
+            app.begin_game(app.selected_mode);
             assert_eq!(app.state, GameState::Playing);
             assert_eq!(app.run.race.as_ref().unwrap().outcome, None);
             assert!(app.run.active);
@@ -3379,7 +3557,7 @@ mod tests {
         let mut app = preview_app();
         app.profile_write_enabled = false;
         app.profile.settings.accessibility.reduced_motion = true;
-        app.begin_selected_game();
+        app.begin_game(app.selected_mode);
         // Hold a real supported binding through the adapter, so a win that
         // clears input would be caught without platform-specific KeyEvent data.
         app.profile
@@ -3525,7 +3703,7 @@ mod tests {
         app.show_victory();
         assert_eq!(app.state, GameState::Playing);
         assert!(app.victory_card_open);
-        app.begin_selected_game();
+        app.begin_game(app.selected_mode);
         assert!(!app.victory_card_open);
         assert!(!app.run.is_victory_lap());
         assert!(app.run.rival.is_some());
@@ -3536,7 +3714,7 @@ mod tests {
         app.enter_editor();
         assert!(!app.victory_card_open);
         app.selected_mode = GameMode::FreeMow;
-        app.begin_selected_game();
+        app.begin_game(app.selected_mode);
         assert!(!app.victory_card_open);
         assert!(app.run.race.is_none() && app.run.rival.is_none());
     }
@@ -3549,6 +3727,7 @@ mod tests {
         let context = egui::Context::default();
         configure_egui_style(&context);
         draw_keyboard_test_frame(&mut app, &context, Vec::new());
+        draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Tab));
         draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Tab));
         draw_keyboard_test_frame(&mut app, &context, egui_key_pulse(egui::Key::Tab));
         assert!(context.egui_wants_keyboard_input());
