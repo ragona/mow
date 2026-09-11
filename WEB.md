@@ -154,6 +154,15 @@ Localhost is a secure development context. A production host may compress and
 cache versioned bundles; avoid caching a stale loader against new WASM. No
 application backend or account is required.
 
+GitHub Pages publishes this repository from `main` using `.github/workflows/ci.yml`.
+In repository **Settings → Pages → Build and deployment**, select **GitHub Actions**
+as the source. Each push to `main` (or manual CI run on `main`) builds the WASM
+distribution and deploys it only after the native and browser checks pass.
+Pull requests and other branches run checks without publishing. Deployment
+permissions are limited to the deployment job, and a new push does not cancel
+an in-flight main deployment. Relative module and worker paths support the
+project URL at `https://ragona.github.io/mow/`.
+
 Browser availability depends on browser version, OS, GPU, and graphics
 acceleration. Require successful core WebGPU adapter/device creation, not merely
 the presence of `navigator.gpu`. See the
