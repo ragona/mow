@@ -486,23 +486,78 @@ fn chase_input(run: &RunState) -> InputSnapshot {
 fn drive_at_render_rate(fps: u32) -> RaceObservation {
     let mut run = race_run(128, false);
     let accessibility = AccessibilitySettings::default();
-    // Start visibly separated; contact must result from camera-relative driving
-    // and boost while the rival keeps running its normal mowing/navigation AI.
-    let origin = run.planet.spawn.position.normalize();
-    let ahead = run.planet.spawn.forward * (4.0 / run.planet.config.base_radius);
-    let rival_spawn = run.planet.nearest_safe_point((origin + ahead).normalize());
-    run.rival = Some(HoverVehicle::from_spawn(
-        &run.planet,
-        rival_spawn,
-        &run.vehicle_tuning,
-    ));
+    // Give both mowers real, physics-integrated approach velocities. An
+    // efficient rival can evade a stationary pursuer indefinitely; collision
+    // invariance should not depend on it making an unproductive turn to be caught.
+    for _ in 0..SIMULATION_HZ / 2 {
+        let forward = run.vehicle.state.transform.forward;
+        run.vehicle.tick(
+            &run.planet,
+            &run.vehicle_tuning,
+            InputSnapshot {
+                accelerate: 1.0,
+                boost_held: true,
+                ..InputSnapshot::default()
+            },
+            forward,
+            true,
+            lawn_core::FIXED_DT,
+        );
+    }
+    run.camera = lawn_core::camera::CameraRig::new(
+        run.vehicle.state.transform,
+        run.planet.config.base_radius,
+        &accessibility,
+    );
+    assert!(run.vehicle.state.speed() > run.vehicle_tuning.max_speed);
+    // The mowers still start visibly separated, and contact happens through
+    // ordinary camera-relative pursuit while the rival runs its full AI.
+    let origin = run.vehicle.state.transform.position.normalize();
+    let forward = (run.vehicle.state.linear_velocity
+        - origin * run.vehicle.state.linear_velocity.dot(origin))
+    .normalize();
+    let warmup_arc = run
+        .planet
+        .spawn
+        .position
+        .normalize()
+        .dot(origin)
+        .clamp(-1.0, 1.0)
+        .acos();
+    let starting_arc = warmup_arc + 6.0 / run.planet.config.base_radius;
+    let rival_spawn = run
+        .planet
+        .nearest_safe_point(origin * starting_arc.cos() + forward * starting_arc.sin());
+    let mut rival = HoverVehicle::from_spawn(&run.planet, rival_spawn, &run.vehicle_tuning);
+    for _ in 0..SIMULATION_HZ / 2 {
+        let up = rival.state.transform.up;
+        let toward_player = run.vehicle.state.transform.position - rival.state.transform.position;
+        let travel = (toward_player - up * toward_player.dot(up)).normalize();
+        rival.tick(
+            &run.planet,
+            &run.vehicle_tuning,
+            InputSnapshot {
+                accelerate: 1.0,
+                boost_held: true,
+                ..InputSnapshot::default()
+            },
+            travel,
+            true,
+            lawn_core::FIXED_DT,
+        );
+    }
+    assert!(rival.state.speed() > run.vehicle_tuning.max_speed);
+    run.rival = Some(rival);
     let initial_separation = run
         .vehicle
         .state
         .transform
         .position
         .distance(run.rival.as_ref().unwrap().state.transform.position);
-    assert!((3.5..4.5).contains(&initial_separation));
+    assert!(
+        (5.5..6.5).contains(&initial_separation),
+        "{initial_separation}"
+    );
     let mut clock = FixedStepClock::default();
     let mut ticks = 0;
     let mut last_frame_ns = 0;

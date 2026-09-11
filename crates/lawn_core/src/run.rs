@@ -294,6 +294,8 @@ impl RunState {
                 &self.mowing,
                 &rival.state,
                 &self.vehicle.state,
+                &self.vehicle_tuning,
+                accessibility.boost_enabled,
             );
             let forward = rival.state.transform.forward;
             rival_tick = Some(rival.tick(
@@ -680,6 +682,9 @@ impl RunState {
 
     fn configure_race(&mut self) {
         self.mowing.enable_ownership();
+        // Prepare the small strategic map during race setup, not on the first
+        // driving decision that needs to relocate across already cut ground.
+        let _ = self.mowing.remaining_grass_patches();
         self.rival = Some(HoverVehicle::from_spawn(
             &self.planet,
             rival_spawn(&self.planet),
@@ -757,6 +762,8 @@ mod tests {
             &run.mowing,
             &expected_rival.state,
             &run.vehicle.state,
+            &run.vehicle_tuning,
+            accessibility.boost_enabled,
         );
         expected_rival.tick(
             &run.planet,

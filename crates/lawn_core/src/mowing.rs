@@ -3,7 +3,7 @@
 use std::{collections::VecDeque, sync::OnceLock};
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -13,6 +13,23 @@ use crate::{
 
 pub const CUT_COVERAGE_THRESHOLD: u8 = 230;
 pub const DEFAULT_DIRTY_TILE_SIZE: u32 = 16;
+pub(crate) const GRASS_PATCH_RESOLUTION: u32 = 24;
+
+/// Exact remaining grass area in one coarse navigation cell. The centroid
+/// gives the planner a target even when only a fringe of the patch remains.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RemainingGrassPatch {
+    pub area: f64,
+    weighted_direction: DVec3,
+    cells: u32,
+}
+
+impl RemainingGrassPatch {
+    #[must_use]
+    pub fn direction(&self) -> Option<Vec3> {
+        (self.cells != 0).then(|| self.weighted_direction.normalize().as_vec3())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable, Serialize, Deserialize)]
 #[repr(transparent)]
@@ -129,6 +146,10 @@ pub struct MowingField {
     dirty_owner_staging: Vec<u8>,
     #[serde(skip)]
     locator_cache: OnceLock<Option<Vec3>>,
+    // The rival asks for this once, then threshold crossings keep it current.
+    // Free mowing does not allocate or build the coarse field.
+    #[serde(skip)]
+    remaining_grass_cache: OnceLock<Vec<RemainingGrassPatch>>,
     nominal_radius: f32,
 }
 
@@ -180,6 +201,7 @@ impl MowingField {
             dirty_staging: Vec::with_capacity(DEFAULT_DIRTY_TILE_SIZE.pow(2) as usize),
             dirty_owner_staging: Vec::new(),
             locator_cache: OnceLock::new(),
+            remaining_grass_cache: OnceLock::new(),
             nominal_radius: planet.config.base_radius,
         }
     }
@@ -227,6 +249,30 @@ impl MowingField {
     #[must_use]
     pub fn packed_cells(&self) -> &[PackedMowingCell] {
         &self.cells
+    }
+
+    /// Surface-area totals of grass that can still be claimed, in face/y/x
+    /// order at [`GRASS_PATCH_RESOLUTION`]. Fully cut but unowned cells are
+    /// excluded because ownership is awarded only on a threshold crossing.
+    #[must_use]
+    pub(crate) fn remaining_grass_patches(&self) -> &[RemainingGrassPatch] {
+        self.remaining_grass_cache.get_or_init(|| {
+            let mut patches =
+                vec![RemainingGrassPatch::default(); 6 * GRASS_PATCH_RESOLUTION.pow(2) as usize];
+            for (index, cell) in self.cells.iter().enumerate() {
+                if !self.mowable[index] || cell.cut_amount() >= CUT_COVERAGE_THRESHOLD {
+                    continue;
+                }
+                let cell = cell_from_index(index, self.resolution);
+                let patch = &mut patches[grass_patch_index(cell, self.resolution)];
+                let weight = f64::from(self.weights[index]);
+                patch.area += weight;
+                patch.weighted_direction +=
+                    cell_center_direction(cell, self.resolution).as_dvec3() * weight;
+                patch.cells += 1;
+            }
+            patches
+        })
     }
 
     /// Allocate race ownership before the first competitive tick. Repeated
@@ -341,6 +387,7 @@ impl MowingField {
         self.dirty_tiles.clear();
         self.dirty_flags.fill(false);
         self.locator_cache.take();
+        self.remaining_grass_cache.take();
         let tiles_per_face = self.resolution.div_ceil(self.dirty_tile_size);
         for face in CubeFace::ALL {
             for y in 0..tiles_per_face {
@@ -474,6 +521,16 @@ impl MowingField {
                         let weight = f64::from(self.weights[index]);
                         result.newly_cut_weight += weight;
                         self.cut_weight += weight;
+                        if let Some(patches) = self.remaining_grass_cache.get_mut() {
+                            let patch = &mut patches[grass_patch_index(cell, self.resolution)];
+                            patch.cells -= 1;
+                            if patch.cells == 0 {
+                                *patch = RemainingGrassPatch::default();
+                            } else {
+                                patch.area -= weight;
+                                patch.weighted_direction -= direction.as_dvec3() * weight;
+                            }
+                        }
                         if owner != 0 && self.owners[index] == 0 {
                             self.owners[index] = owner;
                             self.owned_weights[usize::from(owner - 1)] += weight;
@@ -617,6 +674,22 @@ impl MowingField {
         }
         (best_weight > 0.0).then(|| best_centroid.normalize_or(best_fallback))
     }
+}
+
+fn grass_patch_index(cell: CubeCell, resolution: u32) -> usize {
+    // Assign the fine cell's center, including non-divisible field sizes.
+    let patch_coordinate = |coordinate| {
+        (((u64::from(coordinate) * 2 + 1) * u64::from(GRASS_PATCH_RESOLUTION))
+            / (u64::from(resolution) * 2)) as u32
+    };
+    flat_index(
+        CubeCell {
+            face: cell.face,
+            x: patch_coordinate(cell.x),
+            y: patch_coordinate(cell.y),
+        },
+        GRASS_PATCH_RESOLUTION,
+    )
 }
 
 /// Project the spherical cap onto each cube face independently. Remapping a
@@ -775,6 +848,118 @@ mod tests {
             cut_delta: 1.0,
             recent_epoch: 17,
         }
+    }
+
+    fn assert_remaining_patches_match_cells(field: &MowingField) {
+        let mut areas = vec![0.0; 6 * GRASS_PATCH_RESOLUTION.pow(2) as usize];
+        let mut centroids = vec![DVec3::ZERO; areas.len()];
+        for (index, cell) in field.cells.iter().enumerate() {
+            if field.mowable[index] && cell.cut_amount() < CUT_COVERAGE_THRESHOLD {
+                let direction = cell_center_direction(
+                    cell_from_index(index, field.resolution),
+                    field.resolution,
+                );
+                let coarse = direction_to_cell(direction, GRASS_PATCH_RESOLUTION);
+                let patch = flat_index(coarse, GRASS_PATCH_RESOLUTION);
+                let weight = f64::from(field.weights[index]);
+                areas[patch] += weight;
+                centroids[patch] += direction.as_dvec3() * weight;
+            }
+        }
+        for ((patch, area), centroid) in field
+            .remaining_grass_patches()
+            .iter()
+            .zip(areas)
+            .zip(centroids)
+        {
+            assert!((patch.area - area).abs() < 1.0e-8);
+            if area == 0.0 {
+                assert_eq!(patch.direction(), None);
+            } else {
+                let expected = centroid.normalize().as_vec3();
+                assert!(patch.direction().unwrap().distance(expected) < 1.0e-6);
+            }
+        }
+        let remaining: f64 = field
+            .remaining_grass_patches()
+            .iter()
+            .map(|patch| patch.area)
+            .sum();
+        assert!((remaining - (field.total_mowable_weight - field.cut_weight)).abs() < 1.0e-7);
+    }
+
+    #[test]
+    fn remaining_grass_summary_is_lazy_and_tracks_threshold_crossings() {
+        let mut field = field();
+        let stamp = grass_stamp(&field);
+        field.stamp(MowingStamp {
+            cut_delta: 0.45,
+            ..stamp
+        });
+        assert!(field.remaining_grass_cache.get().is_none());
+        assert_remaining_patches_match_cells(&field);
+        let initial_area: f64 = field
+            .remaining_grass_patches()
+            .iter()
+            .map(|patch| patch.area)
+            .sum();
+        field.stamp_owned(
+            MowingStamp {
+                cut_delta: 0.45,
+                ..stamp
+            },
+            1,
+        );
+        assert_eq!(
+            field
+                .remaining_grass_patches()
+                .iter()
+                .map(|patch| patch.area)
+                .sum::<f64>(),
+            initial_area
+        );
+        let result = field.stamp_owned(stamp, 2);
+        assert!(result.newly_covered_cells > 0);
+        assert_remaining_patches_match_cells(&field);
+        // Claims and ordinary mowing both remove opportunity exactly once.
+        field.stamp_owned(stamp, 1);
+        field.stamp(MowingStamp {
+            from: Vec3::ONE.normalize() * field.nominal_radius,
+            to: Vec3::ONE.normalize() * field.nominal_radius,
+            deck_width: 8.0,
+            ..stamp
+        });
+        assert_remaining_patches_match_cells(&field);
+    }
+
+    #[test]
+    fn remaining_grass_summary_rebuilds_after_restore_and_has_no_empty_targets() {
+        let mut field = field();
+        let original = field.snapshot();
+        assert_remaining_patches_match_cells(&field);
+        let stamp = grass_stamp(&field);
+        field.stamp_owned(
+            MowingStamp {
+                deck_width: field.nominal_radius * std::f32::consts::TAU,
+                ..stamp
+            },
+            2,
+        );
+        assert!(
+            field
+                .remaining_grass_patches()
+                .iter()
+                .all(|patch| patch.area == 0.0 && patch.direction().is_none())
+        );
+        field.restore(&original).unwrap();
+        assert!(field.remaining_grass_cache.get().is_none());
+        assert_remaining_patches_match_cells(&field);
+
+        let serialized = serde_json::to_value(&field).unwrap();
+        assert!(serialized.get("remaining_grass_cache").is_none());
+        let restored: MowingField = serde_json::from_value(serialized).unwrap();
+        assert!(restored.remaining_grass_cache.get().is_none());
+        assert_remaining_patches_match_cells(&restored);
     }
 
     #[test]

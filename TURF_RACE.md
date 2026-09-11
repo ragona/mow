@@ -24,10 +24,22 @@ available beside it. Both modes use the exact planet shown in the editor.
 ## Rival and bumpers
 
 The rival drives a real hover vehicle using the same controller, boost, cutting,
-terrain collision, and recovery rules as the player. A small, seam-connected
-surface graph finds reachable fresh grass around the rock. It replans as the
-lawn changes, slows for direction changes, and boosts on clear productive runs.
-It favors nearby useful routes, with a small preference for contested meadows.
+terrain collision, and recovery rules as the player. Ten times per simulation
+second it compares a fixed set of short surface trajectories, estimating the
+new grass each would claim. These predictions include momentum, cutting work,
+already claimed ground, overlap with the predicted trail, and nearby rock.
+The driver uses full movement input on productive runs, and lets boost refill
+between bursts instead of repeatedly spending tiny charges.
+
+When nearby mowing becomes unproductive, a seam-connected surface graph guides
+the rival toward remaining grass. Exact coarse area totals and centroids update
+as grass is claimed, so small leftovers do not look like whole fresh meadows.
+Only the player's projected immediate mowing strip affects local rewards; the
+rival does not know the player's future inputs.
+
+After 90% of the lawn is claimed, the planner can approach a tiny remaining
+patch and brake over it. Final targets use a tighter arrival distance so the
+mower actually reaches the grass before discarding its waypoint.
 
 Mower contact produces a symmetric shove along the planet's surface. Swept
 contact catches fast crossings; separation follows the curvature and preserves
@@ -49,11 +61,30 @@ the mowing texture's otherwise unused recent-cut byte for race ownership.
 
 The rival adds a fixed 64 KiB vertex buffer, a world and shadow draw, and two
 vectors in the frame uniform. Both vehicles share the existing interaction
-field and bounded particle pool. Navigation uses 3,456 nodes and replans about
-every 0.65 seconds. These are bounded resource changes, not a measured frame-time
-guarantee.
+field and bounded particle pool. Navigation uses 3,456 nodes; relocation searches
+are limited to once per second and skipped during productive mowing. Local
+predictions use fixed-size scratch arrays and never clone the physics world or
+mowing field. At most 52 short rollouts inspect 3,900 grass samples per decision,
+including the optional endgame approach. A roughly 135 KiB coarse remaining-grass
+cache is prepared during race setup, then maintained on claim transitions;
+Free Mow does not allocate it.
 
-## Acceptance evidence
+The independent competition harness runs a simple fresh-grass player policy or
+a frozen copy of the original rival, with swapped starts. It reports winners,
+claimed area per second, travel without new claims, recoveries, and whole-tick
+timing (including the live rival, physics, and mowing, excluding the player
+policy). The isolated decision benchmark measures the planner separately:
+
+```sh
+cargo test -p lawn_core --release --test rival_competition benchmark_rival_competition -- --ignored --nocapture
+RIVAL_BENCH_RESOLUTION=512 RIVAL_BENCH_OPPONENT=greedy cargo test -p lawn_core --release --test rival_competition benchmark_rival_competition -- --ignored --nocapture
+cargo test -p lawn_core --release benchmark_rival_decision_cost -- --ignored --nocapture
+```
+
+See [RIVAL_AI_BENCHMARK.md](RIVAL_AI_BENCHMARK.md) for the measured comparison,
+shipping-resolution results, and the limits of these automated opponents.
+
+## Original release acceptance evidence
 
 - All 212 ordinary workspace tests pass, with formatting, strict workspace
   Clippy, and the complete release build.
