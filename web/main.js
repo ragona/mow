@@ -16,7 +16,7 @@ window.addEventListener("error", event => fail(event.error || event.message));
 
 try {
   if (!window.isSecureContext) {
-    throw new Error("Lawn Orbit needs a secure connection. Open this page over HTTPS, or use localhost for development.");
+    throw new Error("M.O.W. — Mower Of Worlds needs a secure connection. Open this page over HTTPS, or use localhost for development.");
   }
   if (!navigator.gpu) {
     throw new Error("WebGPU is unavailable in this browser. Try a current Chrome, Edge, Firefox, or Safari on a supported computer, with graphics acceleration enabled.");

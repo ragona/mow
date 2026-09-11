@@ -1,6 +1,6 @@
-# Lawn Orbit
+# M.O.W. — Mower Of Worlds
 
-Lawn Orbit is a tiny-planet hover-mowing race and sandbox built directly in Rust,
+Mower Of Worlds is a tiny-planet hover-mowing race and sandbox built directly in Rust,
 `wgpu`, WGSL, Rapier, winit, and egui. It implements
 [`spec/game.md`](spec/game.md): deterministic fuzzy spherical worlds, seam-safe
 authoritative mowing, nimble omnidirectional hover driving, a world editor,
@@ -79,15 +79,25 @@ and `cargo run --release -p lawn_orbit -- --benchmark --gpu-timing` use the same
 scripted renderer workload without changing saves. See
 [`BROWSER_PERFORMANCE.md`](BROWSER_PERFORMANCE.md) for measurements and limitations.
 
-The first launch opens the title screen. Choose the prominent **Mow** button to
-start a Turf Race on a random planet. The smaller **Customize planet** option
-opens the world editor, where you can choose Free Mow, select a terrain preset,
-or tune planet size, rockiness, peak count, peak height, and rolling terrain.
+The first launch opens the **M.O.W. — Mower Of Worlds** title screen. Choose the
+prominent **Mow** button to start a Turf Race on a random planet. The smaller
+**Customize planet** option opens the world editor, where you can choose Free Mow,
+select a terrain preset, or tune planet size, rockiness, peak count, peak height,
+and rolling terrain.
 The planet updates beside the controls as you edit, including when you change its
 seed. Rockiness can be set to 0% for a fully grassy world without outcroppings;
 the Meadow preset starts there. Enter a hexadecimal, decimal, or phrase seed,
 then choose Turf Race (the default) or Free Mow. Start Race / Start Mowing enters
 the exact planet shown in the preview.
+The **Random** button beneath the presets shuffles all five shape controls within
+their slider ranges, keeping the current planet seed.
+Sliders cover radius 5–20 m, 0–40% rockiness, 0–10 peak clusters, peak size
+0–6 m, and rolling terrain 0–1.5 m. Click a number to go further: radius 1–128 m,
+0–255 peak clusters, 0–90% rockiness, peak size up to the radius, and rolling
+terrain up to 90% of the radius. Changing the radius visibly caps dependent
+relief values and their slider ranges. Grass allocation budgets adjust
+automatically for large worlds. Extreme combinations can still fail playability
+validation; the editor reports the failure so you can adjust the settings and retry.
 Illustrated preset cards and the Inspect zoom/rotation controls help compare
 worlds; zoom keeps a common scale when the shape controls change. A brief camera
 arrival carries the preview into play and can be skipped with movement, boost,
@@ -244,5 +254,5 @@ evidence are in [`TURF_RACE.md`](TURF_RACE.md). The measured performance investi
 including before/after results and rejected experiments, is in
 [`PERFORMANCE.md`](PERFORMANCE.md).
 The current visual pass and its acceptance evidence are tracked in
-[`VISUAL_POLISH.md`](VISUAL_POLISH.md). DM Serif Display is distributed with its
-[SIL Open Font License](crates/lawn_orbit/assets/fonts/OFL-DMSerifDisplay.txt).
+[`VISUAL_POLISH.md`](VISUAL_POLISH.md). Barlow Condensed is distributed with its
+[SIL Open Font License](crates/lawn_orbit/assets/fonts/OFL-BarlowCondensed.txt).

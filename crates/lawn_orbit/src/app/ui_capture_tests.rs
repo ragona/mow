@@ -243,18 +243,28 @@ fn capture_scene(
         }
         let last_frame = frame + 1 == frame_count;
         let required_labels: &[&str] = match scene {
-            "title" => &["Lawn Orbit", "Mow", "Customize planet"],
+            "title" => &[
+                "M.O.W.",
+                "MOWER OF WORLDS",
+                "Mow",
+                "Customize planet",
+                "Settings & Accessibility",
+            ],
             "editor" => &["Shape a tiny planet", "Start Race", "Inspect"],
             "gameplay" => &["A little tidier."],
-            "pause" => &["The lawn can wait.", "Resume"],
+            "pause" => &["The world can wait.", "Resume"],
             "settings" => &["Make yourself at home.", "Camera & controls"],
             "settings-bottom" => &["Make yourself at home.", "Done"],
-            "results" => &["A lovely day's work.", "Retry seed", "Customize planet"],
+            "results" => &[
+                "Planetary service complete.",
+                "Retry seed",
+                "Customize planet",
+            ],
             "race" => &["YOU  34.2%", "29.9%  RIVAL", "Rival · far side"],
             "race-start" => &["Move to mow", "Claim fresh grass. First past 50% wins."],
-            "race-pause" => &["The race can wait.", "Resume", "Restart race"],
+            "race-pause" => &["The world can wait.", "Resume", "Restart race"],
             "race-victory" => &[
-                "The lawn is yours!",
+                "World domination.",
                 "Mow again",
                 "Keep mowing",
                 "Rematch",
@@ -263,19 +273,14 @@ fn capture_scene(
             ],
             "race-victory-lap" => &["Race won · View result", "A little tidier."],
             "race-victory-pause" => &[
-                "The lawn can wait.",
+                "The world can wait.",
                 "Keep mowing",
                 "View race result",
                 "Rematch",
             ],
-            "race-result-loss" => &[
-                "A rematch, perhaps?",
-                "Mow again",
-                "Rematch",
-                "Customize planet",
-            ],
+            "race-result-loss" => &["Outmown.", "Mow again", "Rematch", "Customize planet"],
             "race-result-draw" => &[
-                "An evenly shared lawn.",
+                "A world divided.",
                 "Mow again",
                 "Rematch",
                 "Customize planet",

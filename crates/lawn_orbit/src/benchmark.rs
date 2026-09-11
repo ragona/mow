@@ -416,7 +416,7 @@ impl ApplicationHandler for BenchmarkApp {
                 let window = Arc::new(
                     event_loop.create_window(
                         Window::default_attributes()
-                            .with_title("Lawn Orbit benchmark")
+                            .with_title(format!("{} benchmark", crate::GAME_TITLE))
                             .with_inner_size(self.size)
                             .with_resizable(false),
                     )?,

@@ -1,4 +1,6 @@
-//! Native and browser entry points for Lawn Orbit.
+//! Native and browser entry points for M.O.W. — Mower Of Worlds.
+
+const GAME_TITLE: &str = "M.O.W. — Mower Of Worlds";
 
 mod app;
 mod benchmark;
@@ -60,7 +62,7 @@ pub use generation::prepare_worker;
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
     std::panic::set_hook(Box::new(|info| {
-        let message = format!("Lawn Orbit stopped: {info}");
+        let message = format!("{GAME_TITLE} stopped: {info}");
         web_sys::console::error_1(&message.clone().into());
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
             if let Some(status) = document.get_element_by_id("loading-status") {
@@ -103,3 +105,6 @@ impl Drop for ConsoleWriter {
         web_sys::console::log_1(&String::from_utf8_lossy(&self.0).as_ref().into());
     }
 }
+
+// Bound cosmetic CPU/worker/GPU buffers even on unusually large custom worlds.
+const EDITOR_ROOT_BUDGET: usize = 2_000_000;

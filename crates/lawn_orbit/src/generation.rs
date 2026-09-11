@@ -11,6 +11,7 @@ use lawn_render::PreparedSky;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const WIRE_VERSION: u32 = 1;
+
 const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,11 +70,10 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
 
 fn prepare(request: GenerationRequest) -> Result<GenerationResult, String> {
     let world = |config, seed| {
-        PreparedWorld::generate(
-            &PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config),
-            seed,
-        )
-        .map_err(|error| error.to_string())
+        PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config)
+            .generate_with_root_budget(seed, crate::EDITOR_ROOT_BUDGET)
+            .map(PreparedWorld::from_planet)
+            .map_err(|error| error.to_string())
     };
     match request {
         GenerationRequest::World { config, seed } => {

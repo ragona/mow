@@ -1434,6 +1434,8 @@ dependencies = [
  "lawn_core",
  "lawn_render",
  "pollster",
+ "rand",
+ "rand_chacha",
  "ron",
  "serde",
  "serde_json",

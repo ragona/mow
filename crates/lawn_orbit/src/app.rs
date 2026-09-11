@@ -25,6 +25,8 @@ use lawn_core::{
     simulation::FixedStepClock,
 };
 use lawn_render::{FrameAcquireError, FrameStats, Renderer};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -184,6 +186,28 @@ struct WorldEditorSettings {
 }
 
 impl WorldEditorSettings {
+    const RADIUS_SLIDER_RANGE: std::ops::RangeInclusive<f32> = 5.0..=20.0;
+    const ROCKINESS_SLIDER_RANGE: std::ops::RangeInclusive<f32> = 0.0..=40.0;
+    const PEAK_CLUSTERS_SLIDER_RANGE: std::ops::RangeInclusive<u8> = 0..=10;
+    const PEAK_HEIGHT_SLIDER_MAX: f32 = 6.0;
+    const ROLLING_SLIDER_MAX: f32 = 1.5;
+
+    fn random(seed: WorldSeed) -> Self {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed.0);
+        let planet_radius = rng.random_range(Self::RADIUS_SLIDER_RANGE);
+        Self {
+            planet_radius,
+            rock_coverage_percent: f32::from(rng.random_range(
+                *Self::ROCKINESS_SLIDER_RANGE.start() as u8
+                    ..=*Self::ROCKINESS_SLIDER_RANGE.end() as u8,
+            )),
+            peak_clusters: rng.random_range(Self::PEAK_CLUSTERS_SLIDER_RANGE),
+            peak_height: rng.random_range(0.0..=Self::PEAK_HEIGHT_SLIDER_MAX.min(planet_radius)),
+            rolling_amplitude: rng
+                .random_range(0.0..=Self::ROLLING_SLIDER_MAX.min(planet_radius * 0.9)),
+        }
+    }
+
     fn from_generator(config: &GeneratorConfig) -> Self {
         Self {
             planet_radius: config.base_radius,
@@ -198,22 +222,56 @@ impl WorldEditorSettings {
         }
     }
 
+    fn sanitized(mut self) -> Self {
+        let finite_clamp = |value: f32, min: f32, max: f32| {
+            if value.is_finite() {
+                value.clamp(min, max)
+            } else {
+                min
+            }
+        };
+        self.planet_radius = finite_clamp(self.planet_radius, 1.0, 128.0);
+        self.rock_coverage_percent = finite_clamp(self.rock_coverage_percent, 0.0, 90.0);
+        self.peak_height = finite_clamp(self.peak_height, 0.0, self.planet_radius);
+        // Keep every radial sample positive, including the sum of noise octaves.
+        self.rolling_amplitude =
+            finite_clamp(self.rolling_amplitude, 0.0, self.planet_radius * 0.9);
+        self
+    }
+
+    fn is_experimental(self) -> bool {
+        // These original tuning bounds govern duration validation, independently
+        // of slider travel, so larger custom worlds can take longer to mow.
+        !(12.0..=22.0).contains(&self.planet_radius)
+            || !(0.0..=24.0).contains(&self.rock_coverage_percent)
+            || !(2..=9).contains(&self.peak_clusters)
+            || !(2.0..=7.0).contains(&self.peak_height)
+            || !(0.0..=1.2).contains(&self.rolling_amplitude)
+    }
+
     fn generator_config(self, baseline: &GeneratorConfig) -> GeneratorConfig {
+        let settings = self.sanitized();
         let mut config = baseline.clone();
-        config.base_radius = self.planet_radius.clamp(12.0, 22.0);
-        config.rolling_amplitude = self.rolling_amplitude.clamp(0.0, 1.2);
+        config.base_radius = settings.planet_radius;
+        config.rolling_amplitude = settings.rolling_amplitude;
 
-        let peak_clusters = self.peak_clusters.clamp(2, 9);
-        config.mountain_count_min = peak_clusters.saturating_sub(2).max(1);
-        config.mountain_count_max = peak_clusters.saturating_add(2);
-        let peak_height = self.peak_height.clamp(2.0, 7.0);
-        config.mountain_height_min = (peak_height - 1.25).max(0.75);
-        config.mountain_height_max = peak_height + 1.25;
+        let peak_clusters = settings.peak_clusters;
+        if (2..=9).contains(&peak_clusters) {
+            config.mountain_count_min = peak_clusters.saturating_sub(2).max(1);
+            config.mountain_count_max = peak_clusters.saturating_add(2);
+        } else {
+            config.mountain_count_min = peak_clusters;
+            config.mountain_count_max = peak_clusters;
+        }
+        let peak_height = settings.peak_height;
+        let spread = peak_height.min(1.25);
+        config.mountain_height_min = peak_height - spread;
+        config.mountain_height_max = (peak_height + spread).min(config.base_radius);
         config.mountain_separation_radians = (baseline.mountain_separation_radians
-            * (5.0 / f32::from(peak_clusters)).sqrt())
-        .clamp(0.4, 0.75);
+            * (5.0 / f32::from(peak_clusters.max(1))).sqrt())
+        .clamp(0.035, 0.75);
 
-        let rock_coverage = (self.rock_coverage_percent / 100.0).clamp(0.0, 0.24);
+        let rock_coverage = settings.rock_coverage_percent / 100.0;
         if rock_coverage == 0.0 {
             config.mountain_count_min = 0;
             config.mountain_count_max = 0;
@@ -230,10 +288,18 @@ impl WorldEditorSettings {
         }
 
         let radius_scale = config.base_radius / baseline.base_radius.max(1.0);
-        config.pass_clearance = (baseline.pass_clearance * radius_scale).clamp(3.4, 6.2);
-        config.spawn_clearance = (baseline.spawn_clearance * radius_scale).clamp(2.8, 5.2);
-        config.ideal_time_min_seconds = 45.0;
-        config.ideal_time_max_seconds = 900.0;
+        config.pass_clearance = (baseline.pass_clearance * radius_scale).clamp(0.05, 6.2);
+        config.spawn_clearance = (baseline.spawn_clearance * radius_scale).clamp(0.05, 5.2);
+        config.ideal_time_min_seconds = if settings.is_experimental() {
+            0.0
+        } else {
+            45.0
+        };
+        config.ideal_time_max_seconds = if settings.is_experimental() {
+            1_000_000.0
+        } else {
+            900.0
+        };
         config.maximum_generation_attempts = baseline.maximum_generation_attempts.max(16);
         config
     }
@@ -253,7 +319,7 @@ impl WorldEditorSettings {
             planet_radius: 17.0,
             rock_coverage_percent: 20.0,
             peak_clusters: 8,
-            peak_height: 6.2,
+            peak_height: 6.0,
             rolling_amplitude: 1.0,
         }
     }
@@ -418,7 +484,7 @@ impl LawnOrbitApp {
             return Ok(());
         }
         let attributes = WindowAttributes::default()
-            .with_title("Lawn Orbit")
+            .with_title(crate::GAME_TITLE)
             .with_inner_size(LogicalSize::new(1280.0, 720.0))
             .with_min_inner_size(LogicalSize::new(960.0, 540.0));
         let window = Arc::new(event_loop.create_window(attributes)?);
@@ -532,7 +598,7 @@ impl LawnOrbitApp {
         }
         let event_loop = EventLoop::new()?;
         let attributes = WindowAttributes::default()
-            .with_title("Lawn Orbit")
+            .with_title(crate::GAME_TITLE)
             .with_canvas(Some(canvas.clone()))
             .with_prevent_default(false);
         // On the web, creation before spawn_app lets GPU initialization await
@@ -944,7 +1010,7 @@ impl LawnOrbitApp {
             .spawn(move || {
                 let started = Instant::now();
                 let result = generator
-                    .generate(recipe.seed)
+                    .generate_with_root_budget(recipe.seed, crate::EDITOR_ROOT_BUDGET)
                     .map(|planet| {
                         RunState::new(
                             planet,
@@ -1124,7 +1190,13 @@ impl LawnOrbitApp {
             self.app_started.elapsed().as_secs_f32() * speed
         };
         let planet_radius = self.run.planet.config.base_radius;
-        let radius = planet_radius * 1.8;
+        let extent = self.planet_preview_extent();
+        let ordinary_distance = egui::vec2(planet_radius * 1.8, planet_radius * 0.72).length();
+        let radius = if ordinary_distance > extent * 1.1 {
+            planet_radius * 1.8
+        } else {
+            extent * 1.35
+        };
         let position = glam::Vec3::new(
             angle.cos() * radius,
             planet_radius * 0.72,
@@ -1135,14 +1207,32 @@ impl LawnOrbitApp {
             .snap_to_pose(position, glam::Vec3::ZERO, glam::Vec3::Y);
     }
 
+    fn planet_preview_extent(&self) -> f32 {
+        // Include overlapping peaks rather than assuming base radius bounds the
+        // world. Padding covers unsampled tips and cosmetic surface relief.
+        self.run
+            .planet
+            .terrain
+            .iter()
+            .map(|cell| cell.radius)
+            .fold(0.0, f32::max)
+            * 1.08
+            + 0.5
+    }
+
     fn animate_editor_camera(&mut self, context: &egui::Context) {
         let screen = context.content_rect();
         let aspect = ((screen.width() - EDITOR_SCENE_INSET) / screen.height()).max(0.25);
         let vertical_half_fov = self.run.camera.state.field_of_view_degrees.to_radians() * 0.5;
         let half_fov = vertical_half_fov.min((vertical_half_fov.tan() * aspect).atan());
-        // A fixed envelope fits even the largest craggy planet. Keeping the
-        // distance independent of the sliders makes radius changes visible.
-        let distance = (32.0 / half_fov.sin() * 1.08 / self.editor_zoom).max(36.0);
+        // Keep the common comparison scale for ordinary planets. Experimental
+        // sizes get enough room for their actual surface, including dense peaks.
+        let base_radius = self.run.planet.config.base_radius;
+        let extent = self.planet_preview_extent();
+        let reference_extent = 32.0 * (base_radius / 12.0).min(1.0);
+        let envelope = reference_extent.max(extent);
+        let minimum_distance = (36.0 * (base_radius / 12.0).min(1.0)).max(extent * 1.15);
+        let distance = (envelope / half_fov.sin() * 1.08 / self.editor_zoom).max(minimum_distance);
         let angle = self.editor_orbit;
         let direction = glam::Vec3::new(angle.cos(), 0.4, angle.sin()).normalize();
         let to = CameraState {
@@ -1196,36 +1286,55 @@ impl LawnOrbitApp {
     }
 
     fn draw_title(context: &egui::Context, commands: &mut Vec<UiCommand>) {
-        egui::Window::new("Lawn Orbit")
+        egui::Window::new(crate::GAME_TITLE)
             .anchor(Align2::LEFT_CENTER, [32.0, 0.0])
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
-            .frame(garden_card().inner_margin(24))
+            .frame(
+                garden_card()
+                    .inner_margin(24)
+                    .corner_radius(2)
+                    .stroke(egui::Stroke::new(1.5, GARDEN_PINE)),
+            )
             .show(context, |ui| {
                 ui.set_width(292.0);
+                ui.spacing_mut().item_spacing.y = 5.0;
                 ui.vertical(|ui| {
                     ui.label(
-                        RichText::new("YOUR LITTLE CORNER OF THE COSMOS")
-                            .size(11.0)
+                        RichText::new("PLANETARY LAWN CARE")
+                            .font(egui::FontId::monospace(10.0))
+                            .extra_letter_spacing(1.5)
                             .color(GARDEN_MUTED),
                     );
-                    ui.add_space(14.0);
+                    ui.add_space(4.0);
                     ui.label(
-                        RichText::new("Lawn Orbit")
-                            .font(display(48.0))
+                        RichText::new("M.O.W.")
+                            .font(egui::FontId::new(
+                                96.0,
+                                egui::FontFamily::Name("mow-mark".into()),
+                            ))
+                            .line_height(Some(96.0))
+                            .extra_letter_spacing(0.4)
                             .color(GARDEN_PINE),
                     );
-                    ui.label(RichText::new("A little world. A friendly rivalry.").size(18.0));
-                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("MOWER OF WORLDS")
+                            .font(display(24.0))
+                            .extra_letter_spacing(1.7),
+                    );
+                    let (rule, _) =
+                        ui.allocate_exact_size(egui::vec2(292.0, 5.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rule, 0, GARDEN_PINE);
+                    ui.add_space(6.0);
                     ui.label(
                         RichText::new(
-                            "Hop onto a random planet and race a rival.\nFirst to claim more than half the lawn wins.",
+                            "Race a rival around a tiny planet.\nClaim more than half the lawn to win.",
                         )
                         .color(GARDEN_MUTED),
                     );
-                    ui.add_space(22.0);
-                    let mow = mow_button(ui, "Mow", [292.0, 88.0]);
+                    ui.add_space(10.0);
+                    let mow = mow_button(ui, "Mow", [292.0, 68.0]);
                     if !context.egui_wants_keyboard_input() {
                         mow.request_focus();
                     }
@@ -1237,7 +1346,7 @@ impl LawnOrbitApp {
                         commands.push(UiCommand::OpenEditor);
                     }
                     ui.small("Shape your world or settle in for Free Mow.");
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
                     if ui.button("Settings & Accessibility").clicked() {
                         commands.push(UiCommand::OpenSettings);
                     }
@@ -1245,12 +1354,12 @@ impl LawnOrbitApp {
                     if ui.button("Quit").clicked() {
                         commands.push(UiCommand::Quit);
                     }
-                    ui.add_space(4.0);
                 });
             });
     }
 
     fn draw_world_editor(&mut self, context: &egui::Context, commands: &mut Vec<UiCommand>) {
+        self.world_editor = self.world_editor.sanitized();
         let classic = WorldEditorSettings::from_generator(&self.game_config.generator);
         let opacity = self
             .scene_transition
@@ -1273,12 +1382,12 @@ impl LawnOrbitApp {
                 ui.set_width(302.0);
                 ui.spacing_mut().item_spacing.y = 5.0;
                 ui.label(
-                    RichText::new("THE PLANET PATCH")
+                    RichText::new("M.O.W. · WORLD EDITOR")
                         .size(11.0)
                         .color(GARDEN_MUTED),
                 );
                 ui.heading("Shape a tiny planet");
-                ui.label("A little more meadow? A few more peaks?");
+                ui.label("Slide to tune. Click a number to experiment.");
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .max_height((context.content_rect().height() - 286.0).max(140.0))
@@ -1298,19 +1407,34 @@ impl LawnOrbitApp {
                                 }
                             }
                         });
+                        if ui
+                            .add_sized([ui.available_width(), 30.0], egui::Button::new("Random"))
+                            .on_hover_text(
+                                "Randomize the planet settings within the slider ranges.",
+                            )
+                            .clicked()
+                        {
+                            self.world_editor = WorldEditorSettings::random(Self::random_seed());
+                        }
                         ui.separator();
                         ui.spacing_mut().slider_width = 208.0;
                         ui.label("Planet radius");
                         ui.add(
-                            egui::Slider::new(&mut self.world_editor.planet_radius, 12.0..=22.0)
-                                .suffix(" m"),
+                            editor_slider(
+                                &mut self.world_editor.planet_radius,
+                                WorldEditorSettings::RADIUS_SLIDER_RANGE,
+                                1.0..=128.0,
+                            )
+                            .suffix(" m"),
                         );
+                        self.world_editor = self.world_editor.sanitized();
                         ui.add_space(6.0);
                         ui.label("Rockiness");
                         ui.add(
-                            egui::Slider::new(
+                            editor_slider(
                                 &mut self.world_editor.rock_coverage_percent,
-                                0.0..=24.0,
+                                WorldEditorSettings::ROCKINESS_SLIDER_RANGE,
+                                0.0..=90.0,
                             )
                             .step_by(1.0)
                             .suffix("%"),
@@ -1319,22 +1443,33 @@ impl LawnOrbitApp {
                         ui.add_space(6.0);
                         ui.add_enabled_ui(self.world_editor.rock_coverage_percent > 0.0, |ui| {
                             ui.label("Peak clusters");
-                            ui.add(egui::Slider::new(
+                            ui.add(editor_slider(
                                 &mut self.world_editor.peak_clusters,
-                                2..=9,
+                                WorldEditorSettings::PEAK_CLUSTERS_SLIDER_RANGE,
+                                0..=255,
                             ));
                             ui.add_space(6.0);
                             ui.label("Peak size");
                             ui.add(
-                                egui::Slider::new(&mut self.world_editor.peak_height, 2.0..=7.0)
-                                    .suffix(" m"),
+                                editor_slider(
+                                    &mut self.world_editor.peak_height,
+                                    0.0..=WorldEditorSettings::PEAK_HEIGHT_SLIDER_MAX
+                                        .min(self.world_editor.planet_radius),
+                                    0.0..=self.world_editor.planet_radius,
+                                )
+                                .suffix(" m"),
                             );
                         });
                         ui.add_space(6.0);
                         ui.label("Rolling terrain");
                         ui.add(
-                            egui::Slider::new(&mut self.world_editor.rolling_amplitude, 0.0..=1.2)
-                                .suffix(" m"),
+                            editor_slider(
+                                &mut self.world_editor.rolling_amplitude,
+                                0.0..=WorldEditorSettings::ROLLING_SLIDER_MAX
+                                    .min(self.world_editor.planet_radius * 0.9),
+                                0.0..=self.world_editor.planet_radius * 0.9,
+                            )
+                            .suffix(" m"),
                         );
                         ui.separator();
                         ui.label(RichText::new("Planet seed").strong());
@@ -1473,7 +1608,7 @@ impl LawnOrbitApp {
                         ui.spinner();
                         ui.heading("Growing a tiny planet…");
                     });
-                    ui.label("A little sunshine. A lot of grass. Almost ready.");
+                    ui.label("One small mower. One giant lawn.");
                 });
             });
     }
@@ -1595,7 +1730,7 @@ impl LawnOrbitApp {
                                 icon(ui.painter(), rect.center(), 20.0, Icon::Leaf, GARDEN_PINE);
                                 ui.label(
                                     RichText::new(match percent {
-                                        100 => "Every blade. Beautifully done.".to_owned(),
+                                        100 => "World mown.".to_owned(),
                                         50 => "Half a world, freshly mown.".to_owned(),
                                         _ => format!("{percent}% — a lovely little lawn."),
                                     })
@@ -1651,9 +1786,9 @@ impl LawnOrbitApp {
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(if self.run.mode == GameMode::TurfRace {
-                                    "A little friendly competition."
+                                    "One world. Two mowers."
                                 } else {
-                                    "Your little patch awaits."
+                                    "A world awaits its mower."
                                 })
                                 .font(display(21.0)),
                             );
@@ -1701,18 +1836,11 @@ impl LawnOrbitApp {
             .show(context, |ui| {
                 ui.set_min_width(300.0);
                 ui.label(
-                    RichText::new("PAUSED · TAKE A LITTLE BREATHER")
+                    RichText::new("M.O.W. · PAUSED")
                         .size(11.0)
                         .color(GARDEN_MUTED),
                 );
-                ui.label(
-                    RichText::new(if self.run.mode == GameMode::TurfRace && !victory_lap {
-                        "The race can wait."
-                    } else {
-                        "The lawn can wait."
-                    })
-                    .font(display(32.0)),
-                );
+                ui.label(RichText::new("The world can wait.").font(display(32.0)));
                 if let Some(race) = &self.run.race {
                     ui.label(
                         RichText::new(format!(
@@ -1799,11 +1927,11 @@ impl LawnOrbitApp {
                 ui.set_min_width(370.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("JOB COMPLETE · A POSTCARD FROM YOUR PLANET")
+                        RichText::new("M.O.W. · JOB COMPLETE")
                             .size(11.0)
                             .color(GARDEN_MUTED),
                     );
-                    ui.label(RichText::new("A lovely day's work.").font(display(34.0)));
+                    ui.label(RichText::new("Planetary service complete.").font(display(30.0)));
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(150.0, 42.0), egui::Sense::hover());
                     for index in 0..3 {
@@ -1890,7 +2018,7 @@ impl LawnOrbitApp {
             .frame(garden_card().inner_margin(22))
             .show(context, |ui| {
                 ui.set_width(content_width);
-                ui.label(RichText::new("SETTINGS & ACCESSIBILITY").size(11.0).color(GARDEN_MUTED));
+                ui.label(RichText::new("M.O.W. · SETTINGS & ACCESSIBILITY").size(11.0).color(GARDEN_MUTED));
                 ui.label(RichText::new("Make yourself at home.").font(display(32.0)));
                 ui.add_space(8.0);
                 egui::ScrollArea::vertical()
@@ -2073,7 +2201,7 @@ impl LawnOrbitApp {
             let index = ((times.len().saturating_sub(1)) as f32 * fraction).round() as usize;
             times.get(index).copied().unwrap_or_default()
         };
-        egui::Window::new("Lawn Orbit diagnostics (F3)")
+        egui::Window::new("M.O.W. diagnostics (F3)")
             .anchor(Align2::RIGHT_BOTTOM, [-12.0, -12.0])
             .resizable(false)
             .vscroll(true)
@@ -2705,6 +2833,34 @@ fn garden_card() -> egui::Frame {
         })
 }
 
+/// Slider travel covers a broad creative range; the number field accepts a
+/// wider finite range. Commit typed edits once so typing "100" does not
+/// generate intermediate worlds for "1" and "10".
+fn editor_slider<Num: egui::emath::Numeric>(
+    value: &mut Num,
+    slider_range: std::ops::RangeInclusive<Num>,
+    input_range: std::ops::RangeInclusive<Num>,
+) -> egui::Slider<'_> {
+    let min = input_range.start().to_f64();
+    let max = input_range.end().to_f64();
+    let slider = egui::Slider::from_get_set(
+        slider_range.start().to_f64()..=slider_range.end().to_f64(),
+        move |new| {
+            if let Some(new) = new.filter(|number| number.is_finite()) {
+                *value = Num::from_f64(new.clamp(min, max));
+            }
+            value.to_f64()
+        },
+    )
+    .clamping(egui::SliderClamping::Never)
+    .update_while_editing(false);
+    if Num::INTEGRAL {
+        slider.integer()
+    } else {
+        slider
+    }
+}
+
 fn garden_button(ui: &mut egui::Ui, label: &str, size: [f32; 2], enabled: bool) -> egui::Response {
     ui.scope(|ui| {
         // Style each interaction state rather than overriding the button's fill,
@@ -2727,13 +2883,22 @@ fn garden_button(ui: &mut egui::Ui, label: &str, size: [f32; 2], enabled: bool) 
 fn configure_egui_style(context: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        "DM Serif Display".into(),
-        egui::FontData::from_static(include_bytes!("../assets/fonts/DMSerifDisplay-Regular.ttf"))
+        "Barlow Condensed Bold".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/BarlowCondensed-Bold.ttf"))
+            .into(),
+    );
+    fonts.font_data.insert(
+        "Barlow Condensed Black".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/BarlowCondensed-Black.ttf"))
             .into(),
     );
     fonts.families.insert(
-        egui::FontFamily::Name("garden-display".into()),
-        vec!["DM Serif Display".into()],
+        egui::FontFamily::Name("mow-display".into()),
+        vec!["Barlow Condensed Bold".into()],
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("mow-mark".into()),
+        vec!["Barlow Condensed Black".into()],
     );
     context.set_fonts(fonts);
     let mut visuals = egui::Visuals::light();
@@ -3984,7 +4149,7 @@ mod tests {
                     window.width() <= 646.0,
                     "bindings expanded the settings window: {window:?}"
                 );
-                for label in ["SETTINGS & ACCESSIBILITY", "Done"] {
+                for label in ["M.O.W. · SETTINGS & ACCESSIBILITY", "Done"] {
                     let (clip, text) = output
                         .shapes
                         .iter()
@@ -4073,6 +4238,178 @@ mod tests {
     }
 
     #[test]
+    fn editor_number_entry_exceeds_slider_travel_but_keeps_finite_limits() {
+        let context = egui::Context::default();
+        configure_egui_style(&context);
+        let frame = |value: &mut f64, events| {
+            let mut rect = egui::Rect::NOTHING;
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 200.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    rect = ui
+                        .add(editor_slider(value, 2.0..=9.0, 0.0..=255.0).integer())
+                        .rect;
+                },
+            );
+            rect
+        };
+        let mut value = 5.0;
+        frame(&mut value, Vec::new());
+        for (text, expected) in [
+            ("100", 100.0),
+            ("9999", 255.0),
+            ("NaN", 255.0),
+            ("-10", 0.0),
+        ] {
+            let rect = frame(&mut value, Vec::new());
+            let pos = rect.right_center() - egui::vec2(10.0, 0.0);
+            for pressed in [true, false] {
+                frame(
+                    &mut value,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            let previous = value;
+            frame(&mut value, vec![egui::Event::Text(text.into())]);
+            assert_eq!(value, previous, "typing should wait for commit");
+            frame(&mut value, egui_key_pulse(egui::Key::Enter));
+            frame(&mut value, Vec::new());
+            assert_eq!(value, expected, "typed {text}");
+        }
+        let rect = frame(&mut value, Vec::new());
+        let pos = rect.left_center() + egui::vec2(100.0, 0.0);
+        for pressed in [true, false] {
+            frame(
+                &mut value,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!((2.0..=9.0).contains(&value));
+    }
+
+    #[test]
+    fn expanded_editor_values_generate_and_remain_visible() {
+        let baseline = GeneratorConfig::test_quality();
+        for (radius, peaks) in [
+            (1.0, 5),
+            (1.0, 100),
+            (15.0, 100),
+            (15.0, 255),
+            (64.0, 5),
+            (128.0, 100),
+        ] {
+            let settings = WorldEditorSettings {
+                planet_radius: radius,
+                peak_clusters: peaks,
+                ..WorldEditorSettings::from_generator(&baseline)
+            }
+            .sanitized();
+            let config = settings.generator_config(&baseline);
+            config.validate().unwrap();
+            assert_eq!(config.base_radius, radius);
+            let mut app = preview_app();
+            app.world_editor = settings;
+            app.profile_write_enabled = false;
+            for seed in [0, 1, 42] {
+                let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config.clone())
+                    .generate_with_root_budget(WorldSeed(seed), crate::EDITOR_ROOT_BUDGET)
+                    .unwrap_or_else(|error| panic!("{settings:?} seed {seed}: {error}"));
+                if peaks > 9 {
+                    assert_eq!(planet.mountains.len(), usize::from(peaks));
+                }
+                app.run = RunState::new(
+                    planet,
+                    GameMode::FreeMow,
+                    app.game_config.vehicle.clone(),
+                    app.game_config.job.clone(),
+                    &app.profile.settings.accessibility,
+                    false,
+                );
+                let context = egui::Context::default();
+                for zoom in [0.85, 1.0, 1.8] {
+                    app.editor_zoom = zoom;
+                    app.animate_editor_camera(&context);
+                    assert!(app.run.camera.state.position.is_finite());
+                    assert!(app.run.camera.state.position.length() > app.planet_preview_extent());
+                }
+                app.animate_planet_camera(0.08);
+                assert!(app.run.camera.state.position.length() > app.planet_preview_extent());
+            }
+        }
+    }
+
+    #[test]
+    fn editor_numeric_safety_keeps_dependent_relief_in_valid_domains() {
+        let baseline = GeneratorConfig::test_quality();
+        for radius in [f32::NAN, f32::INFINITY, -1.0, 0.0, 1.0, 128.0, f32::MAX] {
+            for height in [f32::NAN, -1.0, 0.0, f32::MAX] {
+                let settings = WorldEditorSettings {
+                    planet_radius: radius,
+                    peak_height: height,
+                    rolling_amplitude: height,
+                    rock_coverage_percent: height,
+                    peak_clusters: 255,
+                }
+                .sanitized();
+                settings.generator_config(&baseline).validate().unwrap();
+                assert!((1.0..=128.0).contains(&settings.planet_radius));
+                assert!(settings.peak_height <= settings.planet_radius);
+                assert!(settings.rolling_amplitude * 1.06 < settings.planet_radius);
+            }
+        }
+    }
+
+    #[test]
+    fn randomized_editor_settings_fit_sliders_and_generator_domains() {
+        let baseline = GeneratorConfig::test_quality();
+        for seed in 0..1024 {
+            let settings = WorldEditorSettings::random(WorldSeed(seed));
+            assert!(WorldEditorSettings::RADIUS_SLIDER_RANGE.contains(&settings.planet_radius));
+            assert!(
+                WorldEditorSettings::ROCKINESS_SLIDER_RANGE
+                    .contains(&settings.rock_coverage_percent)
+            );
+            assert_eq!(settings.rock_coverage_percent.fract(), 0.0);
+            assert!(
+                WorldEditorSettings::PEAK_CLUSTERS_SLIDER_RANGE.contains(&settings.peak_clusters)
+            );
+            assert!(
+                (0.0..=WorldEditorSettings::PEAK_HEIGHT_SLIDER_MAX).contains(&settings.peak_height)
+            );
+            assert!(
+                (0.0..=WorldEditorSettings::ROLLING_SLIDER_MAX)
+                    .contains(&settings.rolling_amplitude)
+            );
+            assert_eq!(settings, settings.sanitized());
+            settings.generator_config(&baseline).validate().unwrap();
+        }
+    }
+
+    #[test]
     fn classic_world_editor_values_preserve_shipping_shape() {
         let baseline = GeneratorConfig::default();
         let edited = WorldEditorSettings::from_generator(&baseline).generator_config(&baseline);
@@ -4088,7 +4425,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_slider_endpoints_generate_valid_worlds() {
+    fn classic_editor_combinations_generate_valid_worlds() {
         let baseline = GeneratorConfig::test_quality();
         for radius in [12.0, 22.0] {
             for rockiness in [0.0, 1.0, 24.0] {
@@ -4118,24 +4455,76 @@ mod tests {
                 }
             }
         }
-        // Exercise actual root allocation at shipping density, including the
-        // largest fully grassy world, rather than only metadata generation.
-        for rockiness in [0.0, 24.0] {
+    }
+
+    #[test]
+    fn editor_slider_endpoints_generate_valid_worlds() {
+        let baseline = GeneratorConfig::test_quality();
+        let defaults = WorldEditorSettings::from_generator(&baseline);
+        // Test each control at both ends against the default world. Simultaneous
+        // extremes can still fail the generator's route and spawn validation.
+        for upper in [false, true] {
+            let endpoint = |range: std::ops::RangeInclusive<f32>| {
+                if upper { *range.end() } else { *range.start() }
+            };
+            for settings in [
+                WorldEditorSettings {
+                    planet_radius: endpoint(WorldEditorSettings::RADIUS_SLIDER_RANGE),
+                    ..defaults
+                },
+                WorldEditorSettings {
+                    rock_coverage_percent: endpoint(WorldEditorSettings::ROCKINESS_SLIDER_RANGE),
+                    ..defaults
+                },
+                WorldEditorSettings {
+                    peak_clusters: if upper {
+                        *WorldEditorSettings::PEAK_CLUSTERS_SLIDER_RANGE.end()
+                    } else {
+                        *WorldEditorSettings::PEAK_CLUSTERS_SLIDER_RANGE.start()
+                    },
+                    ..defaults
+                },
+                WorldEditorSettings {
+                    peak_height: endpoint(
+                        0.0..=WorldEditorSettings::PEAK_HEIGHT_SLIDER_MAX
+                            .min(defaults.planet_radius),
+                    ),
+                    ..defaults
+                },
+                WorldEditorSettings {
+                    rolling_amplitude: endpoint(0.0..=WorldEditorSettings::ROLLING_SLIDER_MAX),
+                    ..defaults
+                },
+            ] {
+                for seed in [0, 1, 42] {
+                    PlanetGenerator::new(
+                        CURRENT_GENERATOR_VERSION,
+                        settings.generator_config(&baseline),
+                    )
+                    .generate_with_roots(WorldSeed(seed), false)
+                    .unwrap_or_else(|error| panic!("{settings:?}, seed {seed}: {error}"));
+                }
+            }
+        }
+        // Exercise root allocation with shipping settings and the editor budget,
+        // including the largest fully grassy world, beyond metadata generation.
+        for rockiness in [0.0, *WorldEditorSettings::ROCKINESS_SLIDER_RANGE.end()] {
             let settings = WorldEditorSettings {
-                planet_radius: 22.0,
+                planet_radius: *WorldEditorSettings::RADIUS_SLIDER_RANGE.end(),
                 rock_coverage_percent: rockiness,
-                peak_clusters: 9,
-                peak_height: 7.0,
-                rolling_amplitude: 1.2,
+                peak_clusters: *WorldEditorSettings::PEAK_CLUSTERS_SLIDER_RANGE.end(),
+                peak_height: WorldEditorSettings::PEAK_HEIGHT_SLIDER_MAX,
+                rolling_amplitude: WorldEditorSettings::ROLLING_SLIDER_MAX,
             };
             let shipping = GameConfig::shipping().unwrap().generator;
             let planet = PlanetGenerator::new(
                 CURRENT_GENERATOR_VERSION,
                 settings.generator_config(&shipping),
             )
-            .generate(WorldSeed(42))
+            .generate_with_root_budget(WorldSeed(42), crate::EDITOR_ROOT_BUDGET)
             .unwrap();
             assert!(!planet.grass_roots.is_empty());
+            assert!(planet.grass_roots.len() <= crate::EDITOR_ROOT_BUDGET);
         }
     }
 

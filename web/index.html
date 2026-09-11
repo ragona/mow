@@ -4,9 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#172a30">
-    <title>Lawn Orbit</title>
+    <title>M.O.W. — Mower Of Worlds</title>
     <link rel="icon" href="data:,">
     <style>
+      @font-face { font-family: "Barlow Condensed"; src: url("./fonts/BarlowCondensed-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: swap; }
+      @font-face { font-family: "Barlow Condensed"; src: url("./fonts/BarlowCondensed-Black.ttf") format("truetype"); font-style: normal; font-weight: 900; font-display: swap; }
       :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #fff9e7; background: #172a30; }
       * { box-sizing: border-box; }
       html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
@@ -15,19 +17,21 @@
       #loading[hidden] { display: none; }
       .orbit { margin: 0 auto 1.5rem; width: 4rem; height: 4rem; border: 2px solid #cee0b64d; border-top-color: #f8936f; border-radius: 50%; animation: orbit 2s linear infinite; }
       .failed .orbit { animation: none; border-color: #f8936f; }
-      h1 { margin: 0 0 .6rem; font-family: Georgia, serif; font-weight: normal; font-size: clamp(2.5rem, 6vw, 4rem); }
+      h1 { margin: 0; font-family: "Barlow Condensed", "Arial Narrow", sans-serif; font-weight: 900; font-size: clamp(5rem, 16vw, 9rem); line-height: .95; letter-spacing: .025em; }
       p { max-width: 38rem; margin: .5rem auto; line-height: 1.5; color: #cee0b6; }
+      .full-title { margin: .7rem auto 1.5rem; color: #fff9e7; font-family: "Barlow Condensed", "Arial Narrow", sans-serif; font-weight: 700; font-size: clamp(1.1rem, 3vw, 1.5rem); line-height: 1.2; text-transform: uppercase; letter-spacing: .12em; }
       button { margin: 1.5rem auto 0; background: #f8936f; color: #172a30; border: 0; border-radius: .75rem; padding: .8rem 1.4rem; font: inherit; cursor: pointer; }
       @keyframes orbit { to { transform: rotate(360deg); } }
       @media (prefers-reduced-motion: reduce) { .orbit { animation: none; } }
     </style>
   </head>
   <body>
-    <canvas id="lawn-canvas" tabindex="0" aria-label="Lawn Orbit game. Use WASD or arrow keys to drive, Space to boost, and Escape to pause."></canvas>
+    <canvas id="lawn-canvas" tabindex="0" aria-label="M.O.W. — Mower Of Worlds game. Use WASD or arrow keys to drive, Space to boost, and Escape to pause."></canvas>
     <main id="loading" aria-live="polite">
       <div class="orbit" aria-hidden="true"></div>
-      <h1>Lawn Orbit</h1>
-      <p id="loading-status">Loading your little corner of the cosmos…</p>
+      <h1>M.O.W.</h1>
+      <p class="full-title">Mower Of Worlds</p>
+      <p id="loading-status">Preparing your next planetary trim…</p>
       <button id="retry" hidden type="button">Try again</button>
     </main>
     <script type="module" src="./main.js"></script>

@@ -19,6 +19,7 @@ use crate::{
 
 pub const CURRENT_GENERATOR_VERSION: GeneratorVersion = GeneratorVersion(2);
 pub const TUTORIAL_SEED: WorldSeed = WorldSeed(0x4c41_574e_4f52_4249);
+const MAXIMUM_GRASS_ROOTS: usize = 16_000_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GeneratorVersion(pub u32);
@@ -242,6 +243,74 @@ impl PlanetGenerator {
     /// deterministic generation/repair attempt fails validation.
     pub fn generate(&self, seed: WorldSeed) -> Result<Planet, GenerationError> {
         self.generate_with_roots(seed, true)
+    }
+
+    /// Generate a planet while reducing cosmetic grass density to fit a root
+    /// allocation budget. Terrain, gameplay validation, and seed selection are
+    /// unchanged. The returned configuration records the effective density.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GenerationError`] for invalid configuration, failed gameplay
+    /// validation, or a budget outside the terrain cell count through 16 million.
+    pub fn generate_with_root_budget(
+        &self,
+        seed: WorldSeed,
+        maximum_roots: usize,
+    ) -> Result<Planet, GenerationError> {
+        self.config
+            .validate()
+            .map_err(GenerationError::InvalidConfig)?;
+        let terrain_cells =
+            6 * self.config.terrain_resolution as usize * self.config.terrain_resolution as usize;
+        if !(terrain_cells..=MAXIMUM_GRASS_ROOTS).contains(&maximum_roots) {
+            return Err(GenerationError::InvalidConfig(format!(
+                "grass root budget must be {terrain_cells}..={MAXIMUM_GRASS_ROOTS}"
+            )));
+        }
+
+        // Establish the actual surface area before reserving cosmetic roots.
+        // Zero density avoids rejecting otherwise playable large worlds merely
+        // because their requested cosmetic density exceeds the allocation cap.
+        let mut metadata_generator = self.clone();
+        metadata_generator.config.grass_roots_per_square_meter = 0.0;
+        let mut planet = metadata_generator.generate_with_roots(seed, false)?;
+        let grass_cells = planet
+            .terrain
+            .iter()
+            .filter(|cell| cell.material == SurfaceMaterial::Grass)
+            .count();
+        // Each grassy cell can round up by one root. Also retain the original
+        // validator's conservative all-terrain-cell margin at the global cap.
+        let expected_root_budget =
+            (maximum_roots - grass_cells).min(MAXIMUM_GRASS_ROOTS - terrain_cells);
+        let maximum_density = (expected_root_budget as f64 / planet.validation.mowable_area
+            * (1.0 - 8.0 * f64::from(f32::EPSILON))) as f32;
+        planet.config = self.config.clone();
+        planet.config.grass_roots_per_square_meter = self
+            .config
+            .grass_roots_per_square_meter
+            .min(maximum_density);
+        if planet.config.grass_roots_per_square_meter > 0.0 {
+            (planet.grass_roots, planet.grass_patches) = generate_grass_roots(
+                &planet.config,
+                planet.generator_version,
+                seed,
+                planet.generation_attempt,
+                &planet.terrain,
+                &planet.mountains,
+            );
+        }
+        planet.deterministic_hash = hash_planet(
+            planet.generator_version,
+            seed,
+            planet.generation_attempt,
+            &planet.terrain,
+            &planet.mountains,
+            planet.spawn,
+            &planet.grass_roots,
+        );
+        Ok(planet)
     }
 
     /// Generate all gameplay data while optionally skipping the large cosmetic
@@ -612,7 +681,7 @@ fn validate_planet(
     // Check the actual generated area before allocating the immutable GPU buffer.
     let root_bound =
         mowable_area * f64::from(config.grass_roots_per_square_meter) + terrain.len() as f64;
-    if root_bound > 16_000_000.0 {
+    if root_bound > MAXIMUM_GRASS_ROOTS as f64 {
         errors.push("grass density exceeds the 16 million root allocation budget".into());
     }
 
@@ -1154,6 +1223,69 @@ mod tests {
         assert!(matches!(
             result,
             Err(GenerationError::AttemptsExhausted { .. })
+        ));
+    }
+
+    #[test]
+    fn root_budget_keeps_an_ordinary_planet_identical() {
+        let config = GeneratorConfig {
+            grass_roots_per_square_meter: 3.25,
+            ..GeneratorConfig::test_quality()
+        };
+        let generator = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config);
+        let seed = WorldSeed(42);
+        let ordinary = generator.generate(seed).unwrap();
+        let budgeted = generator.generate_with_root_budget(seed, 100_000).unwrap();
+        assert_eq!(ordinary.config, budgeted.config);
+        assert_eq!(ordinary.generation_attempt, budgeted.generation_attempt);
+        assert_eq!(ordinary.terrain, budgeted.terrain);
+        assert_eq!(ordinary.mountains, budgeted.mountains);
+        assert_eq!(ordinary.spawn, budgeted.spawn);
+        assert_eq!(ordinary.validation, budgeted.validation);
+        assert_eq!(ordinary.grass_roots, budgeted.grass_roots);
+        assert_eq!(ordinary.grass_patches, budgeted.grass_patches);
+        assert_eq!(ordinary.deterministic_hash, budgeted.deterministic_hash);
+    }
+
+    #[test]
+    fn root_budget_bounds_large_world_allocations_and_records_reproducible_density() {
+        let config = GeneratorConfig {
+            base_radius: 128.0,
+            grass_roots_per_square_meter: 160.0,
+            ideal_time_max_seconds: 100_000.0,
+            ..GeneratorConfig::test_quality()
+        };
+        let generator = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config);
+        for (seed, budget) in [(WorldSeed(42), 20_000), (WorldSeed(2026), 3_456)] {
+            let planet = generator.generate_with_root_budget(seed, budget).unwrap();
+            assert!(planet.validation.mowable_area * 160.0 > MAXIMUM_GRASS_ROOTS as f64);
+            assert!(planet.config.grass_roots_per_square_meter < 160.0);
+            assert!(!planet.grass_roots.is_empty());
+            assert!(planet.grass_roots.len() <= budget);
+            assert!(planet.grass_roots.capacity() <= budget);
+            let reproduced = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, planet.config.clone())
+                .generate(seed)
+                .unwrap();
+            assert_eq!(planet.generation_attempt, reproduced.generation_attempt);
+            assert_eq!(planet.deterministic_hash, reproduced.deterministic_hash);
+            assert_eq!(planet.validation, reproduced.validation);
+        }
+    }
+
+    #[test]
+    fn root_budget_rejects_unsupported_limits_and_invalid_original_configuration() {
+        let generator = generator();
+        for budget in [0, 3_455, MAXIMUM_GRASS_ROOTS + 1, usize::MAX] {
+            assert!(matches!(
+                generator.generate_with_root_budget(WorldSeed(42), budget),
+                Err(GenerationError::InvalidConfig(_))
+            ));
+        }
+        let mut invalid = generator;
+        invalid.config.grass_roots_per_square_meter = f32::NAN;
+        assert!(matches!(
+            invalid.generate_with_root_budget(WorldSeed(42), 20_000),
+            Err(GenerationError::InvalidConfig(_))
         ));
     }
 

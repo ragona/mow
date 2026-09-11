@@ -1,4 +1,4 @@
-# Lawn Orbit
+# M.O.W. — Mower Of Worlds
 
 ## Game Design and Implementation Specification
 
@@ -386,7 +386,7 @@ Free Mow retains the unscored solo sandbox. Coverage makes progress legible, but
 
 ### 10.3 World editor and replay
 
-The world editor is the primary pre-play screen. It exposes friendly, bounded controls for planet radius, approximate rock coverage, peak clusters, peak height, rolling-terrain amplitude, and seed. Meadow, Classic, and Craggy presets provide useful starting points. Rockiness ranges from 0% to 24%; at 0% both outcroppings and rock material disappear, peak controls are disabled, and rolling terrain remains adjustable. Meadow starts at 0% rockiness. Edited planets still pass the same connectivity, clearance, and deterministic-generation validation as default planets.
+The world editor is the primary pre-play screen. It exposes friendly, bounded controls for planet radius, approximate rock coverage, peak clusters, peak height, rolling-terrain amplitude, and seed. Meadow, Classic, and Craggy presets provide useful starting points. Sliders cover radius 5–20 m, rockiness 0–40%, peak clusters 0–10, peak height 0–6 m, and rolling terrain 0–1.5 m. Peak height stays at or below the planet radius, and rolling terrain stays at or below 90% of the radius. Number entry accepts wider experimental values. At 0% rockiness both outcroppings and rock material disappear, peak controls are disabled, and rolling terrain remains adjustable. Meadow starts at 0% rockiness. Edited planets still pass the same connectivity, clearance, and deterministic-generation validation as default planets.
 
 The planet updates live beside the controls as settings or the seed change. Generation and gameplay preparation run in one background worker, with rapid edits coalesced into the latest requested world. The current preview stays visible while the next is prepared. Previewing does not advance simulation, tutorial progress, or seed history. Start Race or Start Mowing becomes available once the preview matches the controls and enters that same prepared planet without regenerating its shape. The selected mode determines whether the rival and ownership state are initialized.
 
@@ -447,7 +447,8 @@ a remapping-aware keycap. Free Mow also shows a leaf-marked coverage dial and, a
 Speed is secondary; collision or bump counts appear with paused statistics.
 Boost readiness and coverage milestones receive brief, restrained accents.
 Direction markers use the actual camera's screen basis. Display headings use
-bundled DM Serif Display; body text and settings retain a clear proportional face.
+bundled Barlow Condensed Bold, with Black for the M.O.W. wordmark; body text and
+settings retain a clear proportional face.
 
 ### 12.2 World editor
 

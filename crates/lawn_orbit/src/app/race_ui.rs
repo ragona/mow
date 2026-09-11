@@ -28,13 +28,13 @@ impl LawnOrbitApp {
                 .show(context, |ui| {
                     ui.set_width(270.0);
                     ui.label(
-                        RichText::new("TURF RACE · YOU WIN")
+                        RichText::new("M.O.W. · TURF RACE · YOU WIN")
                             .size(11.0)
                             .color(GARDEN_MUTED),
                     );
-                    ui.label(RichText::new("The lawn is yours!").font(display(28.0)));
+                    ui.label(RichText::new("World domination.").font(display(28.0)));
                     ui.label(
-                        RichText::new("Your rival is out. Enjoy a little victory lap.")
+                        RichText::new("Your rival is out. The world is your lawn.")
                             .size(13.0)
                             .color(GARDEN_MUTED),
                     );
@@ -217,18 +217,18 @@ impl LawnOrbitApp {
         let Some(outcome) = race.outcome else { return };
         let (eyebrow, title, description) = match outcome {
             RaceOutcome::PlayerWon => (
-                "TURF RACE · YOU WIN",
-                "The lawn is yours!",
+                "M.O.W. · TURF RACE · YOU WIN",
+                "World domination.",
                 "You claimed the bigger half of this little world.",
             ),
             RaceOutcome::RivalWon => (
-                "TURF RACE · RIVAL WINS",
-                "A rematch, perhaps?",
+                "M.O.W. · TURF RACE · RIVAL WINS",
+                "Outmown.",
                 "Your rival claimed the bigger half this time.",
             ),
             RaceOutcome::Draw => (
-                "TURF RACE · A DRAW",
-                "An evenly shared lawn.",
+                "M.O.W. · TURF RACE · A DRAW",
+                "A world divided.",
                 "Every patch is claimed. This one is a draw.",
             ),
         };

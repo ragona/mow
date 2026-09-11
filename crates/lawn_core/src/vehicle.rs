@@ -151,10 +151,14 @@ impl HoverVehicle {
         } else {
             self.state.recovery_hold = 0.0;
         }
-        let radial_distance = self.state.transform.position.length();
-        let invalid_distance = !(planet.config.base_radius * 0.7
-            ..=planet.config.base_radius + 14.0)
-            .contains(&radial_distance);
+        let position = self.state.transform.position;
+        let radial_up = position.normalize_or(Vec3::Y);
+        let terrain = planet.terrain_cell(radial_up);
+        // Keep the original escape envelope, extending it around local terrain
+        // so experimental peaks and valleys are not mistaken for a lost mower.
+        let minimum_radius = planet.config.base_radius.min(terrain.radius) * 0.7;
+        let maximum_radius = planet.config.base_radius.max(terrain.radius) + 14.0;
+        let invalid_distance = !(minimum_radius..=maximum_radius).contains(&position.length());
         let overturned = self
             .state
             .transform
@@ -175,9 +179,6 @@ impl HoverVehicle {
             };
         }
 
-        let position = self.state.transform.position;
-        let radial_up = position.normalize_or_zero();
-        let terrain = planet.terrain_cell(radial_up);
         let up = self
             .state
             .transform
@@ -653,6 +654,104 @@ mod tests {
         );
         assert_eq!(vehicle.state.recoveries, 1);
         assert!(vehicle.state.grounded);
+    }
+
+    #[test]
+    fn tall_terrain_does_not_repeat_recovery_but_escaped_mowers_still_recover() {
+        let config = GeneratorConfig {
+            rolling_amplitude: 0.0,
+            mountain_count_min: 1,
+            mountain_count_max: 1,
+            mountain_height_min: 15.0,
+            mountain_height_max: 15.0,
+            mowable_ratio_min: 1.0,
+            mowable_ratio_max: 1.0,
+            spawn_max_slope_degrees: 45.0,
+            ideal_time_min_seconds: 0.0,
+            ideal_time_max_seconds: 10_000.0,
+            ..GeneratorConfig::test_quality()
+        };
+        let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config)
+            .generate_with_roots(WorldSeed(7), false)
+            .unwrap();
+        let tuning = VehicleTuning::default();
+        let spawn = planet.nearest_safe_point(planet.mountains[0].center);
+        assert!(spawn.position.length() > planet.config.base_radius + 14.0);
+        let mut vehicle = HoverVehicle::from_spawn(&planet, spawn, &tuning);
+        for _ in 0..120 {
+            let result = tick(
+                &mut vehicle,
+                &planet,
+                &tuning,
+                InputSnapshot::default(),
+                crate::FIXED_DT,
+            );
+            assert!(!result.recovered, "a valid peak must not cause recovery");
+        }
+        assert_eq!(vehicle.state.recoveries, 0);
+        assert!(vehicle.state.transform.position.is_finite());
+
+        for radius in [
+            1.0,
+            planet.surface_radius(spawn.position.normalize()) + 20.0,
+        ] {
+            vehicle.state.transform.position = spawn.position.normalize() * radius;
+            let result = tick(
+                &mut vehicle,
+                &planet,
+                &tuning,
+                InputSnapshot::default(),
+                crate::FIXED_DT,
+            );
+            assert!(result.recovered, "an escaped mower must recover");
+            assert!(vehicle.state.grounded);
+            assert!(vehicle.state.transform.position.length() > planet.config.base_radius + 14.0);
+            let result = tick(
+                &mut vehicle,
+                &planet,
+                &tuning,
+                InputSnapshot::default(),
+                crate::FIXED_DT,
+            );
+            assert!(!result.recovered, "the recovered peak must remain playable");
+        }
+        assert_eq!(vehicle.state.recoveries, 2);
+    }
+
+    #[test]
+    fn low_rolling_terrain_is_not_mistaken_for_falling_through_the_planet() {
+        let config = GeneratorConfig {
+            rolling_amplitude: 14.0,
+            mountain_count_min: 0,
+            mountain_count_max: 0,
+            mowable_ratio_min: 1.0,
+            mowable_ratio_max: 1.0,
+            spawn_max_slope_degrees: 45.0,
+            ideal_time_min_seconds: 0.0,
+            ideal_time_max_seconds: 10_000.0,
+            ..GeneratorConfig::test_quality()
+        };
+        let planet = PlanetGenerator::new(CURRENT_GENERATOR_VERSION, config)
+            .generate_with_roots(WorldSeed(42), false)
+            .unwrap();
+        let tuning = VehicleTuning::default();
+        assert!(planet.spawn.position.length() < planet.config.base_radius * 0.7);
+        let mut vehicle = HoverVehicle::new(&planet, &tuning);
+        for _ in 0..120 {
+            assert!(
+                !tick(
+                    &mut vehicle,
+                    &planet,
+                    &tuning,
+                    InputSnapshot::default(),
+                    crate::FIXED_DT,
+                )
+                .recovered,
+                "a valid low valley must not cause recovery"
+            );
+        }
+        assert_eq!(vehicle.state.recoveries, 0);
+        assert!(vehicle.state.transform.position.is_finite());
     }
 
     #[test]

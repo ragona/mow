@@ -157,6 +157,10 @@ fn build(root: &Path) -> Result<PathBuf> {
         return Err("wasm-bindgen failed; see its diagnostics above".into());
     }
     copy_assets(&root.join("web"), &output)?;
+    copy_assets(
+        &root.join("crates/lawn_orbit/assets/fonts"),
+        &output.join("fonts"),
+    )?;
     if !output.join("index.html").is_file() {
         return Err("web/index.html is missing; browser host assets are incomplete".into());
     }

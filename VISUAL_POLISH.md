@@ -60,8 +60,8 @@ preparation cost and memory figures. Final log:
   carry terrain shading without another vertex attribute or triangle increase.
 - `terrain.wgsl`: directional ambient fill, restrained broad mineral planes,
   selective copper/fracture accents, and soft environment response on enamel.
-- `app/garden_ui.rs` and `app.rs`: bundled DM Serif Display under the SIL Open
-  Font License, drawn icons and planet presets, coverage dial, segmented boost,
+- `app/garden_ui.rs` and `app.rs`: bundled Barlow Condensed Bold and Black under
+  the SIL Open Font License, drawn icons and planet presets, coverage dial, segmented boost,
   quieter speed telemetry, paused statistics, and coordinated menu/results cards.
   Settings wrap long bindings and keep Done outside the scrolling content.
 - `SceneTransition` and inspection controls: 0.85–1.8× editor zoom, 0.9-second

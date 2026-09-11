@@ -8,7 +8,7 @@ use lawn_core::input::{Action, Binding, ControlMap};
 use super::{GARDEN_CORAL, GARDEN_CREAM, GARDEN_MUTED, GARDEN_PINE, GARDEN_SAGE};
 
 pub(super) fn display(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("garden-display".into()))
+    FontId::new(size, FontFamily::Name("mow-display".into()))
 }
 
 #[derive(Clone, Copy)]

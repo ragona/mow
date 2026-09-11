@@ -1,6 +1,6 @@
 # Browser target
 
-Lawn Orbit runs locally in the browser as Rust WebAssembly plus core WebGPU.
+M.O.W. — Mower Of Worlds runs locally in the browser as Rust WebAssembly plus core WebGPU.
 The native and browser targets share gameplay, Rapier physics, the world editor,
 egui interface, WGSL shaders, grass density, shadows, HDR, bloom, and MSAA controls.
 This target does not use server rendering or a separate game implementation.
